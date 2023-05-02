@@ -1,0 +1,22 @@
+[package]
+name = "lsh"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "lsh"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lsh"
+path = "src/main.rs"
+
+[dependencies]
+ffht = {path = "../ffht"}
+ndarray = "0.15.6"
+rand = "0.8.5"
+rand_distr = "0.4.3"
+
+[dev-dependencies]
+hdf5 = "0.8.1"
+ureq = "2.6.2"
