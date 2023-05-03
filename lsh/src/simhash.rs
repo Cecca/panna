@@ -51,6 +51,12 @@ impl<S: Data<Elem = f32>> LSHFunction for SimHash<ArrayBase<S, Ix1>> {
         }
         h
     }
+
+    fn collision_probability(&self, similarity: f32) -> f32 {
+        let cos = 2.0 * similarity - 1.0;
+        debug_assert!(-1.0 <= cos && cos <= 1.0);
+        (1.0 - cos.acos() / std::f32::consts::PI).powi(self.directions.shape()[0] as i32)
+    }
 }
 
 pub struct SimHashBuilder<Input, R: Rng> {
@@ -86,10 +92,18 @@ mod test {
     use super::*;
 
     #[test]
+    fn simhash_collision_probability() {
+        let rng = StdRng::seed_from_u64(1234);
+        let dataset = crate::test::load_glove25();
+        let builder = SimHashBuilder::<ArrayView1<f32>, _>::new(25, 8, rng);
+        crate::test::test_collision_probability(&dataset, builder, 1000000, 0.001);
+    }
+
+    #[test]
     fn simhash_collision_ranking() {
         let rng = StdRng::seed_from_u64(1234);
         let dataset = crate::test::load_glove25();
-        let builder = SimHashBuilder::<ArrayView1<f32>, _>::new(25, 1, rng);
-        crate::test::test_collision_prob_ranking_cosine(&dataset, builder, 10000000, 0.001);
+        let builder = SimHashBuilder::<ArrayView1<f32>, _>::new(25, 8, rng);
+        crate::test::test_collision_prob_ranking_cosine(&dataset, builder, 1000000, 0.001);
     }
 }

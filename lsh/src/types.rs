@@ -21,6 +21,8 @@ pub trait LSHFunction {
     fn allocate_scratch(&self) -> Self::Scratch;
 
     fn hash(&self, v: &Self::Input, scratch: &mut Self::Scratch) -> Self::Output;
+
+    fn collision_probability(&self, similarity: f32) -> f32;
 }
 
 pub trait LSHFunctionBuilder {
