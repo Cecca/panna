@@ -1,0 +1,68 @@
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use lsh::simhash::*;
+use lsh::types::*;
+use ndarray::prelude::*;
+use ndarray_rand::rand::prelude::*;
+
+pub fn load_glove25() -> Array2<f32> {
+    use std::io::BufWriter;
+    use std::path::PathBuf;
+
+    let local = PathBuf::from(".glove-25-angular.hdf5");
+    if !local.is_file() {
+        let mut remote = ureq::get("http://ann-benchmarks.com/glove-25-angular.hdf5")
+            .call()
+            .unwrap()
+            .into_reader();
+        let mut local_file = BufWriter::new(std::fs::File::create(&local).unwrap());
+        std::io::copy(&mut remote, &mut local_file).unwrap();
+    }
+    let f = hdf5::File::open(&local).unwrap();
+    let mut data = f.dataset("/test").unwrap().read_2d::<f32>().unwrap();
+
+    for mut row in data.rows_mut() {
+        row /= norm2(&row);
+    }
+    data
+}
+
+pub fn bench_simhash(c: &mut Criterion) {
+    let reps = 1000;
+    let data = load_glove25();
+    let rng = StdRng::seed_from_u64(1234);
+    let hashers =
+        SimHashBuilder::<ArrayView1<f32>, _>::new(data.shape()[1], 8, rng).build_vec(reps);
+    let point = data.row(0);
+    let mut scratch = hashers[0].allocate_scratch();
+
+    let mut group = c.benchmark_group("one hash, one point");
+    group.bench_function("simhash", |b| {
+        b.iter(|| black_box(hashers[0].hash(&point, &mut scratch)))
+    });
+    drop(group);
+
+    let mut group = c.benchmark_group("all hashes, one point");
+    group.throughput(criterion::Throughput::Elements(reps as u64));
+    group.bench_function("simhash", |b| {
+        b.iter(|| {
+            for h in hashers.iter() {
+                black_box(h.hash(&point, &mut scratch));
+            }
+        })
+    });
+    drop(group);
+    
+    let mut group = c.benchmark_group("one hash, all points");
+    group.throughput(criterion::Throughput::Elements(data.nrows() as u64));
+    group.bench_function("simhash", |b| {
+        b.iter(|| {
+            for row in data.rows() {
+                black_box(hashers[0].hash(&row, &mut scratch));
+            }
+        })
+    });
+    drop(group);
+}
+
+criterion_group!(benches, bench_simhash);
+criterion_main!(benches);

@@ -1,14 +1,17 @@
 use ndarray::prelude::*;
 use ndarray::Data;
 
+pub fn norm2<S: Data<Elem = f32>>(v: &ArrayBase<S, Ix1>) -> f32 {
+    v.iter().map(|x| x * x).sum::<f32>().sqrt()
+}
+
 pub fn cosine_similarity<S1, S2>(x: ArrayBase<S1, Ix1>, y: ArrayBase<S2, Ix1>) -> f32
 where
-    S1: Data<Elem=f32>,
-    S2: Data<Elem=f32>,
+    S1: Data<Elem = f32>,
+    S2: Data<Elem = f32>,
 {
     (x.dot(&y) + 1.0) / 2.0
 }
-
 
 pub trait LSHFunction {
     type Input;
