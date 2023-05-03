@@ -1,28 +1,49 @@
-use crate::types::*;
-use rand::prelude::*;
+use std::marker::PhantomData;
 
-pub struct SimHash {
+use ndarray::linalg::general_mat_vec_mul;
+use ndarray::prelude::*;
+use ndarray::Data;
+use ndarray_rand::rand::prelude::*;
+use ndarray_rand::RandomExt;
+
+use crate::types::LSHFunction;
+use crate::types::LSHFunctionBuilder;
+
+pub struct SimHash<Input> {
     /// The dimensionality of the input vectors
     dimensions: usize,
     /// the directions onto which the vectors are projected
-    directions: Vec<f32>,
+    directions: Array2<f32>,
+    _marker: PhantomData<Input>,
 }
 
-impl SimHash {
+impl<Input> SimHash<Input> {
     pub fn new<R: Rng>(dimensions: usize, num_functions: usize, rng: &mut R) -> Self {
-        let distr = rand_distr::Normal::new(0.0, 1.0).unwrap();
-        let directions: Vec<f32> = (0..dimensions * num_functions)
-            .map(|_| distr.sample(rng))
-            .collect();
+        let distr = ndarray_rand::rand_distr::StandardNormal;
+        let directions = Array2::random_using((num_functions, dimensions), distr, rng);
 
-        Self { dimensions, directions }
+        Self {
+            dimensions,
+            directions,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<S: Data<Elem = f32>> LSHFunction for SimHash<ArrayBase<S, Ix1>> {
+    type Input = ArrayBase<S, Ix1>;
+    type Output = usize;
+    type Scratch = Array1<f32>;
+
+    fn allocate_scratch(&self) -> Self::Scratch {
+        Array1::zeros(self.directions.shape()[0])
     }
 
-    pub fn hash(&self, v: &[f32]) -> usize {
+    fn hash(&self, v: &Self::Input, scratch: &mut Self::Scratch) -> Self::Output {
         assert_eq!(v.len(), self.dimensions);
         let mut h = 0;
-        for direction in self.directions.chunks(self.dimensions) {
-            let dotp = v.iter().zip(direction).map(|(x, y)| x*y).sum::<f32>();
+        general_mat_vec_mul(1.0, &self.directions, v, 0.0, scratch);
+        for &dotp in scratch.iter() {
             h <<= 1;
             if dotp > 0.0 {
                 h |= 1;
@@ -32,90 +53,43 @@ impl SimHash {
     }
 }
 
+pub struct SimHashBuilder<Input, R: Rng> {
+    dimensions: usize,
+    num_functions: usize,
+    rng: R,
+    _marker: PhantomData<Input>,
+}
+
+impl<Input, R: Rng> SimHashBuilder<Input, R> {
+    pub fn new(dimensions: usize, num_functions: usize, rng: R) -> Self {
+        assert!(num_functions > 0);
+        assert!(dimensions > 0);
+        Self {
+            dimensions,
+            num_functions,
+            rng,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<S: Data<Elem = f32>, R: Rng> LSHFunctionBuilder for SimHashBuilder<ArrayBase<S, Ix1>, R> {
+    type LSH = SimHash<ArrayBase<S, Ix1>>;
+
+    fn build(&mut self) -> Self::LSH {
+        SimHash::new(self.dimensions, self.num_functions, &mut self.rng)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
-    use ndarray::prelude::*;
-    use ndarray::Data;
-    use std::io::BufWriter;
-    use std::path::PathBuf;
-
-    fn cosine_similarity(x: ArrayView1<f32>, y: ArrayView1<f32>) -> f32 {
-        (x.dot(&y) + 1.0) / 2.0
-    }
-
-    fn norm2<S: Data<Elem = f32>>(v: &ArrayBase<S, Ix1>) -> f32 {
-        v.iter().map(|x| x * x).sum::<f32>().sqrt()
-    }
-
-    fn load_glove25() -> Array2<f32> {
-        let local = PathBuf::from(".glove-25-angular.hdf5");
-        if !local.is_file() {
-            let mut remote = ureq::get("http://ann-benchmarks.com/glove-25-angular.hdf5")
-                .call()
-                .unwrap()
-                .into_reader();
-            let mut local_file = BufWriter::new(std::fs::File::create(&local).unwrap());
-            std::io::copy(&mut remote, &mut local_file).unwrap();
-        }
-        let f = hdf5::File::open(&local).unwrap();
-        let mut data = f.dataset("/test").unwrap().read_2d::<f32>().unwrap();
-
-        for mut row in data.rows_mut() {
-            row /= norm2(&row);
-        }
-        data
-    }
 
     #[test]
-    fn simhash_basic_collision_probability() {
-        let dims = 25;
-        let mut rng = StdRng::seed_from_u64(1234);
-        let samples = 10000;
-        let hashers: Vec<SimHash> = (0..samples)
-            .map(|_| SimHash::new(dims, 8, &mut rng))
-            .collect();
-
-        let data = load_glove25();
-        let n = 100;
-        for i in 0..n {
-            let x = data.row(i);
-            let hx: Vec<usize> = hashers
-                .iter()
-                .map(|h| h.hash(x.to_slice().unwrap()))
-                .collect();
-            for j in (i + 1)..n {
-                let y = data.row(j);
-                let d_xy = cosine_similarity(x, y);
-                let hy: Vec<usize> = hashers
-                    .iter()
-                    .map(|h| h.hash(y.to_slice().unwrap()))
-                    .collect();
-                let p_xy =
-                    hx.iter().zip(&hy).filter(|(x, y)| x == y).count() as f64 / samples as f64;
-                for k in (j + 1)..n {
-                    let z = data.row(k);
-                    let d_xz = cosine_similarity(x, z);
-                    if d_xz <= d_xy / 2.0 {
-                        let hz: Vec<usize> = hashers
-                            .iter()
-                            .map(|h| h.hash(z.to_slice().unwrap()))
-                            .collect();
-                        let p_xz = hx.iter().zip(&hz).filter(|(x, z)| x == z).count() as f64
-                            / samples as f64;
-
-                        dbg!((i, j, k));
-                        dbg!(d_xy);
-                        dbg!(d_xz);
-                        dbg!(p_xy);
-                        dbg!(p_xz);
-                        assert_eq!(
-                            d_xy.partial_cmp(&d_xz).unwrap(),
-                            p_xy.partial_cmp(&p_xz).unwrap()
-                        );
-                    }
-                }
-            }
-        }
+    fn simhash_collision_ranking() {
+        let rng = StdRng::seed_from_u64(1234);
+        let dataset = crate::test::load_glove25();
+        let builder = SimHashBuilder::<ArrayView1<f32>, _>::new(25, 1, rng);
+        crate::test::test_collision_prob_ranking_cosine(&dataset, builder, 10000000, 0.001);
     }
 }

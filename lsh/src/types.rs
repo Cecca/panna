@@ -1,34 +1,35 @@
-use rand::Rng;
+use ndarray::prelude::*;
+use ndarray::Data;
 
-/// Computes the dot product
-pub trait DotProduct {
-    fn dot_product(&self, other: &Self) -> f32;
+pub fn cosine_similarity<S1, S2>(x: ArrayBase<S1, Ix1>, y: ArrayBase<S2, Ix1>) -> f32
+where
+    S1: Data<Elem=f32>,
+    S2: Data<Elem=f32>,
+{
+    (x.dot(&y) + 1.0) / 2.0
 }
 
-/// Gets a random normal vector using the given random number generator
-pub trait RandomNormal {
-    type Output;
-    fn random_normal<R: Rng>(dim: usize, rng: &mut R) -> Self::Output;
+
+pub trait LSHFunction {
+    type Input;
+    type Output: Eq + Ord;
+    type Scratch;
+
+    fn allocate_scratch(&self) -> Self::Scratch;
+
+    fn hash(&self, v: &Self::Input, scratch: &mut Self::Scratch) -> Self::Output;
 }
 
-impl<A: AsRef<[f32]>> DotProduct for A {
-    fn dot_product(&self, other: &Self) -> f32 {
-        let mut s = 0.0;
-        for (x, y) in self.as_ref().iter().zip(other.as_ref().iter()) {
-            s += x*y;
+pub trait LSHFunctionBuilder {
+    type LSH: LSHFunction;
+
+    fn build(&mut self) -> Self::LSH;
+
+    fn build_vec(&mut self, n: usize) -> Vec<Self::LSH> {
+        let mut res = Vec::with_capacity(n);
+        for _ in 0..n {
+            res.push(self.build());
         }
-        s
+        res
     }
 }
-
-impl<A: AsRef<[f32]>> RandomNormal for A {
-    type Output = Vec<f32>;
-    fn random_normal<R: Rng>(dim: usize, rng: &mut R) -> Self::Output {
-        let mut r = Vec::with_capacity(dim);
-        let distr = rand_distr::StandardNormal;
-        r.extend(rng.sample_iter::<f32, _>(distr).take(dim));
-        r
-    }
-}
-
-

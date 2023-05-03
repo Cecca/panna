@@ -1,5 +1,5 @@
 #[link(name = "fht", kind = "static")]
-extern {
+extern "C" {
     fn fht_float(buf: *mut f32, log_n: ::std::os::raw::c_int) -> ::std::os::raw::c_int;
     fn fht_double(buf: *mut f64, log_n: ::std::os::raw::c_int) -> ::std::os::raw::c_int;
 }
@@ -14,7 +14,6 @@ pub fn fht_f32(buf: &mut [f32]) {
         fht_float(ptr, log_n);
     }
 }
-
 
 pub fn fht_f64(buf: &mut [f64]) {
     assert!(buf.len().is_power_of_two());
