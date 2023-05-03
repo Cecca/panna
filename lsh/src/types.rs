@@ -38,3 +38,18 @@ pub trait LSHFunctionBuilder {
         res
     }
 }
+
+pub trait Dataset<'slf, T> {
+    fn num_points(&self) -> usize;
+    fn get(&'slf self, idx: usize) -> T;
+}
+
+impl<'slf> Dataset<'slf, ArrayView1<'slf, f32>> for Array2<f32> {
+    fn num_points(&self) -> usize {
+        self.nrows()
+    }
+
+    fn get(&'slf self, idx: usize) -> ArrayView1<'slf, f32> {
+        self.row(idx)
+    }
+}

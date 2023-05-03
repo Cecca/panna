@@ -1,6 +1,6 @@
+pub mod collision_index;
 pub mod simhash;
 pub mod types;
-pub mod collision_index;
 //pub mod cross_polytope;
 
 #[cfg(test)]
@@ -61,10 +61,14 @@ pub mod test {
                     hx.iter().zip(hy).filter(|(x, y)| x == y).count() as f32 / samples as f32;
 
                 let p_expected = hashers[0].collision_probability(d_xy);
-                assert!((p_xy - p_expected).abs() <= tolerance, "expected {}, got {}", p_expected, p_xy);
+                assert!(
+                    (p_xy - p_expected).abs() <= tolerance,
+                    "expected {}, got {}",
+                    p_expected,
+                    p_xy
+                );
             }
         }
-
     }
 
     pub fn test_collision_prob_ranking_cosine<'a, F, B>(

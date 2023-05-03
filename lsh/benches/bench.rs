@@ -51,7 +51,7 @@ pub fn bench_simhash(c: &mut Criterion) {
         })
     });
     drop(group);
-    
+
     let mut group = c.benchmark_group("one hash, all points");
     group.throughput(criterion::Throughput::Elements(data.nrows() as u64));
     group.bench_function("simhash", |b| {
