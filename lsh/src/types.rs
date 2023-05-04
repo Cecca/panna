@@ -76,3 +76,11 @@ impl<'slf> Dataset<'slf, ArrayView1<'slf, f32>> for Array2<f32> {
         self.row(idx)
     }
 }
+
+#[derive(Default, Debug)]
+pub struct QueryStats {
+    pub total: usize,
+    pub visited: usize,
+    pub false_positives: usize,
+    pub true_positives: usize,
+}

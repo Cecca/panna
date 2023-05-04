@@ -35,8 +35,15 @@ pub fn bench_simhash_range_query(c: &mut Criterion) {
     let reps = 1000;
     let (data, queries) = load_glove25();
     let rng = StdRng::seed_from_u64(1234);
+    let hash_per_sec = 20_000_000.0;
+    let num_hashes = data.num_points() * reps;
+    eprintln!(
+        "Computing {} hashes, expected {} seconds time",
+        num_hashes,
+        num_hashes as f64 / hash_per_sec
+    );
 
-    let builder = SimHashBuilder::<ArrayView1<f32>, _>::new(data.ncols(), 2, rng);
+    let builder = SimHashBuilder::<ArrayView1<f32>, _>::new(data.ncols(), 8, rng);
     let sim = CosineSimilarity::<ArrayView1<f32>>::default();
     eprintln!("Building index");
     let mut index = CollisionIndex::new(sim, &data, builder, reps);
@@ -47,12 +54,12 @@ pub fn bench_simhash_range_query(c: &mut Criterion) {
     let r = 0.8;
     let delta = 0.1;
     let mut group = c.benchmark_group("range query");
+    let mut stats = QueryStats::default();
     group.bench_function("simhash", |b| {
-        b.iter(|| black_box(index.query_range(&query, r, delta)))
+        b.iter(|| black_box(index.query_range(&query, r, delta, &mut stats)))
     });
     drop(group);
 }
-
 
 pub fn bench_simhash(c: &mut Criterion) {
     let reps = 1000;

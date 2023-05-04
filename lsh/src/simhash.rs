@@ -33,19 +33,17 @@ impl<Input> SimHash<Input> {
 impl<S: Data<Elem = f32>> LSHFunction for SimHash<ArrayBase<S, Ix1>> {
     type Input = ArrayBase<S, Ix1>;
     type Output = usize;
-    type Scratch = Array1<f32>;
+    type Scratch = ();
 
     fn allocate_scratch(&self) -> Self::Scratch {
-        Array1::zeros(self.directions.shape()[0])
     }
 
     fn hash(&self, v: &Self::Input, scratch: &mut Self::Scratch) -> Self::Output {
         assert_eq!(v.len(), self.dimensions);
         let mut h = 0;
-        general_mat_vec_mul(1.0, &self.directions, v, 0.0, scratch);
-        for &dotp in scratch.iter() {
+        for x in self.directions.rows() {
             h <<= 1;
-            if dotp > 0.0 {
+            if v.dot(&x) >= 0.0 {
                 h |= 1;
             }
         }

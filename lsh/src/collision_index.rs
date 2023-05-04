@@ -1,4 +1,7 @@
+use std::collections::HashMap;
 use std::fmt::Debug;
+use std::hash::Hash;
+use std::hint::black_box;
 
 use crate::types::*;
 
@@ -17,63 +20,53 @@ struct TableBuilder<Hash: Ord + Eq> {
     pairs: Vec<(Hash, usize)>,
 }
 
-impl<Hash: Ord + Eq + Default + Clone + Copy + Debug> TableBuilder<Hash> {
+impl<H: Ord + Eq + Default + Clone + Copy + Debug + std::hash::Hash> TableBuilder<H> {
     fn with_capacity(n: usize) -> Self {
         Self {
             pairs: Vec::with_capacity(n),
         }
     }
 
-    fn push(&mut self, hash: Hash, index: usize) {
+    fn push(&mut self, hash: H, index: usize) {
         self.pairs.push((hash, index));
     }
 
-    fn build(mut self) -> Table<Hash> {
+    fn build(mut self) -> Table<H> {
         self.pairs.sort();
 
         // now find boundaries of consecutive ranges
-        let mut ranges = Vec::new();
-        let mut hashes = Vec::new();
+        let mut map = HashMap::new();
         let mut indices = Vec::new();
         let mut start = 0;
-        hashes.push(self.pairs.first().unwrap().0);
+        let mut cur_hash = self.pairs.first().unwrap().0;
         indices.push(self.pairs.first().unwrap().1);
         for (i, (h, idx)) in self.pairs.into_iter().enumerate().skip(1) {
             indices.push(idx);
-            if h != *hashes.last().unwrap() {
-                hashes.push(h);
-                ranges.push((start, i));
+            if h != cur_hash {
+                map.insert(cur_hash, (start, i));
                 start = i;
+                cur_hash = h;
             }
         }
-        ranges.push((start, indices.len()));
-        assert_eq!(hashes.len(), ranges.len());
+        map.insert(cur_hash, (start, indices.len()));
 
-        Table {
-            hashes,
-            indices,
-            ranges,
-        }
+        Table { map, indices }
     }
 }
 
-struct Table<Hash: Ord + Eq> {
+struct Table<H: Ord + Eq + Hash> {
     /// The hash values, all distinct and sorted
-    hashes: Vec<Hash>,
+    map: HashMap<H, (usize, usize)>,
     /// The indices in the original vector
     indices: Vec<usize>,
-    /// The endpoints of hash ranges
-    ranges: Vec<(usize, usize)>,
 }
 
-impl<Hash: Ord + Eq> Table<Hash> {
-    fn collisions(&self, h: Hash) -> &[usize] {
-        match self.hashes.binary_search(&h) {
-            Ok(i) => {
-                let (s, e) = self.ranges[i];
-                &self.indices[s..e]
-            }
-            Err(_) => &[],
+impl<H: Ord + Eq + Hash> Table<H> {
+    fn collisions(&self, h: H) -> &[usize] {
+        if let Some(&(s, e)) = self.map.get(&h) {
+            &self.indices[s..e]
+        } else {
+            &[]
         }
     }
 }
@@ -83,7 +76,9 @@ pub struct CollisionIndex<
     H: LSHFunction,
     Sim: SimilarityFunction<Point = H::Input>,
     D: Dataset<'data, H::Input>,
-> {
+> where
+    H::Output: Hash,
+{
     hashers: Vec<H>,
     data: &'data D,
     tables: Vec<Table<H::Output>>,
@@ -100,7 +95,7 @@ impl<
         D: Dataset<'data, H::Input>,
     > CollisionIndex<'data, H, Sim, D>
 where
-    H::Output: Clone + Copy + Ord + Eq + Default + Debug,
+    H::Output: Clone + Copy + Ord + Eq + Default + Debug + Hash,
 {
     pub fn new<B: LSHFunctionBuilder<LSH = H>>(
         similarity_function: Sim,
@@ -138,14 +133,21 @@ where
         }
     }
 
-    pub fn query_range(&mut self, q: &H::Input, r: f32, delta: f32) -> Vec<usize> {
+    pub fn query_range(
+        &mut self,
+        q: &H::Input,
+        r: f32,
+        delta: f32,
+        stats: &mut QueryStats,
+    ) -> Vec<usize> {
         self.collision_table.fill(0);
+        stats.total = self.data.num_points();
 
         for (hasher, table) in self.hashers.iter().zip(&self.tables) {
             let h = hasher.hash(q, &mut self.scratch);
             for idx in table.collisions(h) {
                 debug_assert_eq!(hasher.hash(&self.data.get(*idx), &mut self.scratch), h);
-                self.collision_table[*idx] += 1;
+                self.collision_table[*idx] += 1
             }
         }
 
@@ -154,20 +156,18 @@ where
         let p_r = self.hashers[0].collision_probability(r);
         let p_bound = p_r - (1.0 / (2.0 * samples as f32) * (2.0 / delta).ln()).sqrt();
         let threshold = (p_bound * samples as f32).ceil() as usize;
-        let mut cnt_visited = 0;
-        let mut cnt_fp = 0;
         for (idx, cnt) in self.collision_table.iter().enumerate() {
             // TODO incorporate confidence interval
             if *cnt >= threshold {
-                cnt_visited += 1;
+                stats.visited += 1;
                 if Sim::similarity(q, &self.data.get(idx)) >= r {
+                    stats.true_positives += 1;
                     res.push(idx);
                 } else {
-                    cnt_fp += 1;
+                    stats.false_positives += 1;
                 }
             }
         }
-        // eprintln!("visited {}, false positives {}", cnt_visited, cnt_fp);
         res
     }
 }
@@ -182,16 +182,18 @@ mod test {
 
     #[test]
     fn test_index() {
-        let repetitions = 1000;
+        let repetitions = 10000;
         let data = crate::test::load_glove25();
         let rng = ndarray_rand::rand::thread_rng();
-        let builder = SimHashBuilder::<ArrayView1<f32>, _>::new(data.ncols(), 2, rng);
+        let builder = SimHashBuilder::<ArrayView1<f32>, _>::new(data.ncols(), 8, rng);
         let sim = CosineSimilarity::<ArrayView1<f32>>::default();
         let mut index = CollisionIndex::new(sim, &data, builder, repetitions);
         let q = data.row(0);
         let range = 0.8;
         let delta = 0.1;
-        let ans = index.query_range(&q, 0.8, 0.1);
+        let mut stats = QueryStats::default();
+        let ans = index.query_range(&q, 0.8, 0.1, &mut stats);
+        dbg!(stats);
         let sim = CosineSimilarity::<ArrayView1<f32>>::default();
         let bf = brute_force_range_query(&data, &q, range, sim);
         let recall = compute_recall(bf, ans);
