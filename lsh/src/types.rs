@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use ndarray::prelude::*;
 use ndarray::Data;
 
@@ -11,6 +13,27 @@ where
     S2: Data<Elem = f32>,
 {
     (x.dot(&y) + 1.0) / 2.0
+}
+
+pub trait SimilarityFunction {
+    type Point;
+    fn similarity(x: &Self::Point, y: &Self::Point) -> f32;
+}
+pub struct CosineSimilarity<T> {
+    _marker: PhantomData<T>,
+}
+impl<T> Default for CosineSimilarity<T> {
+    fn default() -> Self {
+        Self {
+            _marker: PhantomData,
+        }
+    }
+}
+impl<'a> SimilarityFunction for CosineSimilarity<ArrayView1<'a, f32>> {
+    type Point = ArrayView1<'a, f32>;
+    fn similarity(x: &ArrayView1<f32>, y: &ArrayView1<f32>) -> f32 {
+        (x.dot(y) + 1.0) / 2.0
+    }
 }
 
 pub trait LSHFunction {

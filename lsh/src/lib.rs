@@ -1,3 +1,4 @@
+pub mod brute_force;
 pub mod collision_index;
 pub mod simhash;
 pub mod types;
@@ -110,5 +111,23 @@ pub mod test {
             println!("{:?} {:?}", pairs[i - 1], pairs[i]);
             assert!(pairs[i - 1].1 >= pairs[i].1 - tolerance);
         }
+    }
+
+    pub fn compute_recall<I1, I2>(ground: I1, answer: I2) -> f32
+    where
+        I1: IntoIterator<Item = usize>,
+        I2: IntoIterator<Item = usize>,
+    {
+        use std::collections::HashSet;
+        let ans: HashSet<usize> = answer.into_iter().collect();
+        let mut present = 0;
+        let mut total = 0;
+        for x in ground.into_iter() {
+            total += 1;
+            if ans.contains(&x) {
+                present += 1;
+            }
+        }
+        present as f32 / total as f32
     }
 }
