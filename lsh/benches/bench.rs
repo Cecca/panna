@@ -1,10 +1,11 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use lsh::collision_index::CollisionIndex;
 use lsh::simhash::*;
 use lsh::types::*;
 use ndarray::prelude::*;
 use ndarray_rand::rand::prelude::*;
 
-pub fn load_glove25() -> Array2<f32> {
+pub fn load_glove25() -> (Array2<f32>, Array2<f32>) {
     use std::io::BufWriter;
     use std::path::PathBuf;
 
@@ -18,17 +19,44 @@ pub fn load_glove25() -> Array2<f32> {
         std::io::copy(&mut remote, &mut local_file).unwrap();
     }
     let f = hdf5::File::open(&local).unwrap();
-    let mut data = f.dataset("/test").unwrap().read_2d::<f32>().unwrap();
+    let mut data = f.dataset("/train").unwrap().read_2d::<f32>().unwrap();
+    let mut queries = f.dataset("/train").unwrap().read_2d::<f32>().unwrap();
 
     for mut row in data.rows_mut() {
         row /= norm2(&row);
     }
-    data
+    for mut row in queries.rows_mut() {
+        row /= norm2(&row);
+    }
+    (data, queries)
 }
+
+pub fn bench_simhash_range_query(c: &mut Criterion) {
+    let reps = 1000;
+    let (data, queries) = load_glove25();
+    let rng = StdRng::seed_from_u64(1234);
+
+    let builder = SimHashBuilder::<ArrayView1<f32>, _>::new(data.ncols(), 2, rng);
+    let sim = CosineSimilarity::<ArrayView1<f32>>::default();
+    eprintln!("Building index");
+    let mut index = CollisionIndex::new(sim, &data, builder, reps);
+    eprintln!("Index built");
+
+    let query = queries.row(0);
+
+    let r = 0.8;
+    let delta = 0.1;
+    let mut group = c.benchmark_group("range query");
+    group.bench_function("simhash", |b| {
+        b.iter(|| black_box(index.query_range(&query, r, delta)))
+    });
+    drop(group);
+}
+
 
 pub fn bench_simhash(c: &mut Criterion) {
     let reps = 1000;
-    let data = load_glove25();
+    let (data, _queries) = load_glove25();
     let rng = StdRng::seed_from_u64(1234);
     let hashers =
         SimHashBuilder::<ArrayView1<f32>, _>::new(data.shape()[1], 8, rng).build_vec(reps);
@@ -64,5 +92,5 @@ pub fn bench_simhash(c: &mut Criterion) {
     drop(group);
 }
 
-criterion_group!(benches, bench_simhash);
+criterion_group!(benches, bench_simhash, bench_simhash_range_query);
 criterion_main!(benches);

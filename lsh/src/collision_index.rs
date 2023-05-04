@@ -138,7 +138,7 @@ where
         }
     }
 
-    fn query_range(&mut self, q: &H::Input, r: f32, delta: f32) -> Vec<usize> {
+    pub fn query_range(&mut self, q: &H::Input, r: f32, delta: f32) -> Vec<usize> {
         self.collision_table.fill(0);
 
         for (hasher, table) in self.hashers.iter().zip(&self.tables) {
@@ -167,7 +167,7 @@ where
                 }
             }
         }
-        eprintln!("visited {}, false positives {}", cnt_visited, cnt_fp);
+        // eprintln!("visited {}, false positives {}", cnt_visited, cnt_fp);
         res
     }
 }
