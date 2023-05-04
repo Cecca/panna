@@ -1,4 +1,5 @@
 use std::marker::PhantomData;
+use std::path::Path;
 
 use ndarray::prelude::*;
 use ndarray::Data;
@@ -12,7 +13,7 @@ where
     S1: Data<Elem = f32>,
     S2: Data<Elem = f32>,
 {
-    (x.dot(&y) + 1.0) / 2.0
+    x.dot(&y)
 }
 
 pub trait SimilarityFunction {
@@ -32,11 +33,11 @@ impl<T> Default for CosineSimilarity<T> {
 impl<'a> SimilarityFunction for CosineSimilarity<ArrayView1<'a, f32>> {
     type Point = ArrayView1<'a, f32>;
     fn similarity(x: &ArrayView1<f32>, y: &ArrayView1<f32>) -> f32 {
-        (x.dot(y) + 1.0) / 2.0
+        x.dot(y)
     }
 }
 
-pub trait LSHFunction {
+pub trait LSHFunction: Send + Sync {
     type Input;
     type Output: Eq + Ord;
     type Scratch;
@@ -63,11 +64,46 @@ pub trait LSHFunctionBuilder {
 }
 
 pub trait Dataset<'slf, T> {
+    fn num_dimensions(&self) -> usize;
     fn num_points(&self) -> usize;
     fn get(&'slf self, idx: usize) -> T;
 }
 
+pub struct UnitNormDataset {
+    points: Array2<f32>,
+}
+
+impl<'slf> Dataset<'slf, ArrayView1<'slf, f32>> for UnitNormDataset {
+    fn num_dimensions(&self) -> usize {
+        self.points.ncols()
+    }
+
+    fn num_points(&self) -> usize {
+        self.points.nrows()
+    }
+
+    fn get(&'slf self, idx: usize) -> ArrayView1<'slf, f32> {
+        self.points.row(idx)
+    }
+}
+
+impl UnitNormDataset {
+    fn from_hdf5<P: AsRef<Path>>(path: P, name: &str) -> Self {
+        let f = hdf5::File::open(path.as_ref()).unwrap();
+        let mut points = f.dataset(name).unwrap().read_2d::<f32>().unwrap();
+
+        for mut row in points.rows_mut() {
+            row /= norm2(&row);
+        }
+        Self { points }
+    }
+}
+
 impl<'slf> Dataset<'slf, ArrayView1<'slf, f32>> for Array2<f32> {
+    fn num_dimensions(&self) -> usize {
+        self.ncols()
+    }
+
     fn num_points(&self) -> usize {
         self.nrows()
     }
@@ -83,4 +119,5 @@ pub struct QueryStats {
     pub visited: usize,
     pub false_positives: usize,
     pub true_positives: usize,
+    pub at_least_one_collision: usize,
 }

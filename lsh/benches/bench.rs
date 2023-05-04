@@ -22,8 +22,8 @@ pub fn load_glove25() -> (Array2<f32>, Array2<f32>, Array2<usize>) {
     }
     let f = hdf5::File::open(&local).unwrap();
     let mut data = f.dataset("/train").unwrap().read_2d::<f32>().unwrap();
-    let mut queries = f.dataset("/train").unwrap().read_2d::<f32>().unwrap();
-    let mut ground = f.dataset("/neighbors").unwrap().read_2d::<usize>().unwrap();
+    let mut queries = f.dataset("/test").unwrap().read_2d::<f32>().unwrap();
+    let ground = f.dataset("/neighbors").unwrap().read_2d::<usize>().unwrap();
 
     for mut row in data.rows_mut() {
         row /= norm2(&row);
@@ -39,19 +39,23 @@ pub fn bench_simhash_range_query(c: &mut Criterion) {
     let (data, queries, neighbors) = load_glove25();
 
     let query = queries.row(0);
+    for i in 0..10 {
+        let idx = *neighbors.get((0, i)).unwrap();
+        let r = CosineSimilarity::similarity(&query, &data.row(idx));
+        eprintln!("[{}] r_{} = {}", idx, i, r);
+    }
     let r = CosineSimilarity::similarity(&query, &data.row(*neighbors.get((0, 10)).unwrap()));
     dbg!(r);
 
     let rng = StdRng::seed_from_u64(1234);
 
-    let builder = SimHashBuilder::<ArrayView1<f32>, _>::new(data.ncols(), 8, rng);
+    let builder = SimHashBuilder::<ArrayView1<f32>, _>::new(data.num_dimensions(), 8, rng);
     let sim = CosineSimilarity::<ArrayView1<f32>>::default();
     eprintln!("Building index");
     let tstart = Instant::now();
     let mut index = CollisionIndex::new(sim, &data, builder, reps);
     let tend = Instant::now();
     eprintln!("Index built in {:?}", tend - tstart);
-
 
     let delta = 0.1;
     let mut group = c.benchmark_group("range query");

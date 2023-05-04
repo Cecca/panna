@@ -1,7 +1,7 @@
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
-use std::hint::black_box;
 
 use crate::types::*;
 
@@ -77,7 +77,7 @@ pub struct CollisionIndex<
     Sim: SimilarityFunction<Point = H::Input>,
     D: Dataset<'data, H::Input>,
 > where
-    H::Output: Hash,
+    H::Output: Hash + Send + Sync,
 {
     hashers: Vec<H>,
     data: &'data D,
@@ -92,10 +92,10 @@ impl<
         'data,
         Sim: SimilarityFunction<Point = H::Input>,
         H: LSHFunction,
-        D: Dataset<'data, H::Input>,
+        D: Dataset<'data, H::Input> + Sync,
     > CollisionIndex<'data, H, Sim, D>
 where
-    H::Output: Clone + Copy + Ord + Eq + Default + Debug + Hash,
+    H::Output: Clone + Copy + Ord + Eq + Default + Debug + Hash + Send + Sync,
 {
     pub fn new<B: LSHFunctionBuilder<LSH = H>>(
         similarity_function: Sim,
@@ -107,10 +107,10 @@ where
         let hashers = builder.build_vec(max_repetitions);
 
         // Build tables
-        let mut scratch = hashers[0].allocate_scratch();
         let tables: Vec<Table<H::Output>> = hashers
-            .iter()
+            .par_iter()
             .map(|h| {
+                let mut scratch = hashers[0].allocate_scratch();
                 let mut builder = TableBuilder::with_capacity(data.num_points());
                 for i in 0..data.num_points() {
                     let v = data.get(i);
@@ -143,11 +143,18 @@ where
         self.collision_table.fill(0);
         stats.total = self.data.num_points();
 
+        // Reference local to the function. Benchmarking shows that
+        // it makes this function faster!
+        let collision_table = &mut self.collision_table;
+
         for (hasher, table) in self.hashers.iter().zip(&self.tables) {
             let h = hasher.hash(q, &mut self.scratch);
-            for idx in table.collisions(h) {
-                debug_assert_eq!(hasher.hash(&self.data.get(*idx), &mut self.scratch), h);
-                self.collision_table[*idx] += 1
+            let collisions = table.collisions(h);
+            #[cfg(test)]
+            debug_assert!(test::is_increasing(collisions));
+
+            for idx in collisions {
+                collision_table[*idx] += 1;
             }
         }
 
@@ -167,6 +174,9 @@ where
                     stats.false_positives += 1;
                 }
             }
+            if *cnt > 0 {
+                stats.at_least_one_collision += 1;
+            }
         }
         res
     }
@@ -179,6 +189,15 @@ mod test {
     use crate::simhash::*;
     use crate::test::compute_recall;
     use ndarray::prelude::*;
+
+    pub fn is_increasing(v: &[usize]) -> bool {
+        for i in 1..v.len() {
+            if v[i - 1] > v[i] {
+                return false;
+            }
+        }
+        true
+    }
 
     #[test]
     fn test_index() {

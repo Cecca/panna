@@ -456,6 +456,7 @@ dependencies = [
  "hdf5",
  "ndarray",
  "ndarray-rand",
+ "rayon",
  "ureq",
 ]
 

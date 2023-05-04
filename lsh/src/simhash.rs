@@ -28,7 +28,7 @@ impl<Input> SimHash<Input> {
     }
 }
 
-impl<S: Data<Elem = f32>> LSHFunction for SimHash<ArrayBase<S, Ix1>> {
+impl<S: Data<Elem = f32> + Send + Sync> LSHFunction for SimHash<ArrayBase<S, Ix1>> {
     type Input = ArrayBase<S, Ix1>;
     type Output = usize;
     type Scratch = ();
@@ -74,7 +74,9 @@ impl<Input, R: Rng> SimHashBuilder<Input, R> {
     }
 }
 
-impl<S: Data<Elem = f32>, R: Rng> LSHFunctionBuilder for SimHashBuilder<ArrayBase<S, Ix1>, R> {
+impl<S: Data<Elem = f32> + Send + Sync, R: Rng> LSHFunctionBuilder
+    for SimHashBuilder<ArrayBase<S, Ix1>, R>
+{
     type LSH = SimHash<ArrayBase<S, Ix1>>;
 
     fn build(&mut self) -> Self::LSH {
