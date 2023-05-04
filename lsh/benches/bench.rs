@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use lsh::collision_index::CollisionIndex;
 use lsh::simhash::*;
@@ -5,7 +7,7 @@ use lsh::types::*;
 use ndarray::prelude::*;
 use ndarray_rand::rand::prelude::*;
 
-pub fn load_glove25() -> (Array2<f32>, Array2<f32>) {
+pub fn load_glove25() -> (Array2<f32>, Array2<f32>, Array2<usize>) {
     use std::io::BufWriter;
     use std::path::PathBuf;
 
@@ -21,6 +23,7 @@ pub fn load_glove25() -> (Array2<f32>, Array2<f32>) {
     let f = hdf5::File::open(&local).unwrap();
     let mut data = f.dataset("/train").unwrap().read_2d::<f32>().unwrap();
     let mut queries = f.dataset("/train").unwrap().read_2d::<f32>().unwrap();
+    let mut ground = f.dataset("/neighbors").unwrap().read_2d::<usize>().unwrap();
 
     for mut row in data.rows_mut() {
         row /= norm2(&row);
@@ -28,33 +31,33 @@ pub fn load_glove25() -> (Array2<f32>, Array2<f32>) {
     for mut row in queries.rows_mut() {
         row /= norm2(&row);
     }
-    (data, queries)
+    (data, queries, ground)
 }
 
 pub fn bench_simhash_range_query(c: &mut Criterion) {
     let reps = 1000;
-    let (data, queries) = load_glove25();
+    let (data, queries, neighbors) = load_glove25();
+
+    let query = queries.row(0);
+    let r = CosineSimilarity::similarity(&query, &data.row(*neighbors.get((0, 10)).unwrap()));
+    dbg!(r);
+
     let rng = StdRng::seed_from_u64(1234);
-    let hash_per_sec = 20_000_000.0;
-    let num_hashes = data.num_points() * reps;
-    eprintln!(
-        "Computing {} hashes, expected {} seconds time",
-        num_hashes,
-        num_hashes as f64 / hash_per_sec
-    );
 
     let builder = SimHashBuilder::<ArrayView1<f32>, _>::new(data.ncols(), 8, rng);
     let sim = CosineSimilarity::<ArrayView1<f32>>::default();
     eprintln!("Building index");
+    let tstart = Instant::now();
     let mut index = CollisionIndex::new(sim, &data, builder, reps);
-    eprintln!("Index built");
+    let tend = Instant::now();
+    eprintln!("Index built in {:?}", tend - tstart);
 
-    let query = queries.row(0);
 
-    let r = 0.8;
     let delta = 0.1;
     let mut group = c.benchmark_group("range query");
     let mut stats = QueryStats::default();
+    index.query_range(&query, r, delta, &mut stats);
+    eprintln!("{:?}", stats);
     group.bench_function("simhash", |b| {
         b.iter(|| black_box(index.query_range(&query, r, delta, &mut stats)))
     });
@@ -63,16 +66,15 @@ pub fn bench_simhash_range_query(c: &mut Criterion) {
 
 pub fn bench_simhash(c: &mut Criterion) {
     let reps = 1000;
-    let (data, _queries) = load_glove25();
+    let (data, _, _) = load_glove25();
     let rng = StdRng::seed_from_u64(1234);
     let hashers =
         SimHashBuilder::<ArrayView1<f32>, _>::new(data.shape()[1], 8, rng).build_vec(reps);
     let point = data.row(0);
-    let mut scratch = hashers[0].allocate_scratch();
 
     let mut group = c.benchmark_group("one hash, one point");
     group.bench_function("simhash", |b| {
-        b.iter(|| black_box(hashers[0].hash(&point, &mut scratch)))
+        b.iter(|| black_box(hashers[0].hash(&point, &mut ())))
     });
     drop(group);
 
@@ -81,7 +83,7 @@ pub fn bench_simhash(c: &mut Criterion) {
     group.bench_function("simhash", |b| {
         b.iter(|| {
             for h in hashers.iter() {
-                black_box(h.hash(&point, &mut scratch));
+                black_box(h.hash(&point, &mut ()));
             }
         })
     });
@@ -92,7 +94,7 @@ pub fn bench_simhash(c: &mut Criterion) {
     group.bench_function("simhash", |b| {
         b.iter(|| {
             for row in data.rows() {
-                black_box(hashers[0].hash(&row, &mut scratch));
+                black_box(hashers[0].hash(&row, &mut ()));
             }
         })
     });

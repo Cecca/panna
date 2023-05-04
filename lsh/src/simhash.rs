@@ -1,10 +1,8 @@
-use std::marker::PhantomData;
-
-use ndarray::linalg::general_mat_vec_mul;
 use ndarray::prelude::*;
 use ndarray::Data;
 use ndarray_rand::rand::prelude::*;
 use ndarray_rand::RandomExt;
+use std::marker::PhantomData;
 
 use crate::types::LSHFunction;
 use crate::types::LSHFunctionBuilder;
@@ -35,8 +33,7 @@ impl<S: Data<Elem = f32>> LSHFunction for SimHash<ArrayBase<S, Ix1>> {
     type Output = usize;
     type Scratch = ();
 
-    fn allocate_scratch(&self) -> Self::Scratch {
-    }
+    fn allocate_scratch(&self) -> Self::Scratch {}
 
     fn hash(&self, v: &Self::Input, scratch: &mut Self::Scratch) -> Self::Output {
         assert_eq!(v.len(), self.dimensions);
