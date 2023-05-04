@@ -20,6 +20,7 @@ pub trait SimilarityFunction {
     type Point;
     fn similarity(x: &Self::Point, y: &Self::Point) -> f32;
 }
+#[derive(Clone, Copy)]
 pub struct CosineSimilarity<T> {
     _marker: PhantomData<T>,
 }

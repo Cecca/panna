@@ -1,8 +1,8 @@
 pub mod brute_force;
 pub mod collision_index;
+pub mod cross_polytope;
 pub mod simhash;
 pub mod types;
-//pub mod cross_polytope;
 
 #[cfg(test)]
 pub mod test {

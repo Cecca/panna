@@ -1,5 +1,8 @@
+use std::cell::{Cell, RefCell};
+
 use ffht::fht_f32;
-use rand::prelude::*;
+use ndarray_rand::rand::prelude::*;
+use ndarray_rand::rand_distr::StandardNormal;
 
 const ROTATIONS: usize = 3;
 
@@ -14,7 +17,7 @@ pub struct CrossPolytopeLSH {
 
 impl CrossPolytopeLSH {
     pub fn new<R: Rng>(dimensions: usize, rng: &mut R) -> Self {
-        use rand::distributions::Bernoulli;
+        use ndarray_rand::rand_distr::Bernoulli;
 
         let power_dimensions = dimensions.next_power_of_two();
 
@@ -85,79 +88,102 @@ impl CrossPolytopeLSH {
     }
 }
 
+pub struct CrossPolytopeProbabilities {
+    dimensions: usize,
+    eps: f32,
+    probs: Vec<f32>,
+}
+
+impl CrossPolytopeProbabilities {
+    pub fn probability(&self, dot_product: f32) -> f32 {
+        let idx = (dot_product / self.eps).floor() as usize;
+        let idx = idx + self.probs.len() / 2;
+        self.probs[idx]
+    }
+
+    pub fn new(dimensions: usize, eps: f32, samples: usize) -> Self {
+        use rayon::prelude::*;
+        let mut probs = Vec::new();
+
+        // alpha is the inner product between the two vectors
+        // p = e_1 and q = (alpha, sqrt(1 - alpha^2), 0, ....)
+        let mut alpha = -1.0f32;
+
+        let normal = StandardNormal;
+
+        // we consider all alphas in increments of `eps`
+        while alpha <= 1.0 {
+            // now we are going to estimate the number of collisions
+            let collisions = thread_local::ThreadLocal::new();
+
+            (0..samples).into_par_iter().for_each(|i| {
+                let collisions = collisions.get_or(|| Cell::new(0usize));
+                let mut rng = StdRng::seed_from_u64(1234u64 + i as u64);
+                let mut p_max_coord = 0.0;
+                let mut p_hash = 0i32;
+                let mut q_max_coord = 0.0;
+                let mut q_hash = 0i32;
+                for dim in 0i32..(dimensions as i32) {
+                    // sample the only two entries of the rotation matrix that multiply non-zero
+                    // elements in our vectors p and q
+                    let r1: f32 = normal.sample(&mut rng);
+                    let r2: f32 = normal.sample(&mut rng);
+
+                    // now rotate p in the current dimension: 1 i r1
+                    let p_rot = r1;
+                    if p_rot.abs() > p_max_coord {
+                        p_max_coord = p_rot.abs();
+                        p_hash = if p_rot >= 0.0 { dim } else { -dim };
+                    }
+                    // and rotate q in the current dimension
+                    let q_rot = alpha * r1 + (1.0 - alpha * alpha).sqrt() * r2;
+                    if q_rot.abs() > q_max_coord {
+                        q_max_coord = q_rot.abs();
+                        q_hash = if q_rot >= 0.0 { dim } else { -dim };
+                    }
+                }
+                // count collisions
+                if p_hash == q_hash {
+                    collisions.set(collisions.get() + 1);
+                }
+            });
+
+            let collisions: usize = collisions.into_iter().fold(0, |c1, c2| c1 + c2.get());
+
+            // compute the probabilities
+            let prob = collisions as f32 / samples as f32;
+            probs.push(prob);
+
+            alpha += eps;
+        }
+
+        Self { dimensions, eps, probs }
+    }
+
+    pub fn write_csv(&self, path: &str) -> std::io::Result<()> {
+        use std::io::prelude::*;
+        let mut f = std::fs::File::create(path).expect("cannot open file");
+        writeln!(f, "dim,dotp,p")?;
+        let mut alpha = -1.0;
+        for p in self.probs.iter() {
+            writeln!(f, "{},{},{}", self.dimensions, alpha, p)?;
+            alpha += self.eps;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
-    use ndarray::{Array1, Array2, ArrayBase, ArrayView1, Data, Ix1};
-    use rand::prelude::*;
-    use std::io::prelude::*;
-    use std::io::BufWriter;
-    use std::path::PathBuf;
-
-    fn cosine_similarity(x: ArrayView1<f32>, y: ArrayView1<f32>) -> f32 {
-        (x.dot(&y) + 1.0) / 2.0
-    }
-
-    fn norm2<S: Data<Elem = f32>>(v: &ArrayBase<S, Ix1>) -> f32 {
-        v.iter().map(|x| x * x).sum::<f32>().sqrt()
-    }
-
-    fn load_glove25() -> Array2<f32> {
-        let local = PathBuf::from(".glove-25-angular.hdf5");
-        if !local.is_file() {
-            let mut remote = ureq::get("http://ann-benchmarks.com/glove-25-angular.hdf5")
-                .call()
-                .unwrap()
-                .into_reader();
-            let mut local_file = BufWriter::new(std::fs::File::create(&local).unwrap());
-            std::io::copy(&mut remote, &mut local_file).unwrap();
-        }
-        let f = hdf5::File::open(&local).unwrap();
-        let mut data = f.dataset("/test").unwrap().read_2d::<f32>().unwrap();
-
-        for mut row in data.rows_mut() {
-            row /= norm2(&row);
-        }
-        data
-    }
 
     #[test]
-    fn cross_polytope_basic_collision_probability() {
-        let dims = 25;
-        let mut rng = StdRng::seed_from_u64(1234);
-        let samples = 10000;
-        let hashers: Vec<CrossPolytopeLSH> = (0..samples)
-            .map(|_| CrossPolytopeLSH::new(dims, &mut rng))
-            .collect();
-
-        let mut scratch = hashers[0].allocate_scratch();
-
-        let data = load_glove25();
-        let n = 100;
-        let mut pairs = Vec::new();
-        for i in 0..n {
-            let x = data.row(i);
-            let hx: Vec<usize> = hashers
-                .iter()
-                .map(|h| h.hash(x.to_slice().unwrap(), &mut scratch))
-                .collect();
-            for j in (i + 1)..n {
-                let y = data.row(j);
-                let d_xy = cosine_similarity(x, y);
-                let hy: Vec<usize> = hashers
-                    .iter()
-                    .map(|h| h.hash(y.to_slice().unwrap(), &mut scratch))
-                    .collect();
-                let p_xy =
-                    hx.iter().zip(&hy).filter(|(x, y)| x == y).count() as f64 / samples as f64;
-                pairs.push((d_xy, p_xy));
-            }
-        }
-        pairs.sort_by(|p1, p2| p1.0.partial_cmp(&p2.0).unwrap().reverse());
-        let tolerance = 0.001;
-        for i in 1..pairs.len() {
-            println!("{:?} {:?}", pairs[i-1], pairs[i]);
-            assert!(pairs[i-1].1 >= pairs[i].1 + tolerance);
-        }
+    fn compute_probabilities() {
+        let eps = 0.01;
+        let dims = 100;
+        let probs = CrossPolytopeProbabilities::new(dims, eps, 1000);
+        probs.write_csv("cp.csv").unwrap();
+        assert_eq!(probs.probability(0.5), 0.078);
+        assert_eq!(probs.probability(0.96), 0.623);
     }
 }

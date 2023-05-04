@@ -1,19 +1,21 @@
 use std::time::Instant;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use hdf5::dataset::Chunk;
+use lsh::brute_force::brute_force_range_query;
 use lsh::collision_index::CollisionIndex;
 use lsh::simhash::*;
 use lsh::types::*;
 use ndarray::prelude::*;
 use ndarray_rand::rand::prelude::*;
 
-pub fn load_glove25() -> (Array2<f32>, Array2<f32>, Array2<usize>) {
+pub fn load_glove100() -> (Array2<f32>, Array2<f32>, Array2<usize>) {
     use std::io::BufWriter;
     use std::path::PathBuf;
 
-    let local = PathBuf::from(".glove-25-angular.hdf5");
+    let local = PathBuf::from(".glove-100-angular.hdf5");
     if !local.is_file() {
-        let mut remote = ureq::get("http://ann-benchmarks.com/glove-25-angular.hdf5")
+        let mut remote = ureq::get("http://ann-benchmarks.com/glove-100-angular.hdf5")
             .call()
             .unwrap()
             .into_reader();
@@ -34,22 +36,88 @@ pub fn load_glove25() -> (Array2<f32>, Array2<f32>, Array2<usize>) {
     (data, queries, ground)
 }
 
-pub fn bench_simhash_range_query(c: &mut Criterion) {
-    let reps = 1000;
-    let (data, queries, neighbors) = load_glove25();
+pub fn bench_count(c: &mut Criterion) {
+    use ndarray_rand::rand::seq::index::sample;
+    let mut counters = vec![0; 1_000_000];
 
-    let query = queries.row(0);
+    let mut rng = StdRng::seed_from_u64(1234);
+
+    let mut group = c.benchmark_group("counters");
+    group.throughput(criterion::Throughput::Elements(counters.len() as u64));
+    group.bench_function("update all", |b| {
+        b.iter(|| {
+            for i in 0..counters.len() {
+                counters[i] += 1;
+            }
+        })
+    });
+
+    let mut idx = sample(&mut rng, counters.len(), counters.len() / 2).into_vec();
+    idx.sort();
+    group.throughput(criterion::Throughput::Elements(idx.len() as u64));
+    group.bench_function("update 1/2", |b| {
+        b.iter(|| {
+            for i in &idx {
+                counters[*i] += 1;
+            }
+        })
+    });
+    group.bench_function("update 1/2 unrolled", |b| {
+        b.iter(|| {
+            let chunks = idx.chunks_exact(4);
+            for i in chunks.remainder() {
+                counters[*i] += 1;
+            }
+            for chunk in chunks {
+                for i in chunk {
+                    counters[*i] += 1;
+                }
+            }
+        })
+    });
+
+    let mut idx = sample(&mut rng, counters.len(), counters.len() / 4).into_vec();
+    idx.sort();
+    group.throughput(criterion::Throughput::Elements(idx.len() as u64));
+    group.bench_function("update 1/4", |b| {
+        b.iter(|| {
+            for i in &idx {
+                counters[*i] += 1;
+            }
+        })
+    });
+    group.bench_function("update 1/4 unrolled", |b| {
+        b.iter(|| {
+            let chunks = idx.chunks_exact(4);
+            for i in chunks.remainder() {
+                counters[*i] += 1;
+            }
+            for chunk in chunks {
+                for i in chunk {
+                    counters[*i] += 1;
+                }
+            }
+        })
+    });
+}
+
+pub fn bench_simhash_range_query(c: &mut Criterion) {
+    let reps = 100;
+    let (data, queries, neighbors) = load_glove100();
+
+    let q_idx = 1;
+    let query = queries.row(q_idx);
     for i in 0..10 {
-        let idx = *neighbors.get((0, i)).unwrap();
+        let idx = *neighbors.get((q_idx, i)).unwrap();
         let r = CosineSimilarity::similarity(&query, &data.row(idx));
         eprintln!("[{}] r_{} = {}", idx, i, r);
     }
-    let r = CosineSimilarity::similarity(&query, &data.row(*neighbors.get((0, 10)).unwrap()));
+    let r = CosineSimilarity::similarity(&query, &data.row(*neighbors.get((q_idx, 10)).unwrap()));
     dbg!(r);
 
     let rng = StdRng::seed_from_u64(1234);
 
-    let builder = SimHashBuilder::<ArrayView1<f32>, _>::new(data.num_dimensions(), 8, rng);
+    let builder = SimHashBuilder::<ArrayView1<f32>, _>::new(data.num_dimensions(), 16, rng);
     let sim = CosineSimilarity::<ArrayView1<f32>>::default();
     eprintln!("Building index");
     let tstart = Instant::now();
@@ -59,6 +127,9 @@ pub fn bench_simhash_range_query(c: &mut Criterion) {
 
     let delta = 0.1;
     let mut group = c.benchmark_group("range query");
+    group.bench_function("brute force", |b| {
+        b.iter(|| black_box(brute_force_range_query(&data, &query, r, sim)))
+    });
     let mut stats = QueryStats::default();
     index.query_range(&query, r, delta, &mut stats);
     eprintln!("{:?}", stats);
@@ -70,7 +141,7 @@ pub fn bench_simhash_range_query(c: &mut Criterion) {
 
 pub fn bench_simhash(c: &mut Criterion) {
     let reps = 1000;
-    let (data, _, _) = load_glove25();
+    let (data, _, _) = load_glove100();
     let rng = StdRng::seed_from_u64(1234);
     let hashers =
         SimHashBuilder::<ArrayView1<f32>, _>::new(data.shape()[1], 8, rng).build_vec(reps);
@@ -105,5 +176,6 @@ pub fn bench_simhash(c: &mut Criterion) {
     drop(group);
 }
 
+criterion_group!(basic, bench_count);
 criterion_group!(benches, bench_simhash, bench_simhash_range_query);
-criterion_main!(benches);
+criterion_main!(basic, benches);

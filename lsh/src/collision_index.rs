@@ -154,17 +154,19 @@ where
             debug_assert!(test::is_increasing(collisions));
 
             for idx in collisions {
-                collision_table[*idx] += 1;
+                unsafe {
+                    *collision_table.get_unchecked_mut(*idx) += 1;
+                }
             }
         }
 
         let mut res = Vec::new();
         let samples = self.hashers.len();
         let p_r = self.hashers[0].collision_probability(r);
-        let p_bound = p_r - (1.0 / (2.0 * samples as f32) * (2.0 / delta).ln()).sqrt();
+        // FIXME: implement the bound
+        let p_bound = p_r; // - (1.0 / (2.0 * samples as f32) * (2.0 / delta).ln()).sqrt();
         let threshold = (p_bound * samples as f32).ceil() as usize;
         for (idx, cnt) in self.collision_table.iter().enumerate() {
-            // TODO incorporate confidence interval
             if *cnt >= threshold {
                 stats.visited += 1;
                 if Sim::similarity(q, &self.data.get(idx)) >= r {
