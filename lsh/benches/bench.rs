@@ -4,6 +4,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use hdf5::dataset::Chunk;
 use lsh::brute_force::brute_force_range_query;
 use lsh::collision_index::CollisionIndex;
+use lsh::cross_polytope::CrossPolytopeBuilder;
 use lsh::simhash::*;
 use lsh::types::*;
 use ndarray::prelude::*;
@@ -105,7 +106,7 @@ pub fn bench_simhash_range_query(c: &mut Criterion) {
     let reps = 100;
     let (data, queries, neighbors) = load_glove100();
 
-    let q_idx = 1;
+    let q_idx = 0;
     let query = queries.row(q_idx);
     for i in 0..10 {
         let idx = *neighbors.get((q_idx, i)).unwrap();
@@ -115,27 +116,43 @@ pub fn bench_simhash_range_query(c: &mut Criterion) {
     let r = CosineSimilarity::similarity(&query, &data.row(*neighbors.get((q_idx, 10)).unwrap()));
     dbg!(r);
 
-    let rng = StdRng::seed_from_u64(1234);
+    let mut rng = StdRng::seed_from_u64(1234);
 
-    let builder = SimHashBuilder::<ArrayView1<f32>, _>::new(data.num_dimensions(), 16, rng);
     let sim = CosineSimilarity::<ArrayView1<f32>>::default();
-    eprintln!("Building index");
-    let tstart = Instant::now();
-    let mut index = CollisionIndex::new(sim, &data, builder, reps);
-    let tend = Instant::now();
-    eprintln!("Index built in {:?}", tend - tstart);
 
-    let delta = 0.1;
+    let delta = 1.0;
     let mut group = c.benchmark_group("range query");
     group.bench_function("brute force", |b| {
         b.iter(|| black_box(brute_force_range_query(&data, &query, r, sim)))
     });
+
+    let builder = SimHashBuilder::<ArrayView1<f32>, _>::new(data.num_dimensions(), 16, &mut rng);
+    eprintln!("Building simhash index");
+    let tstart = Instant::now();
+    let mut index = CollisionIndex::new(sim, &data, builder, reps);
+    let tend = Instant::now();
+    eprintln!("Index built in {:?}", tend - tstart);
     let mut stats = QueryStats::default();
     index.query_range(&query, r, delta, &mut stats);
     eprintln!("{:?}", stats);
     group.bench_function("simhash", |b| {
         b.iter(|| black_box(index.query_range(&query, r, delta, &mut stats)))
     });
+
+    let builder = CrossPolytopeBuilder::<ArrayView1<f32>, _>::new(data.num_dimensions(), &mut rng);
+    eprintln!("Building CP index");
+    let tstart = Instant::now();
+    let mut index = CollisionIndex::new(sim, &data, builder, reps);
+    let tend = Instant::now();
+    eprintln!("Index built in {:?}", tend - tstart);
+    let mut stats = QueryStats::default();
+    index.query_range(&query, r, delta, &mut stats);
+    eprintln!("{:?}", stats);
+    group.bench_function("crosspolytope", |b| {
+        b.iter(|| black_box(index.query_range(&query, r, delta, &mut stats)))
+    });
+
+
     drop(group);
 }
 

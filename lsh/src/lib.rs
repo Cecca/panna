@@ -55,6 +55,7 @@ pub mod test {
             let x = data.row(i);
             let hx = &hashes[i];
             for j in (i + 1)..n {
+                dbg!(j);
                 let y = data.row(j);
                 let d_xy = cosine_similarity(x, y);
                 let hy = &hashes[j];
@@ -64,9 +65,10 @@ pub mod test {
                 let p_expected = hashers[0].collision_probability(d_xy);
                 assert!(
                     (p_xy - p_expected).abs() <= tolerance,
-                    "expected {}, got {}",
+                    "expected {}, got {} (dot product={})",
                     p_expected,
-                    p_xy
+                    p_xy,
+                    d_xy,
                 );
             }
         }

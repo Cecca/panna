@@ -163,8 +163,9 @@ where
         let mut res = Vec::new();
         let samples = self.hashers.len();
         let p_r = self.hashers[0].collision_probability(r);
-        // FIXME: implement the bound
-        let p_bound = p_r; // - (1.0 / (2.0 * samples as f32) * (2.0 / delta).ln()).sqrt();
+        let p_bound = p_r - (1.0 / (2.0 * samples as f32) * (2.0 / delta).ln()).sqrt();
+        stats.threshold_probability = p_r;
+        stats.threshold_probability_bound = p_bound;
         let threshold = (p_bound * samples as f32).ceil() as usize;
         for (idx, cnt) in self.collision_table.iter().enumerate() {
             if *cnt >= threshold {

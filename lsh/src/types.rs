@@ -121,4 +121,6 @@ pub struct QueryStats {
     pub false_positives: usize,
     pub true_positives: usize,
     pub at_least_one_collision: usize,
+    pub threshold_probability: f32,
+    pub threshold_probability_bound: f32,
 }
