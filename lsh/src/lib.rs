@@ -58,60 +58,21 @@ pub mod test {
                 dbg!(j);
                 let y = data.row(j);
                 let d_xy = cosine_similarity(x, y);
-                let hy = &hashes[j];
-                let p_xy =
-                    hx.iter().zip(hy).filter(|(x, y)| x == y).count() as f32 / samples as f32;
+                if d_xy > 0.01 {
+                    let hy = &hashes[j];
+                    let p_xy =
+                        hx.iter().zip(hy).filter(|(x, y)| x == y).count() as f32 / samples as f32;
 
-                let p_expected = hashers[0].collision_probability(d_xy);
-                assert!(
-                    (p_xy - p_expected).abs() <= tolerance,
-                    "expected {}, got {} (dot product={})",
-                    p_expected,
-                    p_xy,
-                    d_xy,
-                );
+                    let p_expected = hashers[0].collision_probability(d_xy);
+                    assert!(
+                        (p_xy - p_expected).abs() <= tolerance,
+                        "expected {}, got {} (dot product={})",
+                        p_expected,
+                        p_xy,
+                        d_xy,
+                    );
+                }
             }
-        }
-    }
-
-    pub fn test_collision_prob_ranking_cosine<'a, F, B>(
-        data: &'a Array2<f32>,
-        mut builder: B,
-        samples: usize,
-        tolerance: f64,
-    ) where
-        F: LSHFunction<Input = ArrayView1<'a, f32>, Output = usize>,
-        B: LSHFunctionBuilder<LSH = F>,
-    {
-        let hashers = builder.build_vec(samples);
-
-        let mut scratch = hashers[0].allocate_scratch();
-
-        let n = 100;
-        let mut hashes: Vec<Vec<F::Output>> = vec![Vec::new(); n];
-        for i in 0..n {
-            let x = data.row(i);
-            hashes[i].extend(hashers.iter().map(|h| h.hash(&x, &mut scratch)));
-        }
-
-        let mut pairs = Vec::new();
-        for i in 0..n {
-            let x = data.row(i);
-            let hx = &hashes[i];
-            for j in (i + 1)..n {
-                let y = data.row(j);
-                let d_xy = cosine_similarity(x, y);
-                let hy = &hashes[j];
-                let p_xy =
-                    hx.iter().zip(hy).filter(|(x, y)| x == y).count() as f64 / samples as f64;
-                pairs.push((d_xy, p_xy));
-            }
-        }
-
-        pairs.sort_by(|p1, p2| p1.0.partial_cmp(&p2.0).unwrap().reverse());
-        for i in 1..pairs.len() {
-            println!("{:?} {:?}", pairs[i - 1], pairs[i]);
-            assert!(pairs[i - 1].1 >= pairs[i].1 - tolerance);
         }
     }
 

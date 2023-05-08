@@ -1,7 +1,6 @@
 use std::time::Instant;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use hdf5::dataset::Chunk;
 use lsh::brute_force::brute_force_range_query;
 use lsh::collision_index::CollisionIndex;
 use lsh::cross_polytope::CrossPolytopeBuilder;
@@ -151,7 +150,6 @@ pub fn bench_simhash_range_query(c: &mut Criterion) {
     group.bench_function("crosspolytope", |b| {
         b.iter(|| black_box(index.query_range(&query, r, delta, &mut stats)))
     });
-
 
     drop(group);
 }
