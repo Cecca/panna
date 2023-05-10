@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::mem::size_of;
 use std::sync::RwLock;
 
 use ffht::fht_f32;
@@ -22,22 +23,32 @@ pub struct CrossPolytopeLSH<Input> {
     dimensions: usize,
     /// The closest power of two larger than `dimensions`
     power_dimensions: usize,
-    /// The three diagonal matrices, each of size `dimensions`
+    /// How many bits the output of each function uses
+    bits_per_function: usize,
+    /// The number of functions to concatenate
+    num_functions: usize,
+    /// The diagonal matrices, each of size `dimensions`
     diagonals: Vec<f32>,
     _marker: PhantomData<Input>,
 }
 
 impl<Input> CrossPolytopeLSH<Input> {
-    pub fn new<R: Rng>(dimensions: usize, rng: &mut R) -> Self {
+    pub fn new<R: Rng>(dimensions: usize, num_functions: usize, rng: &mut R) -> Self {
         use ndarray_rand::rand_distr::Bernoulli;
 
         let power_dimensions = dimensions.next_power_of_two();
+        let bits_per_function = power_dimensions.ilog2() as usize + 1; // the +1 is because we have
+                                                                       // to accommodate twice as
+                                                                       // many values than there
+                                                                       // are dimensions (positive
+                                                                       // and negative).
+        assert!(bits_per_function * num_functions <= 8 * std::mem::size_of::<usize>());
 
         let distr = Bernoulli::new(0.5).unwrap();
         let diagonals: Vec<f32> = distr
             .sample_iter(rng)
             .map(|b| if b { 1.0 } else { -1.0 })
-            .take(power_dimensions * ROTATIONS)
+            .take(power_dimensions * ROTATIONS * num_functions)
             .collect();
 
         ESTIMATES
@@ -45,7 +56,7 @@ impl<Input> CrossPolytopeLSH<Input> {
             .unwrap()
             .entry(dimensions)
             .or_insert_with(|| {
-                let p = CrossPolytopeProbabilities::new(dimensions, 0.001, 100000);
+                let p = CrossPolytopeProbabilities::get(dimensions, 0.001, 100000);
                 p.write_csv("/tmp/cp.csv").unwrap();
                 p
             });
@@ -54,16 +65,20 @@ impl<Input> CrossPolytopeLSH<Input> {
         Self {
             dimensions,
             power_dimensions,
+            bits_per_function,
+            num_functions,
             diagonals,
             _marker: PhantomData,
         }
     }
 
     #[inline]
-    fn diagonal_multiply(&self, v: &mut [f32], diag_id: usize) {
+    fn diagonal_multiply(&self, v: &mut [f32], diag_id: usize, func_id: usize) {
         assert_eq!(v.len(), self.power_dimensions);
-        let diag =
-            &self.diagonals[diag_id * self.power_dimensions..(diag_id + 1) * self.power_dimensions];
+        let start = ROTATIONS * self.power_dimensions * func_id + diag_id * self.power_dimensions;
+        let end =
+            ROTATIONS * self.power_dimensions * func_id + (diag_id + 1) * self.power_dimensions;
+        let diag = &self.diagonals[start..end];
         assert_eq!(v.len(), diag.len());
         for i in 0..v.len() {
             v[i] *= diag[i];
@@ -97,7 +112,9 @@ impl<S: Data<Elem = f32> + Send + Sync> LSHFunction for CrossPolytopeLSH<ArrayBa
     type Scratch = Vec<f32>;
 
     fn collision_probability(&self, similarity: f32) -> f32 {
-        ESTIMATES.read().unwrap()[&self.dimensions].probability(similarity)
+        ESTIMATES.read().unwrap()[&self.dimensions]
+            .probability(similarity)
+            .powi(self.num_functions as i32)
     }
 
     fn allocate_scratch(&self) -> Vec<f32> {
@@ -111,30 +128,37 @@ impl<S: Data<Elem = f32> + Send + Sync> LSHFunction for CrossPolytopeLSH<ArrayBa
         assert_eq!(scratch.len(), self.power_dimensions);
         let v = v.as_slice().unwrap();
 
-        // Init the scratch space
-        scratch.fill(0.0);
-        scratch[..self.dimensions].copy_from_slice(v);
+        let mut h = 0;
+        for k in 0..self.num_functions {
+            // Init the scratch space
+            scratch.fill(0.0);
+            scratch[..self.dimensions].copy_from_slice(v);
 
-        for i in 0..ROTATIONS {
-            self.diagonal_multiply(scratch, i);
-            fht_f32(scratch);
+            for i in 0..ROTATIONS {
+                self.diagonal_multiply(scratch, i, k);
+                fht_f32(scratch);
+            }
+
+            h = (h << self.bits_per_function) | self.closest_axis(scratch);
         }
 
-        self.closest_axis(scratch)
+        h
     }
 }
 
 pub struct CrossPolytopeBuilder<Input, R: Rng> {
     dimensions: usize,
+    num_functions: usize,
     rng: R,
     _marker: PhantomData<Input>,
 }
 
 impl<Input, R: Rng> CrossPolytopeBuilder<Input, R> {
-    pub fn new(dimensions: usize, rng: R) -> Self {
+    pub fn new(dimensions: usize, num_functions: usize, rng: R) -> Self {
         assert!(dimensions > 0);
         Self {
             dimensions,
+            num_functions,
             rng,
             _marker: PhantomData,
         }
@@ -147,10 +171,11 @@ impl<S: Data<Elem = f32> + Send + Sync, R: Rng> LSHFunctionBuilder
     type LSH = CrossPolytopeLSH<ArrayBase<S, Ix1>>;
 
     fn build(&mut self) -> Self::LSH {
-        CrossPolytopeLSH::new(self.dimensions, &mut self.rng)
+        CrossPolytopeLSH::new(self.dimensions, self.num_functions, &mut self.rng)
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CrossPolytopeProbabilities {
     dimensions: usize,
     eps: f32,
@@ -167,7 +192,19 @@ impl CrossPolytopeProbabilities {
         lower + (upper - lower) / 2.0
     }
 
-    pub fn new(dimensions: usize, eps: f32, samples: usize) -> Self {
+    pub fn get(dimensions: usize, eps: f32, samples: usize) -> Self {
+        use std::path::PathBuf;
+        let fname = PathBuf::from(format!(".cp-{}-{}-{}.cache", dimensions, eps, samples));
+        if !fname.is_file() {
+            let p = Self::new(dimensions, eps, samples);
+            let f = std::fs::File::create(&fname).unwrap();
+            bincode::serialize_into(f, &p).unwrap();
+        }
+        let f = std::fs::File::open(&fname).unwrap();
+        bincode::deserialize_from(f).unwrap()
+    }
+
+    fn new(dimensions: usize, eps: f32, samples: usize) -> Self {
         use rayon::prelude::*;
         eprintln!(
             "Estimating cross polytope collision probabilities for dimensions {}",
@@ -253,9 +290,12 @@ mod test {
 
     #[test]
     fn crosspolytope_collision_probability() {
-        let rng = StdRng::seed_from_u64(1234);
+        let mut rng = StdRng::seed_from_u64(1234);
         let dataset = crate::test::load_glove25();
-        let builder = CrossPolytopeBuilder::<ArrayView1<f32>, _>::new(25, rng);
+        let builder = CrossPolytopeBuilder::<ArrayView1<f32>, _>::new(25, 1, &mut rng);
+        crate::test::test_collision_probability(&dataset, builder, 1000000, 0.015);
+
+        let builder = CrossPolytopeBuilder::<ArrayView1<f32>, _>::new(25, 2, &mut rng);
         crate::test::test_collision_probability(&dataset, builder, 1000000, 0.015);
     }
 }

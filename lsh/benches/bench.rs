@@ -102,7 +102,7 @@ pub fn bench_count(c: &mut Criterion) {
 }
 
 pub fn bench_simhash_range_query(c: &mut Criterion) {
-    let reps = 100;
+    let reps = 1000;
     let (data, queries, neighbors) = load_glove100();
 
     let q_idx = 0;
@@ -125,6 +125,7 @@ pub fn bench_simhash_range_query(c: &mut Criterion) {
         b.iter(|| black_box(brute_force_range_query(&data, &query, r, sim)))
     });
 
+    // Simhash
     let builder = SimHashBuilder::<ArrayView1<f32>, _>::new(data.num_dimensions(), 16, &mut rng);
     eprintln!("Building simhash index");
     let tstart = Instant::now();
@@ -138,7 +139,9 @@ pub fn bench_simhash_range_query(c: &mut Criterion) {
         b.iter(|| black_box(index.query_range(&query, r, delta, &mut stats)))
     });
 
-    let builder = CrossPolytopeBuilder::<ArrayView1<f32>, _>::new(data.num_dimensions(), &mut rng);
+    // cross polytope
+    let builder =
+        CrossPolytopeBuilder::<ArrayView1<f32>, _>::new(data.num_dimensions(), 1, &mut rng);
     eprintln!("Building CP index");
     let tstart = Instant::now();
     let mut index = CollisionIndex::new(sim, &data, builder, reps);
@@ -151,11 +154,26 @@ pub fn bench_simhash_range_query(c: &mut Criterion) {
         b.iter(|| black_box(index.query_range(&query, r, delta, &mut stats)))
     });
 
+    // cross polytope 2
+    let builder =
+        CrossPolytopeBuilder::<ArrayView1<f32>, _>::new(data.num_dimensions(), 2, &mut rng);
+    eprintln!("Building CP index");
+    let tstart = Instant::now();
+    let mut index = CollisionIndex::new(sim, &data, builder, reps);
+    let tend = Instant::now();
+    eprintln!("Index built in {:?}", tend - tstart);
+    let mut stats = QueryStats::default();
+    index.query_range(&query, r, delta, &mut stats);
+    eprintln!("{:?}", stats);
+    group.bench_function("crosspolytope(x2)", |b| {
+        b.iter(|| black_box(index.query_range(&query, r, delta, &mut stats)))
+    });
+
     drop(group);
 }
 
 pub fn bench_simhash(c: &mut Criterion) {
-    let reps = 1000;
+    let reps = 200;
     let (data, _, _) = load_glove100();
     let rng = StdRng::seed_from_u64(1234);
     let hashers =
