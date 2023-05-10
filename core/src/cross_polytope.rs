@@ -42,7 +42,7 @@ impl<Input> CrossPolytopeLSH<Input> {
                                                                        // many values than there
                                                                        // are dimensions (positive
                                                                        // and negative).
-        assert!(bits_per_function * num_functions <= 8 * std::mem::size_of::<usize>());
+        assert!(bits_per_function * num_functions <= 8 * std::mem::size_of::<u128>());
 
         let distr = Bernoulli::new(0.5).unwrap();
         let diagonals: Vec<f32> = distr
@@ -108,7 +108,7 @@ impl<Input> CrossPolytopeLSH<Input> {
 
 impl<S: Data<Elem = f32> + Send + Sync> LSHFunction for CrossPolytopeLSH<ArrayBase<S, Ix1>> {
     type Input = ArrayBase<S, Ix1>;
-    type Output = usize;
+    type Output = u128;
     type Scratch = Vec<f32>;
 
     fn collision_probability(&self, similarity: f32) -> f32 {
@@ -128,7 +128,7 @@ impl<S: Data<Elem = f32> + Send + Sync> LSHFunction for CrossPolytopeLSH<ArrayBa
         assert_eq!(scratch.len(), self.power_dimensions);
         let v = v.as_slice().unwrap();
 
-        let mut h = 0;
+        let mut h = 0u128;
         for k in 0..self.num_functions {
             // Init the scratch space
             scratch.fill(0.0);
@@ -139,7 +139,7 @@ impl<S: Data<Elem = f32> + Send + Sync> LSHFunction for CrossPolytopeLSH<ArrayBa
                 fht_f32(scratch);
             }
 
-            h = (h << self.bits_per_function) | self.closest_axis(scratch);
+            h = (h << self.bits_per_function) | self.closest_axis(scratch) as u128;
         }
 
         h

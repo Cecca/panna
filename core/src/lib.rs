@@ -31,14 +31,15 @@ pub mod test {
         data
     }
 
-    pub fn test_collision_probability<'a, F, B>(
+    pub fn test_collision_probability<'a, F, B, O>(
         data: &'a Array2<f32>,
         mut builder: B,
         samples: usize,
         tolerance: f32,
     ) where
-        F: LSHFunction<Input = ArrayView1<'a, f32>, Output = usize>,
+        F: LSHFunction<Input = ArrayView1<'a, f32>, Output = O>,
         B: LSHFunctionBuilder<LSH = F>,
+        O: Eq + Copy
     {
         let hashers = builder.build_vec(samples);
 
