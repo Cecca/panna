@@ -24,7 +24,7 @@ pub struct CrossPolytopeLSH<Input> {
     /// The closest power of two larger than `dimensions`
     power_dimensions: usize,
     /// How many bits the output of each function uses
-    bits_per_function: usize,
+    pub bits_per_function: usize,
     /// The number of functions to concatenate
     num_functions: usize,
     /// The diagonal matrices, each of size `dimensions`
@@ -42,6 +42,7 @@ impl<Input> CrossPolytopeLSH<Input> {
                                                                        // many values than there
                                                                        // are dimensions (positive
                                                                        // and negative).
+        dbg!(bits_per_function);
         assert!(bits_per_function * num_functions <= 8 * std::mem::size_of::<u128>());
 
         let distr = Bernoulli::new(0.5).unwrap();

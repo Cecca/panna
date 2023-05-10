@@ -30,7 +30,7 @@ impl<Input> SimHash<Input> {
 
 impl<S: Data<Elem = f32> + Send + Sync> LSHFunction for SimHash<ArrayBase<S, Ix1>> {
     type Input = ArrayBase<S, Ix1>;
-    type Output = usize;
+    type Output = u128;
     type Scratch = ();
 
     fn allocate_scratch(&self) -> Self::Scratch {}

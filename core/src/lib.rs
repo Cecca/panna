@@ -39,7 +39,7 @@ pub mod test {
     ) where
         F: LSHFunction<Input = ArrayView1<'a, f32>, Output = O>,
         B: LSHFunctionBuilder<LSH = F>,
-        O: Eq + Copy
+        O: Eq + Copy,
     {
         let hashers = builder.build_vec(samples);
 

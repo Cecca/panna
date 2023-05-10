@@ -53,7 +53,6 @@ fn main() {
     let tend = Instant::now();
     eprintln!("Index built in {:?}", tend - tstart);
 
-
     eprintln!("Running queries");
     let mut pl = ProgressLogger::builder()
         .with_expected_updates(queries.num_points() as u64)
