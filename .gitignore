@@ -1,1 +1,6 @@
 /target
+.ipynb_checkpoints
+*.hdf5
+*.cache
+*.pdf
+*.csv
