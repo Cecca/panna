@@ -125,6 +125,8 @@ pub fn bench_simhash_range_query(c: &mut Criterion) {
         b.iter(|| black_box(brute_force_range_query(&data, &query, r, sim)))
     });
 
+    let mut res = Vec::new();
+
     // Simhash
     let builder = SimHashBuilder::<ArrayView1<f32>, _>::new(data.num_dimensions(), 16, &mut rng);
     eprintln!("Building simhash index");
@@ -133,10 +135,10 @@ pub fn bench_simhash_range_query(c: &mut Criterion) {
     let tend = Instant::now();
     eprintln!("Index built in {:?}", tend - tstart);
     let mut stats = QueryStats::default();
-    index.query_range(&query, r, delta, &mut stats);
+    index.query_range(&query, r, delta, &mut res, &mut stats);
     eprintln!("{:?}", stats);
     group.bench_function("simhash", |b| {
-        b.iter(|| black_box(index.query_range(&query, r, delta, &mut stats)))
+        b.iter(|| index.query_range(&query, r, delta, &mut res, &mut stats))
     });
 
     // cross polytope
@@ -148,10 +150,10 @@ pub fn bench_simhash_range_query(c: &mut Criterion) {
     let tend = Instant::now();
     eprintln!("Index built in {:?}", tend - tstart);
     let mut stats = QueryStats::default();
-    index.query_range(&query, r, delta, &mut stats);
+    index.query_range(&query, r, delta, &mut res, &mut stats);
     eprintln!("{:?}", stats);
     group.bench_function("crosspolytope", |b| {
-        b.iter(|| black_box(index.query_range(&query, r, delta, &mut stats)))
+        b.iter(|| index.query_range(&query, r, delta, &mut res, &mut stats))
     });
 
     // cross polytope 2
@@ -163,10 +165,10 @@ pub fn bench_simhash_range_query(c: &mut Criterion) {
     let tend = Instant::now();
     eprintln!("Index built in {:?}", tend - tstart);
     let mut stats = QueryStats::default();
-    index.query_range(&query, r, delta, &mut stats);
+    index.query_range(&query, r, delta, &mut res, &mut stats);
     eprintln!("{:?}", stats);
     group.bench_function("crosspolytope(x2)", |b| {
-        b.iter(|| black_box(index.query_range(&query, r, delta, &mut stats)))
+        b.iter(|| index.query_range(&query, r, delta, &mut res, &mut stats))
     });
 
     drop(group);

@@ -66,10 +66,11 @@ fn main() {
         (query, r)
     }));
 
-    let mut all_stats = Vec::new();
+    let mut res = Vec::new();
+    let mut all_stats: Vec<QueryStats> = Vec::new();
     for (query, r) in all_queries {
         let mut stats = QueryStats::default();
-        index.query_range(&query, r, delta, &mut stats);
+        index.query_range(&query, r, delta, &mut res, &mut stats);
         all_stats.push(stats);
         pl.update(1u64);
     }

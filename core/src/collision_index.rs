@@ -138,8 +138,10 @@ where
         q: &H::Input,
         r: f32,
         delta: f32,
+        result: &mut Vec<usize>,
         stats: &mut QueryStats,
-    ) -> Vec<usize> {
+    ) {
+        result.clear();
         self.collision_table.fill(0);
         stats.total = self.data.num_points();
 
@@ -160,7 +162,6 @@ where
             }
         }
 
-        let mut res = Vec::new();
         let samples = self.hashers.len();
         let p_r = self.hashers[0].collision_probability(r);
         let p_bound = p_r - (1.0 / (2.0 * samples as f32) * (2.0 / delta).ln()).sqrt();
@@ -172,7 +173,7 @@ where
                 stats.visited += 1;
                 if Sim::similarity(q, &self.data.get(idx)) >= r {
                     stats.true_positives += 1;
-                    res.push(idx);
+                    result.push(idx);
                 } else {
                     stats.false_positives += 1;
                 }
@@ -181,7 +182,6 @@ where
                 stats.at_least_one_collision += 1;
             }
         }
-        res
     }
 }
 
@@ -214,7 +214,8 @@ mod test {
         let range = 0.8;
         let delta = 0.1;
         let mut stats = QueryStats::default();
-        let ans = index.query_range(&q, 0.8, 0.1, &mut stats);
+        let mut ans = Vec::new();
+        index.query_range(&q, 0.8, 0.1, &mut ans, &mut stats);
         dbg!(stats);
         let sim = CosineSimilarity::<ArrayView1<f32>>::default();
         let bf = brute_force_range_query(&data, &q, range, sim);

@@ -42,7 +42,6 @@ impl<Input> CrossPolytopeLSH<Input> {
                                                                        // many values than there
                                                                        // are dimensions (positive
                                                                        // and negative).
-        dbg!(bits_per_function);
         assert!(bits_per_function * num_functions <= 8 * std::mem::size_of::<u128>());
 
         let distr = Bernoulli::new(0.5).unwrap();
@@ -176,7 +175,7 @@ impl<S: Data<Elem = f32> + Send + Sync, R: Rng> LSHFunctionBuilder
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct CrossPolytopeProbabilities {
     dimensions: usize,
     eps: f32,
@@ -200,9 +199,18 @@ impl CrossPolytopeProbabilities {
             let p = Self::new(dimensions, eps, samples);
             let f = std::fs::File::create(&fname).unwrap();
             bincode::serialize_into(f, &p).unwrap();
+            #[cfg(test)]
+            {
+                let f = std::fs::File::open(&fname).unwrap();
+                let check: Self = bincode::deserialize_from(f).unwrap();
+                assert!(check.eq(&p));
+            }
         }
         let f = std::fs::File::open(&fname).unwrap();
-        bincode::deserialize_from(f).unwrap()
+        let s: Self = bincode::deserialize_from(f).unwrap();
+        assert_eq!(s.dimensions, dimensions);
+        assert_eq!(s.eps, eps);
+        s
     }
 
     fn new(dimensions: usize, eps: f32, samples: usize) -> Self {
