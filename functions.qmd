@@ -1,0 +1,102 @@
+---
+title: Comparing alternative LSH functions
+---
+
+```{python}
+import numpy as np
+from scipy.stats import norm as normal
+import matplotlib.pyplot as plt
+import seaborn as sns
+```
+
+We focus on z-normalized vectors of lenght 1000, which therefore have norm $\sqrt{1000}$.
+
+```{python}
+dim = 1000
+zeucl = 3 # That's the distance of the motif
+```
+
+## Function definitions
+
+### SimHash
+
+```{python}
+def cp_simhash(zeucl, dim):
+    dot = (2*dim - zeucl*zeucl) / 2  
+    theta = np.arccos(dot / dim)
+    return 1 - theta / np.pi
+
+cp_simhash(zeucl, dim)
+```
+
+### p-stable
+
+```{python}
+def cp_pstable(zeucl, dim, r):
+    return 1.0 - 2.0 * normal.cdf(-r / zeucl) - (2.0 / (np.sqrt(np.pi * 2.0) * (r / zeucl))) * (1.0 - np.exp(-r * r / (2.0 * zeucl * zeucl)))
+
+cp_pstable(zeucl, dim, 1)
+```
+
+### Cross polytope
+
+```{python}
+def cp_cross_polytope(zeucl, dim, samples = 1000):
+    dot = ( (2*dim - zeucl*zeucl) / 2 ) / dim
+    x, y = np.zeros(2), np.zeros(2)
+    x[0] = 1
+    y[0] = dot
+    y[1] = np.sqrt(1 - dot * dot)
+
+    def sample_collision(a, b):
+        prj = np.random.normal(size=(8, 2))
+        pa = np.dot(prj, a)
+        pb = np.dot(prj, b)
+        ha = np.argmax(np.abs(pa))
+        hb = np.argmax(np.abs(pb))
+        ha *= np.sign(pa[ha])
+        hb *= np.sign(pb[hb])
+        return ha == hb
+
+    p = np.sum([sample_collision(x, y) for _ in range(samples)]) / samples
+    return p
+        
+
+cp_cross_polytope(zeucl, dim)
+```
+
+## Collision probability
+
+```{python}
+zeucls = np.arange(0, np.sqrt(dim), step=0.1)
+p_simhash = cp_simhash(zeucls, dim)
+p_pstable = cp_pstable(zeucls, dim, 2)
+p_crosspolytope = np.array([ cp_cross_polytope(d, dim, samples=10000) for d in zeucls ])
+```
+
+```{python}
+plt.plot(zeucls, p_simhash, label="simhash")
+plt.plot(zeucls, p_pstable, label="pstable")
+plt.plot(zeucls, p_crosspolytope, label="crosspolytope")
+plt.legend()
+```
+
+## Random data
+
+```{python}
+#data = np.random.normal(size=(100, 2))
+#data = data / np.linalg.norm(data, axis=1)[:,np.newaxis]
+
+#D = 2**5
+#prjs = np.random.normal(size=(2, D))
+#prjs_norms = np.linalg.norm(prjs, axis=0)
+#projected = np.dot(data, prjs)
+
+#plt.scatter(data[:,0], data[:,1])
+#plt.figure()
+#sns.kdeplot(projected.flatten())
+#sns.rugplot(projected.flatten())
+#print(np.sqrt(2 * np.log(D)))
+```
+
+

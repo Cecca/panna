@@ -1,5 +1,5 @@
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 use std::fmt::Debug;
 use std::hash::Hash;
 
@@ -83,7 +83,7 @@ pub struct CollisionIndex<
     data: &'data D,
     tables: Vec<Table<H::Output>>,
     /// A counter of collisions for each point, to be reset across queries
-    collision_table: Vec<usize>,
+    collision_table: BTreeMap<usize, usize>,
     scratch: H::Scratch,
     similarity_function: Sim,
 }
@@ -120,7 +120,7 @@ where
             })
             .collect();
 
-        let collision_table = vec![0; data.num_points()];
+        // let collision_table = vec![0; data.num_points()];
         let scratch = hashers[0].allocate_scratch();
 
         Self {
@@ -128,7 +128,7 @@ where
             hashers,
             data,
             tables,
-            collision_table,
+            collision_table: BTreeMap::new(),
             scratch,
         }
     }
@@ -142,7 +142,7 @@ where
         stats: &mut QueryStats,
     ) {
         result.clear();
-        self.collision_table.fill(0);
+        self.collision_table.clear();
         stats.total = self.data.num_points();
 
         // Reference local to the function. Benchmarking shows that
@@ -156,9 +156,8 @@ where
             debug_assert!(test::is_increasing(collisions));
 
             for idx in collisions {
-                unsafe {
-                    *collision_table.get_unchecked_mut(*idx) += 1;
-                }
+                // *collision_table.get_unchecked_mut(*idx) += 1;
+                collision_table.entry(*idx).and_modify(|c| *c += 1).or_insert(1);
             }
         }
 
@@ -166,14 +165,14 @@ where
         let p_r = self.hashers[0].collision_probability(r);
         let p_bound = p_r - (1.0 / (2.0 * samples as f32) * (2.0 / delta).ln()).sqrt();
         stats.threshold_probability = p_r;
-        stats.threshold_probability_bound = p_bound;
+        stats.threshold_probability_bound = p_bound.max(0.0);
         let threshold = (p_bound * samples as f32).ceil() as usize;
-        for (idx, cnt) in self.collision_table.iter().enumerate() {
+        for (idx, cnt) in self.collision_table.iter() {
             if *cnt >= threshold {
                 stats.visited += 1;
-                if Sim::similarity(q, &self.data.get(idx)) >= r {
+                if Sim::similarity(q, &self.data.get(*idx)) >= r {
                     stats.true_positives += 1;
-                    result.push(idx);
+                    result.push(*idx);
                 } else {
                     stats.false_positives += 1;
                 }

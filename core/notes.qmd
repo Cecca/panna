@@ -1,0 +1,33 @@
+---
+title: "Some notes"
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+library(tidyverse)
+library(ggpubr)
+```
+
+```{r}
+read_csv("res.csv") |>
+  #mutate(fpr = false_positives / max(false_positives)) |>
+  ggplot(aes(range, visited)) +
+  geom_point() +
+  geom_hline(yintercept=10) +
+  scale_y_log10() +
+  theme_classic()
+```
+
+```{r}
+read_csv("res.csv") |>
+  ggplot(aes(range, threshold_probability)) +
+  geom_point() +
+  geom_point(aes(y=threshold_probability_bound), color="orange") +
+  geom_hline(yintercept=0) +
+  theme_classic()
+```
+
+
