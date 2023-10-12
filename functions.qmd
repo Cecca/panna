@@ -68,16 +68,21 @@ cp_cross_polytope(zeucl, dim)
 ## Collision probability
 
 ```{python}
-zeucls = np.arange(0, np.sqrt(dim), step=0.1)
-p_simhash = cp_simhash(zeucls, dim)
-p_pstable = cp_pstable(zeucls, dim, 2)
+zeucls = np.linspace(0, np.sqrt(dim))
+p_simhash = cp_simhash(zeucls, dim)**8
+p_pstable = dict()
+for w in [1,2,4]:
+    p_pstable[w] = cp_pstable(zeucls, dim, w)
 p_crosspolytope = np.array([ cp_cross_polytope(d, dim, samples=10000) for d in zeucls ])
 ```
 
 ```{python}
+K = 1
 plt.plot(zeucls, p_simhash, label="simhash")
-plt.plot(zeucls, p_pstable, label="pstable")
-plt.plot(zeucls, p_crosspolytope, label="crosspolytope")
+# plt.plot(zeucls, p_crosspolytope, label="crosspolytope")
+for w, ps in p_pstable.items():
+    plt.plot(zeucls, ps**K, label=f"pstable-{w}", c="gray")
+# plt.yscale('log')
 plt.legend()
 ```
 
