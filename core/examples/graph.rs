@@ -1,13 +1,9 @@
-use lsh::collision_index::*;
-use lsh::cross_polytope::*;
 use lsh::simhash::SimHash;
 use lsh::types::*;
 use ndarray::prelude::*;
 use ndarray_rand::rand::prelude::*;
-use progress_logger::*;
+
 use std::collections::HashMap;
-use std::io::prelude::*;
-use std::time::Instant;
 
 fn sketch_dist(mut a: u128, mut b: u128, func_bits: usize, n_funcs: usize) -> usize {
     let mut d = 0;
@@ -61,9 +57,9 @@ fn main() {
     debug_assert!(false, "run only in release mode");
     let mut rng = StdRng::seed_from_u64(1234);
 
-    let sim = CosineSimilarity::<ArrayView1<f32>>::default();
+    let _sim = CosineSimilarity::<ArrayView1<f32>>::default();
 
-    let (data, queries, distances, neighbors) = datasets::load_dense_dataset("glove-100-angular");
+    let (data, queries, _distances, _neighbors) = datasets::load_dense_dataset("glove-100-angular");
 
     let K = std::env::args().nth(1).unwrap().parse::<usize>().unwrap();
 

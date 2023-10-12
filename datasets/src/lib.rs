@@ -68,4 +68,3 @@ pub fn load_dense_dataset(name: &str) -> (Array2<f32>, Array2<f32>, Array2<f32>,
 fn test_download() {
     load_dense_dataset("glove-25-angular");
 }
-

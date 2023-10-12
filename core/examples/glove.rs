@@ -1,8 +1,6 @@
-use lsh::brute_force::brute_force_range_query;
 use lsh::collision_index::*;
 use lsh::cross_polytope::*;
-use lsh::simhash::SimHash;
-use lsh::simhash::SimHashBuilder;
+
 use lsh::types::*;
 use ndarray::prelude::*;
 use ndarray_rand::rand::prelude::*;
@@ -19,7 +17,7 @@ fn main() {
 
     let delta = 1.0;
     let reps = 256;
-    let (data, queries, distances, neighbors) = datasets::load_dense_dataset("glove-25-angular");
+    let (data, queries, _distances, neighbors) = datasets::load_dense_dataset("glove-25-angular");
 
     let builder =
         CrossPolytopeBuilder::<ArrayView1<f32>, _>::new(data.num_dimensions(), 1, &mut rng);

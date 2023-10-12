@@ -1,18 +1,10 @@
-use lsh::brute_force::brute_force_range_query;
-use lsh::collision_index::*;
-use lsh::cross_polytope::*;
-use lsh::simhash::SimHash;
-use lsh::simhash::SimHashBuilder;
-use lsh::types::*;
-use ndarray::linalg::*;
 use ndarray::prelude::*;
 use ndarray_rand::rand::prelude::*;
 use ndarray_rand::*;
 use progress_logger::*;
 use std::collections::BTreeSet;
-use std::io::prelude::*;
+
 use std::iter::FromIterator;
-use std::time::Instant;
 
 fn recall(ground: ArrayView1<usize>, actual: &BTreeSet<usize>) -> f32 {
     let mut cnt = 0;
@@ -29,16 +21,16 @@ fn main() {
     debug_assert!(false, "run only in release mode");
     let mut rng = StdRng::seed_from_u64(1234);
 
-    let (data, queries, distances, neighbors) = datasets::load_dense_dataset("glove-25-angular");
+    let (data, queries, _distances, neighbors) = datasets::load_dense_dataset("glove-25-angular");
 
-    let k = 1;
-    let n = data.shape()[0];
+    let _k = 1;
+    let _n = data.shape()[0];
     let d = data.shape()[1];
-    let nq = 1; //queries.shape()[0];
+    let _nq = 1; //queries.shape()[0];
     let D = 1024; // How many dimensions to project on
-    let s0 = 1;
-    let b = 1;
-    let correction = 1.0 / (2.0 * (D as f32).ln()).sqrt();
+    let _s0 = 1;
+    let _b = 1;
+    let _correction = 1.0 / (2.0 * (D as f32).ln()).sqrt();
     let samples = 10000;
 
     let normal = ndarray_rand::rand_distr::StandardNormal;

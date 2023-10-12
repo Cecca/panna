@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::mem::size_of;
+
 use std::sync::RwLock;
 
 use ffht::fht_f32;

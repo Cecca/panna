@@ -35,7 +35,7 @@ impl<S: Data<Elem = f32> + Send + Sync> LSHFunction for SimHash<ArrayBase<S, Ix1
 
     fn allocate_scratch(&self) -> Self::Scratch {}
 
-    fn hash(&self, v: &Self::Input, scratch: &mut Self::Scratch) -> Self::Output {
+    fn hash(&self, v: &Self::Input, _scratch: &mut Self::Scratch) -> Self::Output {
         assert_eq!(v.len(), self.dimensions);
         let mut h = 0;
         for x in self.directions.rows() {

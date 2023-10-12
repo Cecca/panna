@@ -76,7 +76,7 @@ pub fn bench_count(c: &mut Criterion) {
 
 pub fn bench_simhash_range_query(c: &mut Criterion) {
     let reps = 1000;
-    let (data, queries, distances, neighbors) = datasets::load_dense_dataset("glove-100-anglar");
+    let (data, queries, _distances, neighbors) = datasets::load_dense_dataset("glove-100-anglar");
 
     let q_idx = 0;
     let query = queries.row(q_idx);
