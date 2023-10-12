@@ -10,33 +10,6 @@ use progress_logger::*;
 use std::io::prelude::*;
 use std::time::Instant;
 
-pub fn load_glove(dim: usize) -> (Array2<f32>, Array2<f32>, Array2<usize>) {
-    use std::io::BufWriter;
-    use std::path::PathBuf;
-
-    let local = PathBuf::from(format!(".glove-{}-angular.hdf5", dim));
-    if !local.is_file() {
-        let mut remote = ureq::get(&format!("http://ann-benchmarks.com/glove-{}-angular.hdf5", dim))
-            .call()
-            .unwrap()
-            .into_reader();
-        let mut local_file = BufWriter::new(std::fs::File::create(&local).unwrap());
-        std::io::copy(&mut remote, &mut local_file).unwrap();
-    }
-    let f = hdf5::File::open(&local).unwrap();
-    let mut data = f.dataset("/train").unwrap().read_2d::<f32>().unwrap();
-    let mut queries = f.dataset("/test").unwrap().read_2d::<f32>().unwrap();
-    let ground = f.dataset("/neighbors").unwrap().read_2d::<usize>().unwrap();
-
-    for mut row in data.rows_mut() {
-        row /= norm2(&row);
-    }
-    for mut row in queries.rows_mut() {
-        row /= norm2(&row);
-    }
-    (data, queries, ground)
-}
-
 fn main() {
     env_logger::init();
     debug_assert!(false, "run only in release mode");
@@ -46,11 +19,11 @@ fn main() {
 
     let delta = 1.0;
     let reps = 256;
-    let (data, queries, neighbors) = load_glove(25);
+    let (data, queries, distances, neighbors) = datasets::load_dense_dataset("glove-25-angular");
 
     let builder =
         CrossPolytopeBuilder::<ArrayView1<f32>, _>::new(data.num_dimensions(), 1, &mut rng);
-        // SimHashBuilder::<ArrayView1<f32>, _>::new(data.num_dimensions(), 16, &mut rng);
+    // SimHashBuilder::<ArrayView1<f32>, _>::new(data.num_dimensions(), 16, &mut rng);
     eprintln!("Building CP index");
     let tstart = Instant::now();
     let mut index = CollisionIndex::new(sim, &data, builder, reps);
@@ -65,18 +38,6 @@ fn main() {
             CosineSimilarity::similarity(&query, &data.row(*neighbors.get((q_idx, 9)).unwrap()));
         (query, r)
     }));
-
-    // // brute force baseline
-    // eprintln!("Brute force queries");
-    // let mut pl = ProgressLogger::builder()
-    //     .with_expected_updates(queries.num_points() as u64)
-    //     .with_items_name("queries")
-    //     .start();
-    // for (query, r) in all_queries.iter() {
-    //     brute_force_range_query(&data, query, *r, sim);
-    //     pl.update(1u64);
-    // }
-    // pl.stop();
 
     let mut out = std::io::BufWriter::new(std::fs::File::create("res.csv").unwrap());
     writeln!(out, "q_idx,dimensions,range,visited,false_positives,true_positives,threshold_probability,threshold_probability_bound").unwrap();
@@ -106,5 +67,4 @@ fn main() {
         pl.update(1u64);
     }
     pl.stop();
-
 }

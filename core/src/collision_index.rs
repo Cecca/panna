@@ -1,5 +1,5 @@
 use rayon::prelude::*;
-use std::collections::{HashMap, BTreeMap};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 use std::hash::Hash;
 
@@ -157,7 +157,10 @@ where
 
             for idx in collisions {
                 // *collision_table.get_unchecked_mut(*idx) += 1;
-                collision_table.entry(*idx).and_modify(|c| *c += 1).or_insert(1);
+                collision_table
+                    .entry(*idx)
+                    .and_modify(|c| *c += 1)
+                    .or_insert(1);
             }
         }
 
@@ -204,7 +207,7 @@ mod test {
     #[test]
     fn test_index() {
         let repetitions = 10000;
-        let data = crate::test::load_glove25();
+        let data = datasets::load_dense_dataset("glove-25-angular").0;
         let rng = ndarray_rand::rand::thread_rng();
         let builder = SimHashBuilder::<ArrayView1<f32>, _>::new(data.ncols(), 8, rng);
         let sim = CosineSimilarity::<ArrayView1<f32>>::default();

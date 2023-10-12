@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "ffht",
-    "core"
+    "core",
+    "datasets"
 ]
 

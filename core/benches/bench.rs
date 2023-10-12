@@ -9,33 +9,6 @@ use lsh::types::*;
 use ndarray::prelude::*;
 use ndarray_rand::rand::prelude::*;
 
-pub fn load_glove100() -> (Array2<f32>, Array2<f32>, Array2<usize>) {
-    use std::io::BufWriter;
-    use std::path::PathBuf;
-
-    let local = PathBuf::from(".glove-100-angular.hdf5");
-    if !local.is_file() {
-        let mut remote = ureq::get("http://ann-benchmarks.com/glove-100-angular.hdf5")
-            .call()
-            .unwrap()
-            .into_reader();
-        let mut local_file = BufWriter::new(std::fs::File::create(&local).unwrap());
-        std::io::copy(&mut remote, &mut local_file).unwrap();
-    }
-    let f = hdf5::File::open(&local).unwrap();
-    let mut data = f.dataset("/train").unwrap().read_2d::<f32>().unwrap();
-    let mut queries = f.dataset("/test").unwrap().read_2d::<f32>().unwrap();
-    let ground = f.dataset("/neighbors").unwrap().read_2d::<usize>().unwrap();
-
-    for mut row in data.rows_mut() {
-        row /= norm2(&row);
-    }
-    for mut row in queries.rows_mut() {
-        row /= norm2(&row);
-    }
-    (data, queries, ground)
-}
-
 pub fn bench_count(c: &mut Criterion) {
     use ndarray_rand::rand::seq::index::sample;
     let mut counters = vec![0; 1_000_000];
@@ -103,7 +76,7 @@ pub fn bench_count(c: &mut Criterion) {
 
 pub fn bench_simhash_range_query(c: &mut Criterion) {
     let reps = 1000;
-    let (data, queries, neighbors) = load_glove100();
+    let (data, queries, distances, neighbors) = datasets::load_dense_dataset("glove-100-anglar");
 
     let q_idx = 0;
     let query = queries.row(q_idx);
@@ -176,7 +149,7 @@ pub fn bench_simhash_range_query(c: &mut Criterion) {
 
 pub fn bench_simhash(c: &mut Criterion) {
     let reps = 200;
-    let (data, _, _) = load_glove100();
+    let (data, _, _, _) = datasets::load_dense_dataset("glove-100-angular");
     let rng = StdRng::seed_from_u64(1234);
     let hashers =
         SimHashBuilder::<ArrayView1<f32>, _>::new(data.shape()[1], 8, rng).build_vec(reps);
@@ -213,4 +186,4 @@ pub fn bench_simhash(c: &mut Criterion) {
 
 criterion_group!(basic, bench_count);
 criterion_group!(benches, bench_simhash, bench_simhash_range_query);
-criterion_main!(basic, benches);
+criterion_main!(benches);

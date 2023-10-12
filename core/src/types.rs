@@ -89,10 +89,7 @@ impl<'slf> Dataset<'slf, ArrayView1<'slf, f32>> for UnitNormDataset {
 }
 
 impl UnitNormDataset {
-    fn from_hdf5<P: AsRef<Path>>(path: P, name: &str) -> Self {
-        let f = hdf5::File::open(path.as_ref()).unwrap();
-        let mut points = f.dataset(name).unwrap().read_2d::<f32>().unwrap();
-
+    fn from(mut points: Array2<f32>) -> Self {
         for mut row in points.rows_mut() {
             row /= norm2(&row);
         }

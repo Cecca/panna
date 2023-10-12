@@ -9,28 +9,6 @@ pub mod test {
     use crate::types::*;
     use ndarray::prelude::*;
 
-    pub fn load_glove25() -> Array2<f32> {
-        use std::io::BufWriter;
-        use std::path::PathBuf;
-
-        let local = PathBuf::from(".glove-25-angular.hdf5");
-        if !local.is_file() {
-            let mut remote = ureq::get("http://ann-benchmarks.com/glove-25-angular.hdf5")
-                .call()
-                .unwrap()
-                .into_reader();
-            let mut local_file = BufWriter::new(std::fs::File::create(&local).unwrap());
-            std::io::copy(&mut remote, &mut local_file).unwrap();
-        }
-        let f = hdf5::File::open(&local).unwrap();
-        let mut data = f.dataset("/test").unwrap().read_2d::<f32>().unwrap();
-
-        for mut row in data.rows_mut() {
-            row /= norm2(&row);
-        }
-        data
-    }
-
     pub fn test_collision_probability<'a, F, B, O>(
         data: &'a Array2<f32>,
         mut builder: B,
