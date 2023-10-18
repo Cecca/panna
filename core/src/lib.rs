@@ -1,6 +1,7 @@
 pub mod brute_force;
 pub mod collision_index;
 pub mod cross_polytope;
+pub mod dataset;
 pub mod simhash;
 pub mod types;
 

@@ -1,8 +1,27 @@
 use ndarray::prelude::*;
 
+#[derive(PartialEq, PartialOrd)]
+pub struct DistanceF32(f32);
+impl Eq for DistanceF32 {}
+impl Ord for DistanceF32 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.partial_cmp(&other.0).unwrap()
+    }
+}
+impl From<f32> for DistanceF32 {
+    fn from(value: f32) -> Self {
+        Self(value)
+    }
+}
+impl Into<f32> for DistanceF32 {
+    fn into(self) -> f32 {
+        self.0
+    }
+}
+
 pub trait Dataset<'slf, Point> {
     /// The distance data type returned, e.g. `f64` of `u32`
-    type Distance: Sized;
+    type Distance: Sized + Ord;
     /// A type to be used for prepared queries
     type PreparedPoint;
 
@@ -48,7 +67,7 @@ impl AngularDataset {
 }
 
 impl<'slf> Dataset<'slf, ArrayView1<'slf, f32>> for AngularDataset {
-    type Distance = f32;
+    type Distance = DistanceF32;
 
     type PreparedPoint = Array1<f32>;
 
@@ -66,7 +85,7 @@ impl<'slf> Dataset<'slf, ArrayView1<'slf, f32>> for AngularDataset {
 
     fn distance(&self, i: usize, query: &Self::PreparedPoint) -> Self::Distance {
         let v = self.points.row(i);
-        1.0 - v.dot(query)
+        (1.0 - v.dot(query)).into()
     }
 
     fn get(&'slf self, i: usize) -> ArrayView1<'slf, f32> {
@@ -108,7 +127,7 @@ impl EuclideanDataset {
 }
 
 impl<'slf> Dataset<'slf, ArrayView1<'slf, f32>> for EuclideanDataset {
-    type Distance = f32;
+    type Distance = DistanceF32;
 
     /// A prepared point is the point itself along with its norm
     type PreparedPoint = (Array1<f32>, f32);
@@ -128,7 +147,7 @@ impl<'slf> Dataset<'slf, ArrayView1<'slf, f32>> for EuclideanDataset {
     fn distance(&self, i: usize, query: &Self::PreparedPoint) -> Self::Distance {
         let v = self.points.row(i);
         let v_norm_squared = self.squared_norms[i];
-        v_norm_squared + query.1 - 2.0 * v.dot(&query.0)
+        (v_norm_squared + query.1 - 2.0 * v.dot(&query.0)).into()
     }
 
     fn get(&'slf self, i: usize) -> ArrayView1<'slf, f32> {
@@ -147,4 +166,14 @@ impl<'slf> Dataset<'slf, ArrayView1<'slf, f32>> for EuclideanDataset {
 // FIXME: optimize with SIMD
 fn norm_squared<S: ndarray::Data<Elem = f32>>(v: &ArrayBase<S, Ix1>) -> f32 {
     v.iter().map(|x| x * x).sum::<f32>()
+}
+
+pub fn load_distances<P: AsRef<std::path::Path>>(hdf5_path: P) -> Array2<f32> {
+    let f = hdf5::File::open(hdf5_path.as_ref()).unwrap();
+    f.dataset("/distances").unwrap().read_2d::<f32>().unwrap()
+}
+
+pub fn load_raw_queries<P: AsRef<std::path::Path>>(hdf5_path: P) -> Array2<f32> {
+    let f = hdf5::File::open(hdf5_path.as_ref()).unwrap();
+    f.dataset("/test").unwrap().read_2d::<f32>().unwrap()
 }

@@ -63,52 +63,52 @@ pub trait LSHFunctionBuilder {
     }
 }
 
-pub trait Dataset<'slf, T> {
-    fn num_dimensions(&self) -> usize;
-    fn num_points(&self) -> usize;
-    fn get(&'slf self, idx: usize) -> T;
-}
-
-pub struct UnitNormDataset {
-    points: Array2<f32>,
-}
-
-impl<'slf> Dataset<'slf, ArrayView1<'slf, f32>> for UnitNormDataset {
-    fn num_dimensions(&self) -> usize {
-        self.points.ncols()
-    }
-
-    fn num_points(&self) -> usize {
-        self.points.nrows()
-    }
-
-    fn get(&'slf self, idx: usize) -> ArrayView1<'slf, f32> {
-        self.points.row(idx)
-    }
-}
-
-impl UnitNormDataset {
-    fn from(mut points: Array2<f32>) -> Self {
-        for mut row in points.rows_mut() {
-            row /= norm2(&row);
-        }
-        Self { points }
-    }
-}
-
-impl<'slf> Dataset<'slf, ArrayView1<'slf, f32>> for Array2<f32> {
-    fn num_dimensions(&self) -> usize {
-        self.ncols()
-    }
-
-    fn num_points(&self) -> usize {
-        self.nrows()
-    }
-
-    fn get(&'slf self, idx: usize) -> ArrayView1<'slf, f32> {
-        self.row(idx)
-    }
-}
+// pub trait Dataset<'slf, T> {
+//     fn num_dimensions(&self) -> usize;
+//     fn num_points(&self) -> usize;
+//     fn get(&'slf self, idx: usize) -> T;
+// }
+//
+// pub struct UnitNormDataset {
+//     points: Array2<f32>,
+// }
+//
+// impl<'slf> Dataset<'slf, ArrayView1<'slf, f32>> for UnitNormDataset {
+//     fn num_dimensions(&self) -> usize {
+//         self.points.ncols()
+//     }
+//
+//     fn num_points(&self) -> usize {
+//         self.points.nrows()
+//     }
+//
+//     fn get(&'slf self, idx: usize) -> ArrayView1<'slf, f32> {
+//         self.points.row(idx)
+//     }
+// }
+//
+// impl UnitNormDataset {
+//     fn from(mut points: Array2<f32>) -> Self {
+//         for mut row in points.rows_mut() {
+//             row /= norm2(&row);
+//         }
+//         Self { points }
+//     }
+// }
+//
+// impl<'slf> Dataset<'slf, ArrayView1<'slf, f32>> for Array2<f32> {
+//     fn num_dimensions(&self) -> usize {
+//         self.ncols()
+//     }
+//
+//     fn num_points(&self) -> usize {
+//         self.nrows()
+//     }
+//
+//     fn get(&'slf self, idx: usize) -> ArrayView1<'slf, f32> {
+//         self.row(idx)
+//     }
+// }
 
 #[derive(Default, Debug)]
 pub struct QueryStats {

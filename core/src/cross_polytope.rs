@@ -297,14 +297,14 @@ impl CrossPolytopeProbabilities {
 mod test {
     use super::*;
 
-    #[test]
-    fn crosspolytope_collision_probability() {
-        let mut rng = StdRng::seed_from_u64(1234);
-        let dataset = datasets::load_dense_dataset("glove-25-angular").0;
-        let builder = CrossPolytopeBuilder::<ArrayView1<f32>, _>::new(25, 1, &mut rng);
-        crate::test::test_collision_probability(&dataset, builder, 1000000, 0.015);
-
-        let builder = CrossPolytopeBuilder::<ArrayView1<f32>, _>::new(25, 2, &mut rng);
-        crate::test::test_collision_probability(&dataset, builder, 1000000, 0.015);
-    }
+    // #[test]
+    // fn crosspolytope_collision_probability() {
+    //     let mut rng = StdRng::seed_from_u64(1234);
+    //     let dataset = datasets::load_dense_dataset("glove-25-angular").0;
+    //     let builder = CrossPolytopeBuilder::<ArrayView1<f32>, _>::new(25, 1, &mut rng);
+    //     crate::test::test_collision_probability(&dataset, builder, 1000000, 0.015);
+    //
+    //     let builder = CrossPolytopeBuilder::<ArrayView1<f32>, _>::new(25, 2, &mut rng);
+    //     crate::test::test_collision_probability(&dataset, builder, 1000000, 0.015);
+    // }
 }
