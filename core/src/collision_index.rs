@@ -1,3 +1,9 @@
+/// This is an experimental index structure that tries to use the
+/// number of collisions as an estimate of the collisions, probability,
+/// using this information in a progressive sampling fashion. It is however
+/// rather slow, since all the points collide with the query with good
+/// probability (for the parameter ranges that  make the approach applicable)
+/// and thus we end up doing at least linear work in any case.
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;

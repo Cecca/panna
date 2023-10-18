@@ -1,3 +1,5 @@
+/// This is an implementation of the Concomitant of Order Statistics
+/// method for estimating dot products, from the paper https://arxiv.org/pdf/2012.11098.pdf
 use ndarray::prelude::*;
 use ndarray_rand::rand::prelude::*;
 use ndarray_rand::*;
