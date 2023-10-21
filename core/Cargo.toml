@@ -4,18 +4,20 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "lsh"
+name = "ann_playground_core"
 path = "src/lib.rs"
 
 [[bin]]
-name = "lsh"
+name = "ann_playground_core"
 path = "src/main.rs"
 
 [dependencies]
 bincode = "1.3.3"
 ffht = {path = "../ffht"}
 hdf5 = "0.8.1"
-ndarray = { version = "0.15.6" }
+ndarray = { version = "0.15.6", features = ["blas"]}
+blas-src = { version = "0.8", features = ["openblas"] }
+openblas-src = { version = "0.10", features = ["cblas", "system"] }
 ndarray-rand = "0.14.0"
 once_cell = "1.17.1"
 rayon = "1.7.0"

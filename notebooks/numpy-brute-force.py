@@ -2,7 +2,8 @@ import numpy as np
 import h5py
 import timeit
 
-with h5py.File(".glove-100-angular.hdf5") as hfp:
+with h5py.File("core/.fashion-mnist-784-euclidean.hdf5") as hfp:
+# with h5py.File(".glove-100-angular.hdf5") as hfp:
     dataset = hfp['train'][:]
     queries = hfp['test'][:]
     dataset_sqnorms = np.linalg.norm(dataset, axis=1)**2

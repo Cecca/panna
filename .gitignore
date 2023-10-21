@@ -6,3 +6,5 @@
 *.csv
 *_files/
 *.html
+flamegraph.svg
+perf.data

@@ -1,7 +1,10 @@
+extern crate blas_src;
+
 pub mod brute_force;
 pub mod collision_index;
 pub mod cross_polytope;
 pub mod dataset;
+pub mod lsh;
 pub mod simhash;
 pub mod types;
 
