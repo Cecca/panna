@@ -65,6 +65,30 @@ mod test {
     }
 
     #[test]
+    fn test_glove_k100_nn_padded() {
+        let path = ".glove-100-angular.hdf5";
+        let dataset = AngularDatasetPadded::from_hdf5(&path);
+        let queries = load_raw_queries(&path);
+        let distances = load_distances(&path);
+        let qidx = 0;
+        let query = queries.row(qidx);
+        let mut prepared_query: Vec<f32> = dataset.default_prepared_query();
+        dataset.prepare(&query.as_slice().unwrap(), &mut prepared_query);
+
+        let k = 100;
+
+        let expected = distances.row(qidx);
+        let actual = brute_force_knn(&dataset, &prepared_query, k);
+        for (idx, (d, _i)) in actual.into_iter().enumerate() {
+            let d: f32 = d.into();
+            dbg!(d);
+            let ed = expected[idx];
+            dbg!(ed);
+            assert!((d - ed).abs() <= 0.0001);
+        }
+    }
+
+    #[test]
     fn test_fashion_k100_nn() {
         let path = ".fashion-mnist-784-euclidean.hdf5";
         let dataset = EuclideanDataset::from_hdf5(path);
