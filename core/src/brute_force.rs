@@ -97,7 +97,7 @@ mod test {
         let qidx = 0;
         let query = queries.row(qidx);
         let mut prepared_query = dataset.default_prepared_query();
-        dataset.prepare(&query, &mut prepared_query);
+        dataset.prepare(&&query.as_slice().unwrap(), &mut prepared_query);
 
         let k = 100;
 

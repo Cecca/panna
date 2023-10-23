@@ -53,7 +53,7 @@ fn bench_brute_force_fashion(bencher: divan::Bencher) {
         .with_inputs(|| {
             let q = queries.row(qidx);
             let mut prepared_query = dataset.default_prepared_query();
-            dataset.prepare(&q, &mut prepared_query);
+            dataset.prepare(&q.as_slice().unwrap(), &mut prepared_query);
             prepared_query
         })
         .bench_refs(|query| brute_force_knn(&dataset, query, k));

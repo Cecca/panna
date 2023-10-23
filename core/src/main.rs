@@ -12,7 +12,7 @@ fn main() {
 
     let q = queries.row(qidx);
     let mut prepared_query = dataset.default_prepared_query();
-    dataset.prepare(&q, &mut prepared_query);
+    dataset.prepare(&q.as_slice().unwrap(), &mut prepared_query);
     let timer = Instant::now();
     let res = brute_force_knn(&dataset, &prepared_query, k);
     let elapsed = timer.elapsed();

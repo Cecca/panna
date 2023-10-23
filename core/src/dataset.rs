@@ -86,8 +86,8 @@ unsafe fn dot_fma_exact(a: &[f32], b: &[f32]) -> f32 {
     let mut cc = _mm256_setzero_ps();
 
     for (aa, bb) in ca.zip(cb) {
-        let aa = _mm256_load_ps(aa.as_ptr());
-        let bb = _mm256_load_ps(bb.as_ptr());
+        let aa = _mm256_loadu_ps(aa.as_ptr());
+        let bb = _mm256_loadu_ps(bb.as_ptr());
 
         cc = _mm256_fmadd_ps(aa, bb, cc);
     }
@@ -171,6 +171,7 @@ impl AngularDatasetPadded {
             raw.rows_mut().into_iter().map(|mut row| {
                 let norm = norm_squared(&row).sqrt();
                 row /= norm;
+                // FIXME: remove this clone
                 row.to_vec()
             }),
         );
@@ -281,17 +282,30 @@ impl<'slf> Dataset<'slf, ArrayView1<'slf, f32>> for AngularDataset {
 /// A dataset using the Euclidean Distance
 pub struct EuclideanDataset {
     /// The points
-    points: Array2<f32>,
+    points: PaddedVectors,
     /// The squared norms of the points
-    squared_norms: Array1<f32>,
+    squared_norms: Vec<f32>,
 }
 
 impl EuclideanDataset {
     pub fn new(raw: Array2<f32>) -> Self {
-        let squared_norms = raw.map_axis(Axis(1), |row| norm_squared(&row));
+        let squared_norms: Vec<f32> = raw
+            .rows()
+            .into_iter()
+            .map(|row| norm_squared(&row))
+            .collect();
         assert_eq!(squared_norms.len(), raw.nrows());
+        let points = PaddedVectors::new(
+            raw.shape()[1],
+            raw.shape()[0],
+            raw.rows().into_iter().map(|r| {
+                let v = r.as_slice().unwrap();
+                // FIXME: remove this clone
+                v.to_vec()
+            }),
+        );
         Self {
-            points: raw,
+            points,
             squared_norms,
         }
     }
@@ -303,42 +317,43 @@ impl EuclideanDataset {
     }
 }
 
-impl<'slf> Dataset<'slf, ArrayView1<'slf, f32>> for EuclideanDataset {
+impl<'slf> Dataset<'slf, &'slf [f32]> for EuclideanDataset {
     type Distance = DistanceF32;
 
     /// A prepared point is the point itself along with its norm
-    type PreparedPoint = (Array1<f32>, f32);
+    type PreparedPoint = (Vec<f32>, f32);
 
     fn default_prepared_query(&self) -> Self::PreparedPoint {
-        (Array1::zeros(self.num_dimensions()), 0.0)
+        let mut v = Vec::new();
+        v.resize(self.points.stride, 0.0);
+        (v, 0.0)
     }
 
-    fn prepare(&self, query: &ArrayView1<f32>, output: &mut Self::PreparedPoint) {
-        assert_eq!(query.shape(), output.0.shape());
-        output.1 = norm_squared(&query);
+    fn prepare(&self, query: &&[f32], output: &mut Self::PreparedPoint) {
+        output.1 = norm_squared_arr(&query);
         for i in 0..query.len() {
             output.0[i] = query[i];
         }
     }
 
     fn distance(&self, i: usize, query: &Self::PreparedPoint) -> Self::Distance {
-        let v = self.points.row(i);
+        let v = &self.points[i];
         let v_norm_squared = self.squared_norms[i];
-        let dotp = unsafe { dot_fma(v.as_slice().unwrap(), query.0.as_slice().unwrap()) };
+        let dotp = unsafe { dot_fma_exact(v, &query.0) };
         // let dotp = v.dot(&query.0);
         (v_norm_squared + query.1 - 2.0 * dotp).into()
     }
 
-    fn get(&'slf self, i: usize) -> ArrayView1<'slf, f32> {
-        self.points.row(i)
+    fn get(&'slf self, i: usize) -> &[f32] {
+        &self.points[i]
     }
 
     fn num_dimensions(&self) -> usize {
-        self.points.ncols()
+        self.points.dimensions
     }
 
     fn num_points(&self) -> usize {
-        self.points.nrows()
+        self.points.num_vectors
     }
 }
 
