@@ -17,25 +17,7 @@ fn bench_brute_force_glove(bencher: divan::Bencher) {
         .with_inputs(|| {
             let q = queries.row(qidx);
             let mut prepared_query = dataset.default_prepared_query();
-            dataset.prepare(&q, &mut prepared_query);
-            prepared_query
-        })
-        .bench_refs(|query| brute_force_knn(&dataset, query, k));
-}
-
-#[divan::bench]
-fn bench_brute_force_glove_padded(bencher: divan::Bencher) {
-    let path = ".glove-200-angular.hdf5";
-    let dataset = AngularDataset::from_hdf5(path);
-    let queries = load_raw_queries(path);
-    let qidx = 0;
-    let k = 100;
-
-    bencher
-        .with_inputs(|| {
-            let q = queries.row(qidx);
-            let mut prepared_query = dataset.default_prepared_query();
-            dataset.prepare(&q, &mut prepared_query);
+            dataset.prepare(&q.as_slice().unwrap(), &mut prepared_query);
             prepared_query
         })
         .bench_refs(|query| brute_force_knn(&dataset, query, k));
@@ -44,6 +26,24 @@ fn bench_brute_force_glove_padded(bencher: divan::Bencher) {
 #[divan::bench]
 fn bench_brute_force_fashion(bencher: divan::Bencher) {
     let path = ".fashion-mnist-784-euclidean.hdf5";
+    let dataset = EuclideanDataset::from_hdf5(path);
+    let queries = load_raw_queries(path);
+    let qidx = 0;
+    let k = 100;
+
+    bencher
+        .with_inputs(|| {
+            let q = queries.row(qidx);
+            let mut prepared_query = dataset.default_prepared_query();
+            dataset.prepare(&q.as_slice().unwrap(), &mut prepared_query);
+            prepared_query
+        })
+        .bench_refs(|query| brute_force_knn(&dataset, query, k));
+}
+
+#[divan::bench]
+fn bench_brute_force_sift(bencher: divan::Bencher) {
+    let path = ".sift-128-euclidean.hdf5";
     let dataset = EuclideanDataset::from_hdf5(path);
     let queries = load_raw_queries(path);
     let qidx = 0;

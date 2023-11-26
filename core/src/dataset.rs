@@ -158,12 +158,12 @@ pub trait Dataset<'slf, Point> {
 }
 
 /// A dataset using the angular distance
-pub struct AngularDatasetPadded {
+pub struct AngularDataset {
     /// The points, which are normalized upon construction, and padded
     /// to have a length multiple of 8
     points: PaddedVectors,
 }
-impl AngularDatasetPadded {
+impl AngularDataset {
     pub fn new(mut raw: Array2<f32>) -> Self {
         let points = PaddedVectors::new(
             raw.shape()[1],
@@ -184,7 +184,7 @@ impl AngularDatasetPadded {
         Self::new(raw)
     }
 }
-impl<'slf> Dataset<'slf, &'slf [f32]> for AngularDatasetPadded {
+impl<'slf> Dataset<'slf, &'slf [f32]> for AngularDataset {
     type Distance = DistanceF32;
 
     type PreparedPoint = Vec<f32>;
@@ -218,64 +218,6 @@ impl<'slf> Dataset<'slf, &'slf [f32]> for AngularDatasetPadded {
 
     fn num_points(&self) -> usize {
         self.points.num_vectors
-    }
-}
-
-/// A dataset using the angular distance
-pub struct AngularDataset {
-    /// The points, which are normalized upon construction
-    points: Array2<f32>,
-}
-
-impl AngularDataset {
-    pub fn new(mut raw: Array2<f32>) -> Self {
-        for mut row in raw.rows_mut() {
-            let norm = norm_squared(&row).sqrt();
-            row /= norm;
-        }
-        Self { points: raw }
-    }
-
-    pub fn from_hdf5<P: AsRef<std::path::Path>>(path: P) -> Self {
-        let f = hdf5::File::open(path.as_ref()).unwrap();
-        let raw = f.dataset("/train").unwrap().read_2d::<f32>().unwrap();
-        Self::new(raw)
-    }
-}
-
-impl<'slf> Dataset<'slf, ArrayView1<'slf, f32>> for AngularDataset {
-    type Distance = DistanceF32;
-
-    type PreparedPoint = Array1<f32>;
-
-    fn default_prepared_query(&self) -> Self::PreparedPoint {
-        Array1::zeros(self.num_dimensions())
-    }
-
-    fn prepare(&self, query: &ArrayView1<f32>, output: &mut Self::PreparedPoint) {
-        assert_eq!(query.shape(), output.shape());
-        let norm = norm_squared(&query).sqrt();
-        for i in 0..query.len() {
-            output[i] = query[i] / norm;
-        }
-    }
-
-    fn distance(&self, i: usize, query: &Self::PreparedPoint) -> Self::Distance {
-        let v = self.points.row(i);
-        let dotp = unsafe { dot_fma(v.as_slice().unwrap(), query.as_slice().unwrap()) };
-        (1.0 - dotp).into()
-    }
-
-    fn get(&'slf self, i: usize) -> ArrayView1<'slf, f32> {
-        self.points.row(i)
-    }
-
-    fn num_dimensions(&self) -> usize {
-        self.points.ncols()
-    }
-
-    fn num_points(&self) -> usize {
-        self.points.nrows()
     }
 }
 
@@ -387,7 +329,7 @@ mod test {
     #[test]
     fn test_angular_padded_dataset() {
         let path = ".glove-100-angular.hdf5";
-        let dataset = AngularDatasetPadded::from_hdf5(&path);
+        let dataset = AngularDataset::from_hdf5(&path);
         let mut raw = load_raw_data(path);
         let dims = dataset.num_dimensions();
 
