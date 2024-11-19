@@ -8,3 +8,4 @@
 *.html
 flamegraph.svg
 perf.data
+.direnv
