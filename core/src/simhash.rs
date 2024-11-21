@@ -4,6 +4,7 @@ use ndarray_rand::rand::prelude::*;
 use ndarray_rand::RandomExt;
 use std::marker::PhantomData;
 
+use crate::lsh::BitHash32;
 use crate::lsh::LSHFunction;
 use crate::lsh::LSHFunctionBuilder;
 
@@ -30,19 +31,16 @@ impl<Input> SimHash<Input> {
 
 impl<S: Data<Elem = f32> + Send + Sync> LSHFunction for SimHash<ArrayBase<S, Ix1>> {
     type Input = ArrayBase<S, Ix1>;
-    type Output = u128;
+    type Output = BitHash32;
     type Scratch = ();
 
     fn allocate_scratch(&self) -> Self::Scratch {}
 
     fn hash(&self, v: &Self::Input, _scratch: &mut Self::Scratch) -> Self::Output {
         assert_eq!(v.len(), self.dimensions);
-        let mut h = 0;
-        for x in self.directions.rows() {
-            h <<= 1;
-            if v.dot(&x) >= 0.0 {
-                h |= 1;
-            }
+        let mut h = Self::Output::default();
+        for (i, x) in self.directions.rows().into_iter().enumerate() {
+            h.set(i, v.dot(&x) >= 0.0);
         }
         h
     }
