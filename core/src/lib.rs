@@ -10,6 +10,7 @@ pub mod types;
 
 #[cfg(test)]
 pub mod test {
+    use crate::lsh::*;
     use crate::types::*;
     use ndarray::prelude::*;
 

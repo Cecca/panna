@@ -11,7 +11,8 @@ use ndarray_rand::rand::prelude::*;
 use ndarray_rand::rand_distr::StandardNormal;
 use once_cell::sync::Lazy;
 
-use crate::types::{LSHFunction, LSHFunctionBuilder};
+use crate::lsh::LSHFunction;
+use crate::lsh::LSHFunctionBuilder;
 
 static ESTIMATES: Lazy<RwLock<HashMap<usize, CrossPolytopeProbabilities>>> =
     Lazy::new(|| RwLock::new(HashMap::default()));

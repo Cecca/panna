@@ -4,8 +4,8 @@ use ndarray_rand::rand::prelude::*;
 use ndarray_rand::RandomExt;
 use std::marker::PhantomData;
 
-use crate::types::LSHFunction;
-use crate::types::LSHFunctionBuilder;
+use crate::lsh::LSHFunction;
+use crate::lsh::LSHFunctionBuilder;
 
 pub struct SimHash<Input> {
     /// The dimensionality of the input vectors
@@ -90,7 +90,7 @@ mod test {
     // #[test]
     // fn simhash_collision_probability() {
     //     let rng = StdRng::seed_from_u64(1234);
-    //     let dataset = datasets::load_dense_dataset("glove-25-angular").0;
+    //     let dataset = crate::datasets::load_dense_dataset("glove-25-angular").0;
     //     let builder = SimHashBuilder::<ArrayView1<f32>, _>::new(25, 8, rng);
     //     crate::test::test_collision_probability(&dataset, builder, 1000000, 0.001);
     // }

@@ -10,6 +10,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 
 use crate::dataset::*;
+use crate::lsh::{LSHFunction, LSHFunctionBuilder};
 use crate::types::*;
 
 /// Permute the elements of the vector according to the given
