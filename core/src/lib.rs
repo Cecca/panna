@@ -5,6 +5,7 @@ pub mod collision_index;
 pub mod cross_polytope;
 pub mod dataset;
 pub mod lsh;
+pub mod puffinn;
 pub mod simhash;
 pub mod types;
 

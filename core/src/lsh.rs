@@ -3,7 +3,7 @@
 /// lexicographic ordering of the hashes groups together hashes with the
 /// same prefix
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
-pub struct BitHash32(u32);
+pub struct BitHash32(pub u32);
 impl BitHash32 {
     pub fn set(&mut self, i: usize, v: bool) {
         let bit_pos = std::mem::size_of::<u32>() * 8 - i - 1;
