@@ -47,7 +47,7 @@ impl<S: Data<Elem = f32> + Send + Sync> LSHFunction for SimHash<ArrayBase<S, Ix1
 
     fn collision_probability(&self, similarity: f32) -> f32 {
         debug_assert!(-1.0 <= similarity && similarity <= 1.0);
-        (1.0 - similarity.acos() / std::f32::consts::PI).powi(self.directions.shape()[0] as i32)
+        (1.0 - similarity.acos() / std::f32::consts::PI)
     }
 }
 

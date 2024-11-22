@@ -8,6 +8,7 @@ use crate::{
 };
 
 pub trait PrefixCmp {
+    fn max_prefix() -> usize;
     fn prefix_eq(&self, other: &Self, prefix: usize) -> bool;
     fn prefix_cmp(&self, other: &Self, prefix: usize) -> std::cmp::Ordering;
 }
@@ -49,6 +50,9 @@ const BITHASH32_MASKS: [u32; 33] = [
 ];
 
 impl PrefixCmp for BitHash32 {
+    fn max_prefix() -> usize {
+        32
+    }
     fn prefix_eq(&self, other: &Self, prefix: usize) -> bool {
         debug_assert!(prefix <= 32);
         let mask = BITHASH32_MASKS[prefix];
@@ -58,6 +62,104 @@ impl PrefixCmp for BitHash32 {
         debug_assert!(prefix <= 32);
         let mask = BITHASH32_MASKS[prefix];
         (self.0 & mask).cmp(&(other.0 & mask))
+    }
+}
+
+pub struct Index<'data, P, D, H, LSH>
+where
+    H: PrefixCmp + Ord,
+    D: Dataset<'data, P>,
+    D::Distance: Into<f32>,
+    LSH: LSHFunction<Input = P, Output = H>,
+{
+    data: &'data D,
+    hashers: Vec<LSH>,
+    repetitions: Vec<Repetition<H>>,
+}
+
+impl<'data, P, D, H, LSH> Index<'data, P, D, H, LSH>
+where
+    H: PrefixCmp + Ord,
+    D: Dataset<'data, P>,
+    D::Distance: Into<f32>,
+    LSH: LSHFunction<Input = P, Output = H>,
+{
+    pub fn build(data: &'data D, hashers: Vec<LSH>) -> Self {
+        // TODO: build in parallel
+        let repetitions: Vec<Repetition<H>> =
+            hashers.iter().map(|h| Repetition::build(data, h)).collect();
+        Self {
+            data,
+            hashers,
+            repetitions,
+        }
+    }
+
+    pub fn search(&self, query: &P, delta: f32, out: &mut [(D::Distance, usize)]) {
+        let k = out.len();
+        let prepared = {
+            let mut p = self.data.default_prepared_query();
+            self.data.prepare(query, &mut p);
+            p
+        };
+        // Initialize the cursors
+        let mut scratch = self.hashers[0].allocate_scratch();
+        let mut cursors: Vec<Cursor<H>> = self
+            .repetitions
+            .iter()
+            .zip(self.hashers.iter())
+            .map(|(rep, hasher)| {
+                let h = hasher.hash(&query, &mut scratch);
+                rep.cursor(h, H::max_prefix())
+            })
+            .collect();
+
+        // OPTIMIZE: come up with a data structure that never allocates during the query
+        let mut priority = std::collections::BinaryHeap::<(D::Distance, usize)>::new();
+
+        for prefix in (0..=H::max_prefix()).rev() {
+            dbg!(prefix);
+            for (repetition_idx, repetition) in cursors.iter_mut().enumerate() {
+                for i in repetition.collisions() {
+                    let d = self.data.distance(i, &prepared);
+                    if priority.len() < k || d < priority.peek().unwrap().0 {
+                        let pair = (d, i);
+                        if priority.iter().find(|x| **x == pair).is_none() {
+                            priority.push((d, i));
+                            while priority.len() > k {
+                                priority.pop();
+                            }
+                        }
+                    }
+                }
+
+                if priority.len() == k {
+                    let max_d = priority.peek().unwrap().0;
+                    let fp = self.failure_probability(max_d, prefix, repetition_idx + 1);
+                    if fp < delta {
+                        // copy the values in the output array
+                        for i in (0..out.len()).rev() {
+                            out[i] = priority.pop().unwrap();
+                        }
+                        assert!(priority.is_empty());
+                        return;
+                    }
+                }
+            }
+        }
+        unreachable!();
+    }
+
+    pub fn failure_probability(&self, d: D::Distance, prefix: usize, repetition: usize) -> f32 {
+        let max_prefix = H::max_prefix();
+        let p = self.hashers[0].collision_probability(d.into());
+        if prefix < max_prefix {
+            (1.0 - p.powi(prefix as i32)).powi(repetition as i32)
+                * (1.0 - p.powi((prefix + 1) as i32))
+                    .powi((self.repetitions.len() - repetition) as i32)
+        } else {
+            (1.0 - p.powi(prefix as i32)).powi(repetition as i32)
+        }
     }
 }
 
@@ -84,6 +186,10 @@ impl<H: PrefixCmp + Ord> Repetition<H> {
         tmp.sort_unstable();
         let (hashes, indices) = tmp.into_iter().unzip();
         Self { hashes, indices }
+    }
+
+    fn cursor<'slf>(&'slf self, hash: H, prefix: usize) -> Cursor<'slf, H> {
+        Cursor::new(self, hash, prefix)
     }
 }
 
@@ -139,56 +245,68 @@ impl<'rep, H: PrefixCmp + Ord> Cursor<'rep, H> {
         self.range = start..end;
     }
 
-    fn collisions(&self, out: &mut [(usize, usize)]) -> usize {
-        let indices = &self.repetition.indices;
+    fn pair_collisions<'slf>(&'slf self) -> PairsIterator<'slf> {
         if let Some(prev_range) = self.prev_range.as_ref() {
-            // let pre_range = self.range.start..prev_range.start;
-            // let post_range = prev_range.end..self.range.end;
-            // todo!()
-            // pre_range.flat_map(|i| {
-            //     (prev_range.start..self.range.end).map(|j| (i, j))
-            // })
+            PairsIterator::nested(
+                &self.repetition.indices,
+                self.range.start..prev_range.start,
+                prev_range.clone(),
+                prev_range.end..self.range.end,
+            )
         } else {
-            // let mut i = self.range.start;
-            // let mut j = self.range.start + 1;
-            // std::iter::from_fn(move || {
-            //     while i < self.range.end {
-            //         if j < self.range.end {
-            //             let toret = (indices[i], indices[j]);
-            //             j += 1;
-            //             return Some(toret);
-            //         } else {
-            //             i += 1;
-            //             j = i + 1;
-            //         }
-            //     }
-            //     return None;
-            // })
+            PairsIterator::flat(&self.repetition.indices, self.range.clone())
         }
-        todo!()
+    }
+
+    fn collisions<'slf>(&'slf self) -> RangesIterator<'slf> {
+        if let Some(prev_range) = self.prev_range.as_ref() {
+            RangesIterator::nested(
+                &self.repetition.indices,
+                prev_range.clone(),
+                self.range.clone(),
+            )
+        } else {
+            RangesIterator::flat(&self.repetition.indices, self.range.clone())
+        }
     }
 }
 
-// struct CollisionsEnumerator {
-//     ii: Range<usize>,
-//     jj: Range<usize>,
-//     range: Range<usize>,
-//     prev_range: Option<Range<usize>>,
-// }
-// impl CollisionsEnumerator {
-//     fn next(&mut self, out: &mut [(usize, usize)]) -> usize {
-//         let mut cnt = 0;
-//         if let Some(prev_range) = self.prev_range.as_ref() {
-//             todo!()
-//         }
-//         else {
-//             while let Some(i) = ii.next() {
-
-//             }
-//         }
-//         cnt
-//     }
-// }
+pub enum RangesIterator<'values> {
+    Flat {
+        values: &'values [usize],
+        range: Range<usize>,
+    },
+    Nested {
+        values: &'values [usize],
+        first: Range<usize>,
+        second: Range<usize>,
+    },
+}
+impl<'values> RangesIterator<'values> {
+    fn flat(values: &'values [usize], range: Range<usize>) -> Self {
+        Self::Flat { values, range }
+    }
+    fn nested(values: &'values [usize], inner: Range<usize>, outer: Range<usize>) -> Self {
+        Self::Nested {
+            values,
+            first: outer.start..inner.start,
+            second: inner.end..outer.end,
+        }
+    }
+}
+impl<'values> Iterator for RangesIterator<'values> {
+    type Item = usize;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Flat { values, range } => range.next().map(|i| values[i]),
+            Self::Nested {
+                values,
+                first,
+                second,
+            } => first.next().or_else(|| second.next()).map(|i| values[i]),
+        }
+    }
+}
 
 pub enum PairsIterator<'values> {
     /// Gets all pairs of values in the given range
@@ -304,7 +422,7 @@ impl<'values> Iterator for PairsIterator<'values> {
 }
 
 #[test]
-fn test_collision_iterator() {
+fn test_pair_collision_iterator() {
     let values = vec![10, 11, 12, 13];
     let range = 0..values.len();
     assert_eq!(
@@ -346,4 +464,46 @@ fn test_collision_iterator() {
             .collect::<std::collections::BTreeSet<(usize, usize)>>(),
         expected
     );
+}
+
+#[cfg(test)]
+mod test {
+    use ndarray_rand::rand::{thread_rng, Rng};
+
+    use crate::{
+        dataset::{load_distances, load_raw_queries, AngularDataset},
+        lsh::*,
+        simhash::SimHashBuilder,
+    };
+
+    use super::*;
+
+    #[test]
+    fn test_glove_k10_nn() {
+        let mut rng = thread_rng();
+
+        let path = ".glove-100-angular.hdf5";
+        let dataset = AngularDataset::from_hdf5(&path);
+        let queries = load_raw_queries(&path);
+        let distances = load_distances(&path);
+
+        let hashers =
+            SimHashBuilder::<&[f32], _>::new(dataset.num_dimensions(), 32, &mut rng).build_vec(128);
+
+        // let index = Index::build()
+
+        // let qidx = 0;
+        // let query = queries.row(qidx);
+
+        // let k = 10;
+        // let delta = 0.9;
+
+        // let expected = distances.row(qidx);
+        // let actual = brute_force_knn(&dataset, &prepared_query, k);
+        // for (idx, (d, _i)) in actual.into_iter().enumerate() {
+        //     let d: f32 = d.into();
+        //     let ed = expected[idx];
+        //     assert!((d - ed).abs() <= 0.0001);
+        // }
+    }
 }

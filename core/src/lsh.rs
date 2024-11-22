@@ -53,6 +53,7 @@ pub trait LSHFunction: Send + Sync {
 
     fn hash(&self, v: &Self::Input, scratch: &mut Self::Scratch) -> Self::Output;
 
+    /// The probability of a single hash function to collide
     fn collision_probability(&self, similarity: f32) -> f32;
 }
 

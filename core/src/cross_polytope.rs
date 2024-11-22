@@ -113,9 +113,7 @@ impl<S: Data<Elem = f32> + Send + Sync> LSHFunction for CrossPolytopeLSH<ArrayBa
     type Scratch = Vec<f32>;
 
     fn collision_probability(&self, similarity: f32) -> f32 {
-        ESTIMATES.read().unwrap()[&self.dimensions]
-            .probability(similarity)
-            .powi(self.num_functions as i32)
+        ESTIMATES.read().unwrap()[&self.dimensions].probability(similarity)
     }
 
     fn allocate_scratch(&self) -> Vec<f32> {
