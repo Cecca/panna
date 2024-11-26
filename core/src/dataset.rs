@@ -69,6 +69,10 @@ impl std::ops::Index<usize> for PaddedVectors {
     }
 }
 
+pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+    unsafe { dot_fma_exact(a, b) }
+}
+
 /// Computes the dot product, using SIMD fused-multiply-add instructions,
 /// assuming that the length of the arrays is _exactly_ a multiple of 8
 #[cfg(all(target_feature = "fma"))]
@@ -134,7 +138,7 @@ unsafe fn dot_fma(a: &[f32], b: &[f32]) -> f32 {
 
 pub trait Dataset<'slf, Point> {
     /// The distance data type returned, e.g. `f64` of `u32`
-    type Distance: Sized + Ord + Clone + Copy;
+    type Distance: Sized + Ord + Clone + Copy + std::fmt::Debug;
     /// A type to be used for prepared queries
     type PreparedPoint;
 

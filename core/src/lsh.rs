@@ -44,7 +44,7 @@ fn test_bithash() {
     assert!(b < a, "a={:?} b={:?}", a, b);
 }
 
-pub trait LSHFunction: Send + Sync {
+pub trait LSHFunction {
     type Input;
     type Output: Eq + Ord;
     type Scratch;

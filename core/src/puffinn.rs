@@ -1,6 +1,6 @@
 //! This is a reimplementation of PUFFINN
 
-use std::ops::{Range, RangeBounds};
+use std::{marker::PhantomData, ops::Range};
 
 use crate::{
     dataset::Dataset,
@@ -70,11 +70,12 @@ where
     H: PrefixCmp + Ord,
     D: Dataset<'data, P>,
     D::Distance: Into<f32>,
-    LSH: LSHFunction<Input = P, Output = H>,
+    LSH: LSHFunction<Output = H>,
 {
     data: &'data D,
     hashers: Vec<LSH>,
     repetitions: Vec<Repetition<H>>,
+    _marker: PhantomData<P>,
 }
 
 impl<'data, P, D, H, LSH> Index<'data, P, D, H, LSH>
@@ -92,6 +93,7 @@ where
             data,
             hashers,
             repetitions,
+            _marker: PhantomData::<P>,
         }
     }
 
@@ -109,6 +111,9 @@ where
             .iter()
             .zip(self.hashers.iter())
             .map(|(rep, hasher)| {
+                // OPTIMIZE: hash all the repetitions with a single call, to allow
+                // for optimizations like using the Fast Hadamard Transform for
+                // many dot products
                 let h = hasher.hash(&query, &mut scratch);
                 rep.cursor(h, H::max_prefix())
             })
@@ -117,10 +122,11 @@ where
         // OPTIMIZE: come up with a data structure that never allocates during the query
         let mut priority = std::collections::BinaryHeap::<(D::Distance, usize)>::new();
 
+        let mut cnt_collisions = 0;
         for prefix in (0..=H::max_prefix()).rev() {
-            dbg!(prefix);
             for (repetition_idx, repetition) in cursors.iter_mut().enumerate() {
                 for i in repetition.collisions() {
+                    cnt_collisions += 1;
                     let d = self.data.distance(i, &prepared);
                     if priority.len() < k || d < priority.peek().unwrap().0 {
                         let pair = (d, i);
@@ -142,9 +148,11 @@ where
                             out[i] = priority.pop().unwrap();
                         }
                         assert!(priority.is_empty());
+                        dbg!(cnt_collisions);
                         return;
                     }
                 }
+                repetition.shorten_prefix()
             }
         }
         unreachable!();
@@ -471,15 +479,30 @@ mod test {
     use ndarray_rand::rand::{thread_rng, Rng};
 
     use crate::{
-        dataset::{load_distances, load_raw_queries, AngularDataset},
+        dataset::{load_distances, load_raw_queries, AngularDataset, DistanceF32},
         lsh::*,
         simhash::SimHashBuilder,
     };
 
     use super::*;
 
+    fn compute_recall(actual: &[(DistanceF32, usize)], ground: &[f32]) -> f32 {
+        let epsilon = 0.000001;
+        let k = actual.len();
+        assert!(k >= 1);
+        let thresh = DistanceF32::from(ground[k - 1] + epsilon);
+        dbg!(&actual.last().unwrap().0, thresh);
+        let mut cnt = 0;
+        for (d, _) in actual {
+            if *d <= thresh {
+                cnt += 1;
+            }
+        }
+        cnt as f32 / k as f32
+    }
+
     #[test]
-    fn test_glove_k10_nn() {
+    fn test_glove_k10_nn_puffinn() {
         let mut rng = thread_rng();
 
         let path = ".glove-100-angular.hdf5";
@@ -488,22 +511,27 @@ mod test {
         let distances = load_distances(&path);
 
         let hashers =
-            SimHashBuilder::<&[f32], _>::new(dataset.num_dimensions(), 32, &mut rng).build_vec(128);
+            SimHashBuilder::<&[f32], _>::new(dataset.num_dimensions(), 32, &mut rng).build_vec(16);
 
-        // let index = Index::build()
+        let index = Index::build(&dataset, hashers);
 
-        // let qidx = 0;
-        // let query = queries.row(qidx);
-
-        // let k = 10;
-        // let delta = 0.9;
-
-        // let expected = distances.row(qidx);
-        // let actual = brute_force_knn(&dataset, &prepared_query, k);
-        // for (idx, (d, _i)) in actual.into_iter().enumerate() {
-        //     let d: f32 = d.into();
-        //     let ed = expected[idx];
-        //     assert!((d - ed).abs() <= 0.0001);
-        // }
+        let k = 10;
+        let delta = 0.1;
+        let mut out = vec![(DistanceF32::from(0.0f32), 0); k];
+        let nqueries = 1000.min(distances.nrows());
+        let recall = queries
+            .rows()
+            .into_iter()
+            .zip(distances.rows().into_iter())
+            .take(nqueries)
+            .map(|(query, ground)| {
+                let query = query.as_slice().unwrap();
+                index.search(&query, delta, &mut out);
+                dbg!(compute_recall(&out, &ground.as_slice().unwrap()))
+            })
+            .sum::<f32>()
+            / nqueries as f32;
+        dbg!(recall);
+        assert!(recall >= 1.0 - delta);
     }
 }
