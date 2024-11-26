@@ -60,8 +60,9 @@ impl<I: DotProduct> LSHFunction for SimHash<I> {
 
     fn collision_probability(&self, distance: f32) -> f32 {
         debug_assert!(-1.0 <= distance && distance <= 1.0);
+        // NOTE: Here the assumption is that the distance is (1 - dotp)
+        // where dotp is the dot product between two unit-norm vectors
         let angle = (1.0 - distance).acos();
-        // 1.0 - similarity.acos() / std::f32::consts::PI
         1.0 - angle / std::f32::consts::PI
     }
 }
@@ -94,15 +95,65 @@ impl<I: DotProduct, R: Rng> LSHFunctionBuilder for SimHashBuilder<I, R> {
     }
 }
 
-// #[cfg(test)]
-// mod test {
-//     use super::*;
+#[cfg(test)]
+mod test {
+    use crate::dataset::{AngularDataset, Dataset};
 
-//     // #[test]
-//     // fn simhash_collision_probability() {
-//     //     let rng = StdRng::seed_from_u64(1234);
-//     //     let dataset = crate::datasets::load_dense_dataset("glove-25-angular").0;
-//     //     let builder = SimHashBuilder::<ArrayView1<f32>, _>::new(25, 8, rng);
-//     //     crate::test::test_collision_probability(&dataset, builder, 1000000, 0.001);
-//     // }
-// }
+    use super::*;
+
+    #[test]
+    fn simhash_collision_probability() {
+        let rng = StdRng::seed_from_u64(1234);
+        let dataset = AngularDataset::from_hdf5(".glove-100-angular.hdf5");
+        let builder = SimHashBuilder::<&[f32], _>::new(dataset.num_dimensions(), 1, rng);
+        test_collision_probability(&dataset, builder, 1000000, 0.05);
+    }
+
+    pub fn test_collision_probability<'data, P, D, F, B, O>(
+        data: &'data D,
+        mut builder: B,
+        samples: usize,
+        tolerance: f32,
+    ) where
+        D: Dataset<'data, P>,
+        D::Distance: Into<f32>,
+        F: LSHFunction<Input = P, Output = O>,
+        B: LSHFunctionBuilder<LSH = F>,
+        O: Eq + Copy,
+    {
+        let hashers = builder.build_vec(samples);
+
+        let mut scratch = hashers[0].allocate_scratch();
+
+        let n = 100;
+        let mut hashes: Vec<Vec<F::Output>> = vec![Vec::new(); n];
+        for i in 0..n {
+            let x = data.get(i);
+            hashes[i].extend(hashers.iter().map(|h| h.hash(&x, &mut scratch)));
+        }
+
+        let mut q = data.default_prepared_query();
+        for i in 0..n {
+            let x = data.get(i);
+            data.prepare(&x, &mut q);
+            let hx = &hashes[i];
+            for j in (i + 1)..n {
+                dbg!(j);
+                let d_xy = data.distance(j, &q);
+                let hy = &hashes[j];
+                let p_xy =
+                    hx.iter().zip(hy).filter(|(x, y)| x == y).count() as f32 / samples as f32;
+
+                let p_expected = hashers[0].collision_probability(d_xy.into());
+                dbg!(p_expected, p_xy, (p_xy - p_expected).abs());
+                assert!(
+                    (p_xy - p_expected).abs() <= tolerance,
+                    "expected {}, got {} (distance={:?})",
+                    p_expected,
+                    p_xy,
+                    d_xy,
+                );
+            }
+        }
+    }
+}
