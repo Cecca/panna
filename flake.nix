@@ -52,6 +52,7 @@
             cargo-edit
             cargo-watch
             rust-analyzer
+            samply
             python311
           ];
       };

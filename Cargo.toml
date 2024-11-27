@@ -5,3 +5,8 @@ members = [
     "core"
 ]
 
+[profile.profiling]
+inherits = "release"
+debug = true
+
+

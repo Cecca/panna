@@ -1,7 +1,6 @@
 use ndarray_rand::rand::prelude::*;
 use std::marker::PhantomData;
 
-use crate::dataset::dot;
 use crate::lsh::BitHash32;
 use crate::lsh::LSHFunction;
 use crate::lsh::LSHFunctionBuilder;
@@ -12,7 +11,7 @@ pub trait DotProduct {
 
 impl DotProduct for &[f32] {
     fn dot(&self, other: &[f32]) -> f32 {
-        dot(self, other)
+        self.iter().zip(other).map(|(x, y)| x * y).sum::<f32>()
     }
 }
 
@@ -106,7 +105,7 @@ mod test {
         let rng = StdRng::seed_from_u64(1234);
         let dataset = AngularDataset::from_hdf5(".glove-100-angular.hdf5");
         let builder = SimHashBuilder::<&[f32], _>::new(dataset.num_dimensions(), 1, rng);
-        test_collision_probability(&dataset, builder, 1000000, 0.05);
+        test_collision_probability(&dataset, builder, 1000000, 0.005);
     }
 
     pub fn test_collision_probability<'data, P, D, F, B, O>(
@@ -145,9 +144,9 @@ mod test {
                     hx.iter().zip(hy).filter(|(x, y)| x == y).count() as f32 / samples as f32;
 
                 let p_expected = hashers[0].collision_probability(d_xy.into());
-                dbg!(p_expected, p_xy, (p_xy - p_expected).abs());
                 assert!(
-                    (p_xy - p_expected).abs() <= tolerance,
+                    // The most problems are if we overestimate the collision probability
+                    p_xy <= p_expected + tolerance,
                     "expected {}, got {} (distance={:?})",
                     p_expected,
                     p_xy,

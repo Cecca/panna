@@ -1,5 +1,6 @@
 //! This is a reimplementation of PUFFINN
 
+use core::hash;
 use std::{marker::PhantomData, ops::Range};
 
 use crate::{
@@ -97,7 +98,7 @@ where
         }
     }
 
-    pub fn search(&self, query: &P, delta: f32, out: &mut [(D::Distance, usize)]) {
+    pub fn search(&self, query: &P, delta: f32, out: &mut [(D::Distance, usize)]) -> usize {
         let k = out.len();
         let prepared = {
             let mut p = self.data.default_prepared_query();
@@ -125,7 +126,10 @@ where
         let mut cnt_collisions = 0;
         for prefix in (0..=H::max_prefix()).rev() {
             for (repetition_idx, repetition) in cursors.iter_mut().enumerate() {
+                // FIXME: it's the implementation of collisions that is bugged
                 for i in repetition.collisions() {
+                    // OPTIMIZE: flip a coin with the appropriate probability to
+                    // decide if we compute the distance or not
                     cnt_collisions += 1;
                     let d = self.data.distance(i, &prepared);
                     if priority.len() < k || d < priority.peek().unwrap().0 {
@@ -148,8 +152,7 @@ where
                             out[i] = priority.pop().unwrap();
                         }
                         assert!(priority.is_empty());
-                        dbg!(cnt_collisions);
-                        return;
+                        return cnt_collisions;
                     }
                 }
                 repetition.shorten_prefix()
@@ -160,6 +163,8 @@ where
 
     pub fn failure_probability(&self, d: D::Distance, prefix: usize, repetition: usize) -> f32 {
         let max_prefix = H::max_prefix();
+        // NOTE: the assumption is that all hash functions produce
+        // the same collision probability
         let p = self.hashers[0].collision_probability(d.into());
         if prefix < max_prefix {
             (1.0 - p.powi(prefix as i32)).powi(repetition as i32)
@@ -212,24 +217,47 @@ struct Cursor<'rep, H: PrefixCmp + Ord> {
 impl<'rep, H: PrefixCmp + Ord> Cursor<'rep, H> {
     fn new(repetition: &'rep Repetition<H>, hash: H, prefix: usize) -> Self {
         // Look for the starting index
-        let start = match repetition
+        let start = repetition
             .hashes
-            .binary_search_by(|hprime| hprime.prefix_cmp(&hash, prefix))
-        {
-            Ok(i) => i,
-            Err(i) => i,
-        };
+            .partition_point(|hprime| hprime.prefix_cmp(&hash, prefix).is_lt());
         let end = start
             + repetition.hashes[start..].partition_point(|hprime| hprime.prefix_eq(&hash, prefix));
         assert!(end >= start);
         let range = start..end;
-        Self {
+        let slf = Self {
             repetition,
             hash,
             prefix,
             range,
             prev_range: None,
-        }
+        };
+        #[cfg(test)]
+        slf.check_invariant();
+        slf
+    }
+
+    #[cfg(test)]
+    fn check_invariant(&self) {
+        let prefix = self.prefix;
+        let hash = &self.hash;
+        debug_assert!(
+            self.repetition.hashes[..self.range.start]
+                .iter()
+                .all(|h| !hash.prefix_eq(h, prefix)),
+            "all hashes before the Cursor's range should have a different prefix"
+        );
+        debug_assert!(
+            self.repetition.hashes[self.range.end..]
+                .iter()
+                .all(|h| !hash.prefix_eq(h, prefix)),
+            "all hashes after the Cursor's range should have a different prefix"
+        );
+        debug_assert!(
+            self.repetition.hashes[self.range.clone()]
+                .iter()
+                .all(|h| hash.prefix_eq(h, prefix)),
+            "all hashes in the Cursor's range should have the same prefix"
+        );
     }
 
     /// shortens the prefix by one
@@ -238,19 +266,17 @@ impl<'rep, H: PrefixCmp + Ord> Cursor<'rep, H> {
         self.prev_range.replace(self.range.clone());
         self.prefix -= 1;
         // OPTIMIZE: possibly retrict the search to the unexplored part of the hashes
-        let start = match self
+        let start = self
             .repetition
             .hashes
-            .binary_search_by(|hprime| hprime.prefix_cmp(&self.hash, self.prefix))
-        {
-            Ok(i) => i,
-            Err(i) => i,
-        };
+            .partition_point(|hprime| hprime.prefix_cmp(&self.hash, self.prefix).is_lt());
         let end = start
             + self.repetition.hashes[start..]
                 .partition_point(|hprime| hprime.prefix_eq(&self.hash, self.prefix));
         assert!(end >= start);
         self.range = start..end;
+        #[cfg(test)]
+        self.check_invariant();
     }
 
     fn pair_collisions<'slf>(&'slf self) -> PairsIterator<'slf> {
@@ -276,6 +302,22 @@ impl<'rep, H: PrefixCmp + Ord> Cursor<'rep, H> {
         } else {
             RangesIterator::flat(&self.repetition.indices, self.range.clone())
         }
+    }
+
+    fn collisions_naive<'slf>(&'slf self) -> impl Iterator<Item = usize> + 'slf {
+        let hh = &self.hash;
+        let prefix = self.prefix;
+        self.repetition
+            .indices
+            .iter()
+            .zip(self.repetition.hashes.iter())
+            .filter_map(move |(i, h)| {
+                if h.prefix_eq(&hh, prefix) {
+                    Some(*i)
+                } else {
+                    None
+                }
+            })
     }
 }
 
@@ -476,6 +518,9 @@ fn test_pair_collision_iterator() {
 
 #[cfg(test)]
 mod test {
+    use std::time::Instant;
+
+    use ndarray::s;
     use ndarray_rand::rand::{thread_rng, Rng};
 
     use crate::{
@@ -491,7 +536,6 @@ mod test {
         let k = actual.len();
         assert!(k >= 1);
         let thresh = DistanceF32::from(ground[k - 1] + epsilon);
-        dbg!(&actual.last().unwrap().0, thresh);
         let mut cnt = 0;
         for (d, _) in actual {
             if *d <= thresh {
@@ -511,26 +555,39 @@ mod test {
         let distances = load_distances(&path);
 
         let hashers =
-            SimHashBuilder::<&[f32], _>::new(dataset.num_dimensions(), 32, &mut rng).build_vec(16);
+            SimHashBuilder::<&[f32], _>::new(dataset.num_dimensions(), 32, &mut rng).build_vec(32);
 
         let index = Index::build(&dataset, hashers);
 
         let k = 10;
         let delta = 0.1;
         let mut out = vec![(DistanceF32::from(0.0f32), 0); k];
-        let nqueries = 1000.min(distances.nrows());
-        let recall = queries
+        let nqueries = 10.min(distances.nrows());
+        let start = Instant::now();
+        let mut answers = queries
             .rows()
             .into_iter()
             .zip(distances.rows().into_iter())
             .take(nqueries)
-            .map(|(query, ground)| {
+            .enumerate()
+            .map(|(idx, (query, ground))| {
                 let query = query.as_slice().unwrap();
-                index.search(&query, delta, &mut out);
-                dbg!(compute_recall(&out, &ground.as_slice().unwrap()))
+                let collisions = index.search(&query, delta, &mut out);
+                (
+                    compute_recall(&out, &ground.as_slice().unwrap()),
+                    collisions,
+                    idx,
+                )
             })
-            .sum::<f32>()
-            / nqueries as f32;
+            .collect::<Vec<(f32, usize, usize)>>();
+        let recall = answers.iter().map(|pair| pair.0).sum::<f32>() / nqueries as f32;
+        let elapsed = Instant::now() - start;
+        let qps = nqueries as f64 / elapsed.as_secs_f64();
+
+        answers.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        dbg!(&answers[..10]);
+
+        dbg!(qps);
         dbg!(recall);
         assert!(recall >= 1.0 - delta);
     }

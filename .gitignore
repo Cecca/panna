@@ -9,3 +9,5 @@
 flamegraph.svg
 perf.data
 .direnv
+perf.data.old
+profile.json
