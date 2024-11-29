@@ -25,7 +25,7 @@
           else if builtins.pathExists ./rust-toolchain
           then rust.fromRustupToolchainFile ./rust-toolchain
           else
-            rust.stable.latest.default.override {
+            rust.nightly.latest.default.override {
               extensions = ["rust-src" "rustfmt"];
             };
       })
@@ -54,6 +54,9 @@
             rust-analyzer
             samply
             python311
+            python311Packages.numpy
+            python311Packages.h5py
+            python311Packages.jupyter-console
           ];
       };
     });

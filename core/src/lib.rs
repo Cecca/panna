@@ -1,3 +1,5 @@
+#![feature(pointer_is_aligned_to)]
+#![feature(portable_simd)]
 extern crate blas_src;
 
 pub mod brute_force;

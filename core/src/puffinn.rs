@@ -646,7 +646,7 @@ mod test {
                     idx,
                 )
             })
-            .collect::<Vec<(f32, usize, usize)>>();
+            .collect::<Vec<(f32, Stats, usize)>>();
         let recall = answers.iter().map(|pair| pair.0).sum::<f32>() / nqueries as f32;
         let elapsed = Instant::now() - start;
         let qps = nqueries as f64 / elapsed.as_secs_f64();
