@@ -1,7 +1,16 @@
 //! This is a reimplementation of PUFFINN
 
 use core::hash;
-use std::{marker::PhantomData, ops::Range};
+use std::{
+    marker::PhantomData,
+    ops::Range,
+    time::{Duration, Instant},
+};
+
+use ndarray_rand::{
+    rand::thread_rng,
+    rand_distr::{Bernoulli, Distribution, Uniform},
+};
 
 use crate::{
     dataset::Dataset,
@@ -66,6 +75,43 @@ impl PrefixCmp for BitHash32 {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct Stats {
+    elapsed: Duration,
+    collisions: usize,
+    prefix: usize,
+    repetitions: usize,
+}
+
+pub struct StatsBuilder {
+    start: Instant,
+    collisions: usize,
+}
+
+impl Default for StatsBuilder {
+    fn default() -> Self {
+        Self {
+            start: Instant::now(),
+            collisions: 0,
+        }
+    }
+}
+
+impl StatsBuilder {
+    #[inline]
+    fn inc_collisions(&mut self, collisions: usize) {
+        self.collisions += collisions;
+    }
+    fn build(self, prefix: usize, repetitions: usize) -> Stats {
+        Stats {
+            elapsed: self.start.elapsed(),
+            collisions: self.collisions,
+            prefix,
+            repetitions,
+        }
+    }
+}
+
 pub struct Index<'data, P, D, H, LSH>
 where
     H: PrefixCmp + Ord,
@@ -88,8 +134,13 @@ where
 {
     pub fn build(data: &'data D, hashers: Vec<LSH>) -> Self {
         // TODO: build in parallel
-        let repetitions: Vec<Repetition<H>> =
-            hashers.iter().map(|h| Repetition::build(data, h)).collect();
+        let repetitions: Vec<Repetition<H>> = hashers
+            .iter()
+            .map(|h| {
+                eprintln!("build repetition");
+                Repetition::build(data, h)
+            })
+            .collect();
         Self {
             data,
             hashers,
@@ -98,7 +149,10 @@ where
         }
     }
 
-    pub fn search(&self, query: &P, delta: f32, out: &mut [(D::Distance, usize)]) -> usize {
+    pub fn search(&self, query: &P, delta: f32, out: &mut [(D::Distance, usize)]) -> Stats {
+        let mut rng = thread_rng();
+        let mut unif = Uniform::new(0.0f32, 1.0);
+        let mut stats = StatsBuilder::default();
         let k = out.len();
         let prepared = {
             let mut p = self.data.default_prepared_query();
@@ -123,21 +177,32 @@ where
         // OPTIMIZE: come up with a data structure that never allocates during the query
         let mut priority = std::collections::BinaryHeap::<(D::Distance, usize)>::new();
 
-        let mut cnt_collisions = 0;
         for prefix in (0..=H::max_prefix()).rev() {
             for (repetition_idx, repetition) in cursors.iter_mut().enumerate() {
-                // FIXME: it's the implementation of collisions that is bugged
+                let sample_p = if priority.len() == k {
+                    let max_d = priority.peek().unwrap().0;
+                    let cp = self.hashers[0]
+                        .collision_probability(max_d.into())
+                        .powi(prefix as i32);
+                    dbg!(cp);
+                    1.0f32.min(1.0 / (cp * self.repetitions.len() as f32))
+                } else {
+                    1.0
+                };
+                dbg!(sample_p);
                 for i in repetition.collisions() {
                     // OPTIMIZE: flip a coin with the appropriate probability to
                     // decide if we compute the distance or not
-                    cnt_collisions += 1;
-                    let d = self.data.distance(i, &prepared);
-                    if priority.len() < k || d < priority.peek().unwrap().0 {
-                        let pair = (d, i);
-                        if priority.iter().find(|x| **x == pair).is_none() {
-                            priority.push((d, i));
-                            while priority.len() > k {
-                                priority.pop();
+                    if unif.sample(&mut rng) <= sample_p {
+                        stats.inc_collisions(1);
+                        let d = self.data.distance(i, &prepared);
+                        if priority.len() < k || d < priority.peek().unwrap().0 {
+                            let pair = (d, i);
+                            if priority.iter().find(|x| **x == pair).is_none() {
+                                priority.push((d, i));
+                                while priority.len() > k {
+                                    priority.pop();
+                                }
                             }
                         }
                     }
@@ -152,7 +217,7 @@ where
                             out[i] = priority.pop().unwrap();
                         }
                         assert!(priority.is_empty());
-                        return cnt_collisions;
+                        return stats.build(prefix, repetition_idx + 1);
                     }
                 }
                 repetition.shorten_prefix()
@@ -554,10 +619,12 @@ mod test {
         let queries = load_raw_queries(&path);
         let distances = load_distances(&path);
 
+        dbg!();
         let hashers =
-            SimHashBuilder::<&[f32], _>::new(dataset.num_dimensions(), 32, &mut rng).build_vec(32);
+            SimHashBuilder::<&[f32], _>::new(dataset.num_dimensions(), 32, &mut rng).build_vec(256);
 
         let index = Index::build(&dataset, hashers);
+        dbg!();
 
         let k = 10;
         let delta = 0.1;
