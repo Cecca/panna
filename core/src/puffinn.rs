@@ -127,15 +127,15 @@ where
 
 impl<'data, P, D, H, LSH> Index<'data, P, D, H, LSH>
 where
-    H: PrefixCmp + Ord,
-    D: Dataset<'data, P>,
+    H: PrefixCmp + Ord + Send + Sync,
+    D: Dataset<'data, P> + Sync,
     D::Distance: Into<f32>,
     LSH: LSHFunction<Input = P, Output = H>,
 {
     pub fn build(data: &'data D, hashers: Vec<LSH>) -> Self {
-        // TODO: build in parallel
+        use rayon::prelude::*;
         let repetitions: Vec<Repetition<H>> = hashers
-            .iter()
+            .par_iter()
             .map(|h| {
                 eprintln!("build repetition");
                 Repetition::build(data, h)
@@ -150,8 +150,6 @@ where
     }
 
     pub fn search(&self, query: &P, delta: f32, out: &mut [(D::Distance, usize)]) -> Stats {
-        let mut rng = thread_rng();
-        let mut unif = Uniform::new(0.0f32, 1.0);
         let mut stats = StatsBuilder::default();
         let k = out.len();
         let prepared = {
@@ -179,30 +177,15 @@ where
 
         for prefix in (0..=H::max_prefix()).rev() {
             for (repetition_idx, repetition) in cursors.iter_mut().enumerate() {
-                let sample_p = if priority.len() == k {
-                    let max_d = priority.peek().unwrap().0;
-                    let cp = self.hashers[0]
-                        .collision_probability(max_d.into())
-                        .powi(prefix as i32);
-                    dbg!(cp);
-                    1.0f32.min(1.0 / (cp * self.repetitions.len() as f32))
-                } else {
-                    1.0
-                };
-                dbg!(sample_p);
                 for i in repetition.collisions() {
-                    // OPTIMIZE: flip a coin with the appropriate probability to
-                    // decide if we compute the distance or not
-                    if unif.sample(&mut rng) <= sample_p {
-                        stats.inc_collisions(1);
-                        let d = self.data.distance(i, &prepared);
-                        if priority.len() < k || d < priority.peek().unwrap().0 {
-                            let pair = (d, i);
-                            if priority.iter().find(|x| **x == pair).is_none() {
-                                priority.push((d, i));
-                                while priority.len() > k {
-                                    priority.pop();
-                                }
+                    stats.inc_collisions(1);
+                    let d = self.data.distance(i, &prepared);
+                    if priority.len() < k || d < priority.peek().unwrap().0 {
+                        let pair = (d, i);
+                        if priority.iter().find(|x| **x == pair).is_none() {
+                            priority.push((d, i));
+                            while priority.len() > k {
+                                priority.pop();
                             }
                         }
                     }
@@ -621,7 +604,7 @@ mod test {
 
         dbg!();
         let hashers =
-            SimHashBuilder::<&[f32], _>::new(dataset.num_dimensions(), 32, &mut rng).build_vec(256);
+            SimHashBuilder::<&[f32], _>::new(dataset.num_dimensions(), 32, &mut rng).build_vec(64);
 
         let index = Index::build(&dataset, hashers);
         dbg!();
@@ -638,6 +621,7 @@ mod test {
             .take(nqueries)
             .enumerate()
             .map(|(idx, (query, ground))| {
+                dbg!();
                 let query = query.as_slice().unwrap();
                 let collisions = index.search(&query, delta, &mut out);
                 (

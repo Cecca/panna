@@ -41,7 +41,7 @@ impl<I> SimHash<I> {
     }
 }
 
-impl<I: DotProduct> LSHFunction for SimHash<I> {
+impl<I: DotProduct + Send + Sync> LSHFunction for SimHash<I> {
     type Input = I;
     type Output = BitHash32;
     type Scratch = ();
@@ -86,7 +86,7 @@ impl<Input, R: Rng> SimHashBuilder<Input, R> {
     }
 }
 
-impl<I: DotProduct, R: Rng> LSHFunctionBuilder for SimHashBuilder<I, R> {
+impl<I: DotProduct + Send + Sync, R: Rng> LSHFunctionBuilder for SimHashBuilder<I, R> {
     type LSH = SimHash<I>;
 
     fn build(&mut self) -> Self::LSH {
