@@ -1,9 +1,9 @@
-use ndarray_rand::rand::prelude::*;
-use std::marker::PhantomData;
-
 use crate::lsh::BitHash32;
 use crate::lsh::LSHFunction;
 use crate::lsh::LSHFunctionBuilder;
+use ndarray_rand::rand::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
 
 pub trait DotProduct {
     fn dot(&self, other: &[f32]) -> f32;
@@ -15,6 +15,7 @@ impl DotProduct for &[f32] {
     }
 }
 
+#[derive(Serialize, Deserialize, PartialEq)]
 pub struct SimHash<I> {
     /// The dimensionality of the input vectors
     dimensions: usize,

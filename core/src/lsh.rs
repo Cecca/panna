@@ -1,8 +1,10 @@
+use serde::{Deserialize, Serialize};
+
 /// The hash value obtained by concatenating up to 32 bit-wise hash functions.
 /// The first concatenation picks the most significant bit: doing so the
 /// lexicographic ordering of the hashes groups together hashes with the
 /// same prefix
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub struct BitHash32(pub u32);
 impl BitHash32 {
     pub fn set(&mut self, i: usize, v: bool) {

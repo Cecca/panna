@@ -1,4 +1,7 @@
 use ndarray::prelude::*;
+use ndarray_rand::rand_distr::num_traits::ToBytes;
+use rayon::slice::ParallelSliceMut;
+use sha2::{digest::Update, Digest, Sha256};
 
 #[derive(PartialEq, PartialOrd, Clone, Copy)]
 pub struct DistanceF32(f32);
@@ -30,6 +33,7 @@ impl std::fmt::Display for DistanceF32 {
 }
 
 const PADDED_VECTORS_BASE: usize = 8;
+#[derive(PartialEq)]
 struct PaddedVectors {
     stride: usize,
     dimensions: usize,
@@ -136,7 +140,7 @@ unsafe fn dot_fma(a: &[f32], b: &[f32]) -> f32 {
     rem + buf.into_iter().sum::<f32>()
 }
 
-pub trait Dataset<'slf, Point> {
+pub trait Dataset<'slf, Point>: PartialEq {
     /// The distance data type returned, e.g. `f64` of `u32`
     type Distance: Sized + Ord + Clone + Copy + std::fmt::Debug;
     /// A type to be used for prepared queries
@@ -159,9 +163,13 @@ pub trait Dataset<'slf, Point> {
 
     /// How many points the dataset contains
     fn num_points(&self) -> usize;
+
+    /// Returns the SHA2 hash of the entire dataset (useful for serializing indices)
+    fn sha2(&self) -> std::io::Result<[u8; 32]>;
 }
 
 /// A dataset using the angular distance
+#[derive(PartialEq)]
 pub struct AngularDataset {
     /// The points, which are normalized upon construction, and padded
     /// to have a length multiple of 8
@@ -223,9 +231,23 @@ impl<'slf> Dataset<'slf, &'slf [f32]> for AngularDataset {
     fn num_points(&self) -> usize {
         self.points.num_vectors
     }
+
+    fn sha2(&self) -> std::io::Result<[u8; 32]> {
+        use std::io::Write;
+        let mut digest = sha2::Sha256::default();
+        for i in 0..self.num_points() {
+            let point = &self.points[i];
+            for coord in point {
+                write!(digest, "{}", coord)?;
+            }
+        }
+        let hash = digest.finalize();
+        Ok(hash.into())
+    }
 }
 
 /// A dataset using the Euclidean Distance
+#[derive(PartialEq)]
 pub struct EuclideanDataset {
     /// The points
     points: PaddedVectors,
@@ -300,6 +322,21 @@ impl<'slf> Dataset<'slf, &'slf [f32]> for EuclideanDataset {
 
     fn num_points(&self) -> usize {
         self.points.num_vectors
+    }
+
+    fn sha2(&self) -> std::io::Result<[u8; 32]> {
+        use std::io::Write;
+        let mut digest = sha2::Sha256::default();
+        for i in 0..self.num_points() {
+            let point = &self.points[i];
+            write!(digest, "{}", self.squared_norms[i])?;
+            for coord in point {
+                write!(digest, "{}", coord)?;
+            }
+        }
+        let hash = digest.finalize();
+        // Ok(hex::encode(hash))
+        Ok(hash.into())
     }
 }
 

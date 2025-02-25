@@ -2,8 +2,10 @@
 
 use core::hash;
 use std::{
+    io::{BufReader, BufWriter},
     marker::PhantomData,
     ops::Range,
+    path::Path,
     time::{Duration, Instant},
 };
 
@@ -11,6 +13,7 @@ use ndarray_rand::{
     rand::thread_rng,
     rand_distr::{Bernoulli, Distribution, Uniform},
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     dataset::Dataset,
@@ -112,6 +115,7 @@ impl StatsBuilder {
     }
 }
 
+#[derive(Eq, PartialEq)]
 pub struct Index<'data, P, D, H, LSH>
 where
     H: PrefixCmp + Ord,
@@ -135,6 +139,7 @@ where
     pub fn build(data: &'data D, hashers: Vec<LSH>) -> Self {
         use rayon::prelude::*;
         let repetitions: Vec<Repetition<H>> = hashers
+            // FIXME: this does not seem to use all the cores as it should
             .par_iter()
             .map(|h| {
                 eprintln!("build repetition");
@@ -224,6 +229,95 @@ where
     }
 }
 
+impl<'data, P, D, H, LSH> Index<'data, P, D, H, LSH>
+where
+    for<'de> H: PrefixCmp + Ord + Send + Sync + Serialize + Deserialize<'de>,
+    D: Dataset<'data, P> + Sync,
+    D::Distance: Into<f32>,
+    for<'de> LSH: LSHFunction<Input = P, Output = H> + Serialize + Deserialize<'de>,
+{
+    fn serialize_into<W: std::io::Write>(&self, out: &mut W) -> std::io::Result<()> {
+        let data_sha = self.data.sha2()?;
+        out.write_all(&data_sha)?;
+        bincode::serialize_into(&mut *out, &self.hashers).unwrap();
+        bincode::serialize_into(&mut *out, &self.repetitions).unwrap();
+        Ok(())
+    }
+
+    fn deserialize_from<R: std::io::Read>(input: &mut R, data: &'data D) -> std::io::Result<Self> {
+        let data_sha = data.sha2()?;
+        let mut expected_sha = [0u8; 32];
+        input.read_exact(&mut expected_sha)?;
+        if expected_sha != data_sha {
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, "mismatch between data sha and stored sha: the index was created for another dataset"));
+        }
+        let hashers: Vec<LSH> = bincode::deserialize_from(&mut *input).unwrap();
+        let repetitions: Vec<Repetition<H>> = bincode::deserialize_from(&mut *input).unwrap();
+        Ok(Self {
+            data,
+            hashers,
+            repetitions,
+            _marker: PhantomData::<P>,
+        })
+    }
+
+    pub fn save<PP: AsRef<Path>>(&self, path: PP) -> std::io::Result<()> {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+
+        let file = std::fs::File::create(&path)?;
+        let mut out = ZlibEncoder::new(BufWriter::new(file), Compression::default());
+        self.serialize_into(&mut out)
+    }
+
+    pub fn load<PP: AsRef<Path>>(path: PP, data: &'data D) -> std::io::Result<Self> {
+        use flate2::read::ZlibDecoder;
+        let file = std::fs::File::open(&path)?;
+        let mut input = ZlibDecoder::new(BufReader::new(file));
+        Self::deserialize_from(&mut input, data)
+    }
+
+    /// First checks if the index with the given `hashers` on the given `data`
+    /// has already been built and is stored in `cache_dir`.
+    /// If so, it will return the cached version. Otherwise, the function will
+    /// build the index, cache it, and return it.
+    ///
+    pub fn build_cached<PP: AsRef<Path>>(
+        data: &'data D,
+        hashers: Vec<LSH>,
+        cache_dir: PP,
+    ) -> std::io::Result<Self> {
+        use sha2::Digest;
+        let mut hashers_digest = sha2::Sha256::default();
+        hashers_digest.update(&bincode::serialize(&hashers).unwrap());
+        let data_sha: [u8; 32] = data.sha2()?.into();
+        let hashers_sha: [u8; 32] = hashers_digest.finalize().into();
+        let cache_dir = cache_dir.as_ref();
+        if !cache_dir.is_dir() {
+            std::fs::create_dir(&cache_dir)?;
+        }
+        let path = cache_dir.join(format!(
+            "{}-{}.z",
+            data_sha
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>(),
+            hashers_sha
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>(),
+        ));
+        if !path.is_file() {
+            let index = Self::build(data, hashers);
+            index.save(path)?;
+            Ok(index)
+        } else {
+            Self::load(path, data)
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Eq, PartialEq)]
 struct Repetition<H: PrefixCmp + Ord> {
     hashes: Vec<H>,
     indices: Vec<usize>,
@@ -566,15 +660,17 @@ fn test_pair_collision_iterator() {
 
 #[cfg(test)]
 mod test {
-    use std::time::Instant;
+    use std::{str::FromStr, time::Instant};
 
     use ndarray::s;
     use ndarray_rand::rand::{thread_rng, Rng};
 
     use crate::{
-        dataset::{load_distances, load_raw_queries, AngularDataset, DistanceF32},
+        dataset::{
+            load_distances, load_raw_queries, AngularDataset, DistanceF32, EuclideanDataset,
+        },
         lsh::*,
-        simhash::SimHashBuilder,
+        simhash::{SimHash, SimHashBuilder},
     };
 
     use super::*;
@@ -641,5 +737,27 @@ mod test {
         dbg!(qps);
         dbg!(recall);
         assert!(recall >= 1.0 - delta);
+    }
+
+    #[test]
+    fn test_serialization() {
+        use crate::puffinn::*;
+        let mut rng = thread_rng();
+        let path = ".glove-100-angular.hdf5";
+        let dataset = AngularDataset::from_hdf5(&path);
+        let hashers =
+            SimHashBuilder::<&[f32], _>::new(dataset.num_dimensions(), 32, &mut rng).build_vec(16);
+        let index = Index::build(&dataset, hashers);
+
+        let test_path = "/tmp/panna-ser.z";
+        index.save(&test_path).expect("error saving the index");
+        let loaded_index = Index::<_, _, _, SimHash<&[f32]>>::load(&test_path, &dataset)
+            .expect("problem loading dataset");
+
+        assert!(index == loaded_index);
+
+        // loading the same index for a different dataset should result in an error
+        let dataset = EuclideanDataset::from_hdf5(&path);
+        assert!(Index::<_, _, _, SimHash<&[f32]>>::load(&test_path, &dataset).is_err())
     }
 }
