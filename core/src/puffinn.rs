@@ -237,14 +237,18 @@ where
     for<'de> LSH: LSHFunction<Input = P, Output = H> + Serialize + Deserialize<'de>,
 {
     fn serialize_into<W: std::io::Write>(&self, out: &mut W) -> std::io::Result<()> {
+        let timer = Instant::now();
         let data_sha = self.data.sha2()?;
+        eprintln!("data sha computed in {:?}", timer.elapsed());
         out.write_all(&data_sha)?;
         bincode::serialize_into(&mut *out, &self.hashers).unwrap();
         bincode::serialize_into(&mut *out, &self.repetitions).unwrap();
+        eprintln!("Index serialized in {:?}", timer.elapsed());
         Ok(())
     }
 
     fn deserialize_from<R: std::io::Read>(input: &mut R, data: &'data D) -> std::io::Result<Self> {
+        let timer = Instant::now();
         let data_sha = data.sha2()?;
         let mut expected_sha = [0u8; 32];
         input.read_exact(&mut expected_sha)?;
@@ -253,6 +257,7 @@ where
         }
         let hashers: Vec<LSH> = bincode::deserialize_from(&mut *input).unwrap();
         let repetitions: Vec<Repetition<H>> = bincode::deserialize_from(&mut *input).unwrap();
+        eprintln!("Index de-serialized in {:?}", timer.elapsed());
         Ok(Self {
             data,
             hashers,
@@ -308,7 +313,10 @@ where
                 .collect::<String>(),
         ));
         if !path.is_file() {
+            eprintln!("index not in cache, building");
+            let timer = Instant::now();
             let index = Self::build(data, hashers);
+            eprintln!("time to build index: {:?}", timer.elapsed());
             index.save(path)?;
             Ok(index)
         } else {
@@ -746,8 +754,10 @@ mod test {
         let path = ".glove-100-angular.hdf5";
         let dataset = AngularDataset::from_hdf5(&path);
         let hashers =
-            SimHashBuilder::<&[f32], _>::new(dataset.num_dimensions(), 32, &mut rng).build_vec(16);
+            SimHashBuilder::<&[f32], _>::new(dataset.num_dimensions(), 32, &mut rng).build_vec(64);
+        let timer = Instant::now();
         let index = Index::build(&dataset, hashers);
+        eprintln!("index built in {:?}", timer.elapsed());
 
         let test_path = "/tmp/panna-ser.z";
         index.save(&test_path).expect("error saving the index");
