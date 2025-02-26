@@ -11,7 +11,7 @@ use std::{
 
 use ndarray_rand::{
     rand::thread_rng,
-    rand_distr::{Bernoulli, Distribution, Uniform},
+    rand_distr::{num_traits::ToBytes, Bernoulli, Distribution, Uniform},
 };
 use serde::{Deserialize, Serialize};
 
@@ -231,7 +231,7 @@ where
 
 impl<'data, P, D, H, LSH> Index<'data, P, D, H, LSH>
 where
-    for<'de> H: PrefixCmp + Ord + Send + Sync + Serialize + Deserialize<'de>,
+    for<'de> H: PrefixCmp + Ord + Send + Sync + bytemuck::AnyBitPattern + bytemuck::NoUninit,
     D: Dataset<'data, P> + Sync,
     D::Distance: Into<f32>,
     for<'de> LSH: LSHFunction<Input = P, Output = H> + Serialize + Deserialize<'de>,
@@ -242,7 +242,10 @@ where
         eprintln!("data sha computed in {:?}", timer.elapsed());
         out.write_all(&data_sha)?;
         bincode::serialize_into(&mut *out, &self.hashers).unwrap();
-        bincode::serialize_into(&mut *out, &self.repetitions).unwrap();
+        out.write_all(&(self.repetitions.len() as u64).to_be_bytes())?;
+        for rep in &self.repetitions {
+            rep.serialize_into(&mut *out)?;
+        }
         eprintln!("Index serialized in {:?}", timer.elapsed());
         Ok(())
     }
@@ -256,7 +259,15 @@ where
             return Err(std::io::Error::new(std::io::ErrorKind::Other, "mismatch between data sha and stored sha: the index was created for another dataset"));
         }
         let hashers: Vec<LSH> = bincode::deserialize_from(&mut *input).unwrap();
-        let repetitions: Vec<Repetition<H>> = bincode::deserialize_from(&mut *input).unwrap();
+        // let repetitions: Vec<Repetition<H>> = bincode::deserialize_from(&mut *input).unwrap();
+        let mut n = [0u8; 8];
+        input.read_exact(&mut n)?;
+        let n = u64::from_be_bytes(n) as usize;
+        let mut repetitions: Vec<Repetition<H>> = Vec::new();
+        for _ in 0..n {
+            repetitions.push(Repetition::deserialize_from(input)?);
+        }
+
         eprintln!("Index de-serialized in {:?}", timer.elapsed());
         Ok(Self {
             data,
@@ -353,6 +364,36 @@ impl<H: PrefixCmp + Ord> Repetition<H> {
 
     fn cursor<'slf>(&'slf self, hash: H, prefix: usize) -> Cursor<'slf, H> {
         Cursor::new(self, hash, prefix)
+    }
+}
+
+impl<H: PrefixCmp + Ord + bytemuck::NoUninit + bytemuck::AnyBitPattern> Repetition<H> {
+    fn serialize_into<W: std::io::Write>(&self, out: &mut W) -> std::io::Result<()> {
+        assert_eq!(self.hashes.len(), self.indices.len());
+        let n: u64 = self.hashes.len() as u64;
+        out.write(&n.to_be_bytes())?;
+        out.write_all(bytemuck::cast_slice(&self.hashes))?;
+        out.write_all(bytemuck::cast_slice(&self.indices))?;
+        Ok(())
+    }
+
+    fn deserialize_from<R: std::io::Read>(input: &mut R) -> std::io::Result<Self> {
+        let mut len_bytes = [0u8; 8];
+        input.read_exact(&mut len_bytes)?;
+        let n = u64::from_be_bytes(len_bytes) as usize;
+        let mut hashes_bytes = vec![0u8; n * std::mem::size_of::<H>()];
+        let mut indices_bytes = vec![0u8; n * std::mem::size_of::<usize>()];
+
+        input.read_exact(&mut hashes_bytes)?;
+        input.read_exact(&mut indices_bytes)?;
+
+        let hashes: &[H] = bytemuck::cast_slice(&hashes_bytes);
+        let indices: &[usize] = bytemuck::cast_slice(&indices_bytes);
+
+        Ok(Self {
+            hashes: hashes.to_vec(),
+            indices: indices.to_vec(),
+        })
     }
 }
 
@@ -759,6 +800,14 @@ mod test {
         let index = Index::build(&dataset, hashers);
         eprintln!("index built in {:?}", timer.elapsed());
 
+        // check that the first repetition is serialized and deserialized correctly
+        let mut buf = Vec::<u8>::new();
+        index.repetitions[0].serialize_into(&mut buf).unwrap();
+        let first_repetition =
+            Repetition::<BitHash32>::deserialize_from(&mut std::io::Cursor::new(buf)).unwrap();
+        assert!(index.repetitions[0] == first_repetition);
+
+        // check that the index serializes and de-serializes correctly
         let test_path = "/tmp/panna-ser.z";
         index.save(&test_path).expect("error saving the index");
         let loaded_index = Index::<_, _, _, SimHash<&[f32]>>::load(&test_path, &dataset)

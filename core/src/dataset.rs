@@ -1,7 +1,7 @@
 use ndarray::prelude::*;
 use ndarray_rand::rand_distr::num_traits::ToBytes;
 use rayon::slice::ParallelSliceMut;
-use sha2::{digest::Update, Digest, Sha256};
+use sha2::{Digest, Sha256};
 
 #[derive(PartialEq, PartialOrd, Clone, Copy)]
 pub struct DistanceF32(f32);
@@ -233,14 +233,8 @@ impl<'slf> Dataset<'slf, &'slf [f32]> for AngularDataset {
     }
 
     fn sha2(&self) -> std::io::Result<[u8; 32]> {
-        use std::io::Write;
-        let mut digest = sha2::Sha256::default();
-        for i in 0..self.num_points() {
-            let point = &self.points[i];
-            for coord in point {
-                write!(digest, "{}", coord)?;
-            }
-        }
+        let mut digest = Sha256::default();
+        digest.update(&bytemuck::cast_slice(&self.points.vectors));
         let hash = digest.finalize();
         Ok(hash.into())
     }
@@ -325,17 +319,10 @@ impl<'slf> Dataset<'slf, &'slf [f32]> for EuclideanDataset {
     }
 
     fn sha2(&self) -> std::io::Result<[u8; 32]> {
-        use std::io::Write;
         let mut digest = sha2::Sha256::default();
-        for i in 0..self.num_points() {
-            let point = &self.points[i];
-            write!(digest, "{}", self.squared_norms[i])?;
-            for coord in point {
-                write!(digest, "{}", coord)?;
-            }
-        }
+        digest.update(&bytemuck::cast_slice(&self.points.vectors));
+        digest.update(&bytemuck::cast_slice(&self.squared_norms));
         let hash = digest.finalize();
-        // Ok(hex::encode(hash))
         Ok(hash.into())
     }
 }
