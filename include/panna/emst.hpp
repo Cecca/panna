@@ -449,6 +449,7 @@ namespace panna {
                     prefix,
                     10 * dsu.size(), // buffer size
                     max_weight,
+                    dsu,
                     [&]( uint32_t x ) { return filter.cfind( x ); },
                     [&]( std::vector<Edge>& scratch ) {
                         LOG_DEBUG( "msg", "building tree on batch", "logger", "worker", "batch_size", scratch.size() );
@@ -522,6 +523,7 @@ namespace panna {
                     prefix,
                     10 * filter.size(), // buffer size
                     max_weight, // TODO: watch out this line
+                    filter,
                     [&]( uint32_t x ) { return filter.cfind( x ); },
                     [&]( std::vector<Edge>& updates ) {
                         // add to the possibly useful edges only if they would

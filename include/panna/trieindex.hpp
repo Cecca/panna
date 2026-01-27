@@ -17,6 +17,7 @@
 #include "panna/lsh/predicates.hpp"
 #include "panna/prefixmap.hpp"
 #include "panna/timer.hpp"
+#include "panna/bloom_filter.hpp"
 
 namespace panna {
     static std::atomic<size_t> g_collisions( 0 );
@@ -42,6 +43,7 @@ namespace panna {
         std::optional<Hasher> hasher;
 
         size_t hashed_points = 0;
+        mutable AtomicBloomFilter filter;
 
     public:
         Index() {
@@ -61,7 +63,7 @@ namespace panna {
 
         template <typename Archive>
         void serialize( Archive& ar ) {
-            ar( repetitions, dataset, current_query, lsh_maps, builder, hasher, hashed_points );
+            ar( repetitions, dataset, current_query, lsh_maps, builder, hasher, hashed_points, filter );
         }
 
         size_t num_repetitions() const {
@@ -151,6 +153,11 @@ namespace panna {
             if ( !hasher.has_value() ) {
                 builder.fit( dataset );
                 hasher = builder.build( repetitions );
+            }
+
+            if (filter.empty() && dataset.size() > 0) {
+                // Initialize bloom filter with ~1 billion bits (128MB) and 5 hash functions
+                filter.resize(1ULL << 30, 5);
             }
 
             std::vector<THashValue> hashes;
@@ -292,6 +299,7 @@ namespace panna {
             size_t concatenations,
             size_t buffer_size,
             float weight_filter,
+            DSU& dsu,
             std::function<uint32_t( uint32_t )> group_fun,
             std::function<bool( std::vector<Edge>& )> batch_output ) const {
             expect( hasher );
@@ -323,6 +331,16 @@ namespace panna {
                 for ( size_t i = 0; i < scratch.size(); i++ ) {
                     uint32_t a_idx = scratch.at(i).a;
                     uint32_t b_idx = scratch.at(i).b;
+
+                    collision_cnt++;
+                    if ( dsu.is_connected( a_idx, b_idx ) ) {
+                        continue;
+                    }
+
+                    if ( filter.contains( a_idx, b_idx ) ) {
+                        continue;
+                    }
+
                     if (b_idx < a_idx) {
                         // ensure that a_idx is always smaller
                         uint32_t tmp = b_idx;
@@ -332,9 +350,9 @@ namespace panna {
 
                     PointHandle a = dataset[a_idx];
                     PointHandle b = dataset[b_idx];
-                    collision_cnt++;
                     float distance = Distance::compute( a, b );
                     distance_cnt++;
+                    filter.add( a_idx, b_idx );
                     if ( distance <= weight_filter ) {
                         scratch.at(write_head++) = {
                             .weight = distance,

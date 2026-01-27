@@ -23,6 +23,7 @@ add_compile_options(-O3 -g -mavx2 -mfma)
 find_package(OpenMP)
 if (OpenMP_FOUND)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+    link_libraries(OpenMP::OpenMP_CXX)
 endif()
 
 include_directories("include")
