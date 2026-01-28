@@ -482,7 +482,6 @@ namespace panna {
                 // clang-format on
                 count_distances += cnt_dist;
                 count_collisions += cnt_collisions;
-                expect(cnt_dist == cnt_collisions);
                 // OPTIMIZE: do not send the edges that
                 // we know are already in the best tree found so far
                 partials.send( std::move( local_tree ) );

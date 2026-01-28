@@ -262,7 +262,7 @@ namespace panna {
 
             // TODO: make these configurable to handle different scenarios
             const float threshold_low = n / 2.0;
-            const float threshold_high = n * 10.0;
+            const float threshold_high = n * 2.0;
             LOG_INFO("threshold-low", threshold_low, "threshold_high", threshold_high);
 
             float low=0.0, high=diameter;
