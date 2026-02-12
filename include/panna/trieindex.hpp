@@ -94,6 +94,36 @@ namespace panna {
             return builder.describe();
         }
 
+        /// Get a const reference to the hasher (must have been built via rebuild())
+        const Hasher& get_hasher() const {
+            expect( hasher.has_value() );
+            return *hasher;
+        }
+
+        /// Return the collision probability for a given distance under the current hasher
+        float collision_probability( float dist ) const {
+            return hasher->collision_probability( dist );
+        }
+
+        /// Rebuild the index with a wider hash function parameter.
+        /// This clears all prefix maps, resets the hasher, widens the builder,
+        /// and rehashes all data points from scratch.
+        void rebuild_wider( float factor ) {
+            builder.widen( factor );
+            hasher.reset();
+            for ( auto& map : lsh_maps ) {
+                map.clear();
+            }
+            hashed_points = 0;
+            rebuild();
+        }
+
+        /// Union into the given DSU all points that share the same bucket
+        /// at the given prefix level in the specified repetition's prefix map.
+        void union_at_prefix( DSU& dsu, size_t repetition, uint8_t prefix ) const {
+            lsh_maps.at( repetition ).union_at_prefix( dsu, prefix );
+        }
+
         friend bool operator==( const Index<Dataset, Hasher, Distance>& a,
                                 const Index<Dataset, Hasher, Distance>& b ) {
             return a.dataset == b.dataset && a.current_query == b.current_query &&
@@ -276,9 +306,10 @@ namespace panna {
             size_t repetition,
             size_t concatenations,
             size_t buffer_size,
-            float weight_filter,
+            const std::atomic<float>& weight_filter,
             std::function<uint32_t( uint32_t )> group_fun,
-            std::function<bool( std::vector<Edge>& )> batch_output ) const {
+            std::function<bool( std::vector<Edge>& )> batch_output,
+            size_t max_distances = 0 ) const {
             expect( hasher );
             size_t distance_cnt = 0;
             size_t collision_cnt = 0;
@@ -294,11 +325,20 @@ namespace panna {
                     group_fun );
 
             while ( true ) {
+                // Check distance budget
+                if ( max_distances > 0 && distance_cnt >= max_distances ) {
+                    LOG_DEBUG( "msg", "distance budget exhausted",
+                               "repetition", repetition,
+                               "distance_cnt", distance_cnt );
+                    break;
+                }
                 cursor.fill_pairs_buffer( scratch, buffer_size );
                 if ( scratch.size() == 0 ) {
                     // no new pairs
                     break;
                 }
+                // Read the latest weight filter from the atomic
+                float wf = weight_filter.load( std::memory_order_relaxed );
                 LOG_DEBUG( "repetition",
                            repetition,
                            "prefix",
@@ -321,7 +361,7 @@ namespace panna {
                     float distance = Distance::compute( a, b );
                     scratch.at(i).weight = distance;
                     distance_cnt++;
-                    if ( distance > weight_filter ) {
+                    if ( distance > wf ) {
                         continue;
                     }
                     // output.emplace_back( distance, a_idx, b_idx );

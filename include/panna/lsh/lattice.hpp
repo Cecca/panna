@@ -281,6 +281,13 @@ namespace panna {
             LOG_INFO("scaling-factor", scaling_factor);
         }
 
+        /// Widen the scaling factor by the given multiplier, to increase
+        /// the collision probability in a subsequent rehashing round.
+        void widen( float factor ) {
+            expect( scaling_factor > 0 );
+            scaling_factor *= factor;
+        }
+
         Output build( size_t repetitions ) const {
             expect( scaling_factor > 0 );
             return LatticeLSH<K, Dataset, Distance>( offset, scaling_factor, dimensions, repetitions );

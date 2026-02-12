@@ -212,6 +212,13 @@ namespace panna {
         }
 
 
+        /// Widen the quantization width by the given factor, to increase
+        /// the collision probability in a subsequent rehashing round.
+        void widen( float factor ) {
+            expect( quantization_width > 0 );
+            quantization_width *= factor;
+        }
+
         Output build( size_t repetitions ) const {
             expect( quantization_width > 0 );
             return E2LSH<K, Dataset, Distance>( quantization_width, dimensions, repetitions );

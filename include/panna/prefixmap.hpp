@@ -741,6 +741,30 @@ namespace panna {
                    a.parallel_rebuilding_data == b.parallel_rebuilding_data;
         }
 
+        /// Clear all stored data, keeping the thread-local scratch space allocated.
+        void clear() {
+            indices.clear();
+            hashes.clear();
+            for ( auto& rd : parallel_rebuilding_data ) {
+                rd.clear();
+            }
+        }
+
+        /// Union all points that share the same hash prefix into the given DSU.
+        /// Since hashes are stored sorted, points with the same prefix are contiguous.
+        void union_at_prefix( DSU& dsu, uint8_t prefix ) const {
+            size_t i = 0;
+            while ( i < hashes.size() ) {
+                size_t group_start = i;
+                i++;
+                while ( i < hashes.size() &&
+                        hashes.at( group_start ).prefix_eq( hashes.at( i ), prefix ) ) {
+                    dsu.union_sets( indices.at( group_start ), indices.at( i ) );
+                    i++;
+                }
+            }
+        }
+
         // Add a hash value, and associated index, to be included next time rebuild is called.
         void insert( int tid, uint32_t idx, THashValue hash_value ) {
             parallel_rebuilding_data.at(tid).push_back( { idx, hash_value } );

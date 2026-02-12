@@ -45,8 +45,8 @@ def _load_pamap(path: Path):
                 for line in zf:
                     line = line.decode()
                     l = list(map(float, line.strip().split()))
-                    # remove timestamp
-                    arr.append(l[1:])
+                    # remove timestamp and activity ID
+                    arr.append(l[2:])
             X = np.nan_to_num(np.array(arr))  # many NaNs in data, replace them with 0.
             return X.astype(np.float32)
 
@@ -73,8 +73,10 @@ def _load_ht(path: Path):
         zip_ref.extractall(path.parent)
         # Unzip the inner file "HT_Sensor_dataset.zip"
         inner_zip_path = path.parent / "HT_Sensor_dataset.zip"
-        with zipfile.ZipFile(inner_zip_path, 'r') as inner_zip_ref:
-            inner_zip_ref.extractall(path.parent)
+        # if there is an inner zip file, extract it
+        if inner_zip_path.is_file():
+            with zipfile.ZipFile(inner_zip_path, 'r') as inner_zip_ref:
+                inner_zip_ref.extractall(path.parent)
     # Load data
     data_path = path.parent / "HT_Sensor_dataset.dat"
     data = pd.read_csv(data_path, sep=r'\s+')
@@ -91,6 +93,8 @@ def _load_chem(path: Path):
     data_path = path.parent / "gas+sensor+array+under+dynamic+gas+mixtures/ethylene_CO.txt"
     data = pd.read_csv(data_path, sep=r'\s+').to_numpy().astype(np.float32)
     data = np.nan_to_num(data)
+    # Remove duplicate rows
+    data = np.unique(data, axis=0)
     return data, None, None
         
 
@@ -167,7 +171,14 @@ def available_datasets():
     return list(_DATASETS_INFO.keys())
 
 
-def load(name: str, pca_dimensions=None, center_mean=False, load_queries=False, normalize=False):
+def load(
+    name: str,
+    pca_dimensions=None,
+    center_mean=False,
+    load_queries=False,
+    normalize=False,
+    standardize=False,
+):
     if name not in available_datasets():
         raise KeyError(
             f"Dataset `{name}` not available. Pick one of {available_datasets()}"
@@ -180,8 +191,8 @@ def load(name: str, pca_dimensions=None, center_mean=False, load_queries=False, 
     _download(url, local_name)
     train, test, distances = loader(local_name)
 
-    if center_mean:
-        scaler = StandardScaler(with_std=False)
+    if center_mean or standardize:
+        scaler = StandardScaler(with_std=standardize)
         train = scaler.fit_transform(train)
         if test is not None:
             test = scaler.transform(test)

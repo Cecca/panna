@@ -411,10 +411,11 @@ namespace panna {
                 }
                 DSU filter = running_result.read()->filter;
                 DSU dsu( filter );
+                const size_t n = dsu.size();
                 auto [cnt_dist, cnt_collisions] = table.search_pairs_different_groups(
                     repetition,
                     prefix,
-                    10 * dsu.size(), // buffer size
+                    std::max( (size_t)1024, n ), // smaller buffer for more frequent callbacks
                     max_weight,
                     [&]( uint32_t x ) { return filter.cfind( x ); },
                     [&]( std::vector<Edge>& scratch ) {
@@ -426,8 +427,16 @@ namespace panna {
                         local_tree.clear();
                         dsu.reset();
                         kruskal( dsu, scratch, local_tree );
+                        // Refresh filter from the latest published result.
+                        // This helps skip pairs already connected in the global tree.
+                        filter = running_result.read()->filter;
+                        for ( auto& e : local_tree ) {
+                            filter.union_sets( e.a, e.b );
+                        }
+                        filter.compress_all();
                         return found.load(); // early stop if the solution has been found in the meantime
-                    } );
+                    },
+                    10 * n ); // distance budget per repetition
                 count_distances += cnt_dist;
                 count_collisions += cnt_collisions;
                 // OPTIMIZE: do not send the edges that
@@ -465,10 +474,11 @@ namespace panna {
                     return;
                 }
                 DSU filter = rr->filter;
+                const size_t n = filter.size();
                 auto [cnt_dist, cnt_collisions] = table.search_pairs_different_groups(
                     repetition,
                     prefix,
-                    10 * filter.size(), // buffer size
+                    std::max( (size_t)1024, n ), // smaller buffer for more frequent callbacks
                     max_weight,
                     [&]( uint32_t x ) { return filter.cfind( x ); },
                     [&]( std::vector<Edge>& updates ) {
@@ -480,10 +490,16 @@ namespace panna {
                         possibly_useful_edges.insert( possibly_useful_edges.end(),
                                                       std::make_move_iterator( updates.begin() ),
                                                       std::make_move_iterator( updates.end() ) );
+                        // Refresh filter from the latest published result
+                        filter = running_result.read()->filter;
+                        for ( auto& e : local_tree ) {
+                            filter.union_sets( e.a, e.b );
+                        }
+                        filter.compress_all();
                         // early stop if the solution has been found in the meantime
-                        // TODO: send all the edges that might improve the core distances
                         return found.load();
-                    } );
+                    },
+                    10 * n ); // distance budget per repetition
                 count_distances += cnt_dist;
                 count_collisions += cnt_collisions;
                 possibly_useful_edges.insert( possibly_useful_edges.end(),
@@ -493,7 +509,11 @@ namespace panna {
             }
         }
 
-        /// find the minimum spanning tree, using channels to handle parallelism
+        /// find the minimum spanning tree, using channels to handle parallelism.
+        /// If all hash prefixes are exhausted without finding a valid tree,
+        /// rehashes with a 2x wider scaling factor and continues.
+        /// Pairs that collided at the shortest prefix in previous rounds
+        /// are tracked in a DSU and skipped in subsequent rounds.
         std::pair<float, std::vector<Edge>> find_tree() {
             clear();
 
@@ -507,109 +527,195 @@ namespace panna {
             const size_t max_threads = ( hardware_concurrency > 1 ) ? hardware_concurrency - 1 : 1;
 
             std::atomic_bool found( false );
-            for ( size_t prefix = max_hashbits; prefix > 0 && !found; prefix-- ) {
-                // Set up work to distribute among threads: each worker thread will pull
-                // repetition indices from this
-                Channel<size_t> work( max_repetitions );
-                for ( size_t repetition = 0; repetition < max_repetitions; repetition++ ) {
-                    work.send( std::move( repetition ) );
-                }
-                // Close the channel, so that workers do not wait indefinitely for new repetitions
-                work.close();
 
-                // Set up the channel to collect partial results
-                Channel<std::vector<Edge>> partials( max_repetitions );
+            // Track previous hashers for cumulative failure probability
+            std::vector<Hasher> previous_hashers;
+            // Track pairs seen at the shortest prefix across rehash rounds
+            DSU seen_pairs( num_data );
 
-                // spawn the threads to carry out the work
-                std::vector<std::thread> workers;
-                for ( size_t tid = 0; tid < max_threads; tid++ ) {
-                    std::thread worker( EMST::worker_fun,
-                                        tid,
-                                        prefix,
-                                        std::ref(table),
-                                        std::ref(running_result),
-                                        std::ref(found),
-                                        std::ref(max_weight),
-                                        std::ref(count_distances),
-                                        std::ref(count_collisions),
-                                        std::ref(work),
-                                        std::ref(partials) );
-                    workers.push_back( std::move( worker ) );
-                }
+            const size_t MAX_REHASH_ROUNDS = 10;
+            for ( size_t rehash_round = 0;
+                  rehash_round < MAX_REHASH_ROUNDS && !found;
+                  rehash_round++ ) {
 
-                // collect the results from the worker threads
-                size_t completed_repetitions = 0;
-                for ( std::optional<std::vector<Edge>> local_tree = partials.receive();
-                      local_tree.has_value() && !found && completed_repetitions < max_repetitions;
-                      local_tree = partials.receive() ) {
-                    std::vector<Edge> update = std::move( *local_tree );
-                    LOG_INFO("logger", "collector", "msg", "received update", "update-size", update.size());
+                if ( rehash_round > 0 ) {
+                    LOG_INFO( "msg", "Rehashing with wider scaling factor",
+                              "round", rehash_round );
 
-                    completed_repetitions++;
-
-                    std::vector<Edge> tree( running_result.read()->tree );
-                    DSU filter(num_data);
-                    update.insert( update.end(),
-                                   std::make_move_iterator( tree.begin() ),
-                                   std::make_move_iterator( tree.end() ) );
-                    std::sort( update.begin(), update.end() );
-                    tree.clear();
-                    kruskal( filter, update, tree );
-                    update.clear();
-                    LOG_INFO("logger", "collector", "tree-size", tree.size(), "completed-repetitions", completed_repetitions);
-
-                    if ( tree.size() == num_data - 1 ) {
-                        StoppingConditionInfo stop = stopping_condition( tree, prefix, completed_repetitions );
-                        float weight_lower_bound =
-                            stop.confirmed_weight +
-                            stop.edges_to_confirm * stop.heaviest_confirmed_edge;
-                        LOG_INFO("weight-lower-bound", weight_lower_bound);
-                        bool should_stop =
-                            stop.total_weight <= ( 1 + epsilon ) * weight_lower_bound;
-                        // clang-format off
-                        LOG_INFO( "logger", "collector",
-                                  "stop.total_weight", stop.total_weight,
-                                  "stop.confirmed_weight", stop.confirmed_weight,
-                                  "stop.heaviest_confirmed_edge", stop.heaviest_confirmed_edge,
-                                  "stop.edges_to_confirm", stop.edges_to_confirm,
-                                  "heaviest_edge", tree.at(num_data-2).weight,
-                                  "weight_lower_bound", weight_lower_bound,
-                                  "should_stop", should_stop );
-                        // clang-format on
-                        max_weight = tree.back().weight;
-                        LOG_INFO("logger", "collector", "max-weight", max_weight.load());
-
-                        // stop if we are done
-                        if ( should_stop ) {
-                            LOG_INFO("msg", "tree found, signalling stop");
-                            found = true;
-                            tree_weight = stop.total_weight;
-                        }
-                        // Fill the DSU filter with just the confirmed edges
-                        filter.reset();
-                        for ( size_t idx = 0; idx < stop.confirmed_edges; idx++ ) {
-                            auto edge = tree.at(idx);
-                            filter.union_sets( edge.a, edge.b );
-                        }
-                    } else {
-                        filter.reset();
+                    // Record pairs sharing the shortest prefix (prefix 1)
+                    // in the current hash tables before they are destroyed.
+                    for ( size_t rep = 0; rep < max_repetitions; rep++ ) {
+                        table.union_at_prefix( seen_pairs, rep, 1 );
                     }
-                    // publish the new running result
-                    filter.compress_all();
-                    running_result.update(
-                        RunningResult( std::move( tree ), std::move( filter ) ) );
+                    seen_pairs.compress_all();
 
-                    if (completed_repetitions >= max_repetitions) {
-                        // we are done with this prefix
-                        break;
+                    // Save current hasher for failure probability computation
+                    previous_hashers.push_back( table.get_hasher() );
+
+                    // Rebuild with 2x wider scaling/quantization
+                    table.rebuild_wider( 2.0 );
+
+                    // Merge seen_pairs into the filter of the running result
+                    auto rr = running_result.read();
+                    DSU combined_filter( num_data );
+                    for ( auto& edge : rr->tree ) {
+                        combined_filter.union_sets( edge.a, edge.b );
                     }
+                    for ( size_t i = 0; i < num_data; i++ ) {
+                        uint32_t sp_root = seen_pairs.cfind( i );
+                        if ( sp_root != i ) {
+                            combined_filter.union_sets( i, sp_root );
+                        }
+                    }
+                    combined_filter.compress_all();
+                    running_result.update( RunningResult(
+                        std::vector<Edge>( rr->tree ), std::move( combined_filter ) ) );
                 }
 
-                // Wait for workers to finish
-                for ( auto&& worker : workers ) {
-                    worker.join();
+                for ( size_t prefix = max_hashbits; prefix > 0 && !found; prefix-- ) {
+                    // Set up work to distribute among threads
+                    Channel<size_t> work( max_repetitions );
+                    for ( size_t repetition = 0; repetition < max_repetitions; repetition++ ) {
+                        work.send( std::move( repetition ) );
+                    }
+                    work.close();
+
+                    // Set up the channel to collect partial results
+                    Channel<std::vector<Edge>> partials( max_repetitions );
+
+                    // Spawn worker threads
+                    std::vector<std::thread> workers;
+                    for ( size_t tid = 0; tid < max_threads; tid++ ) {
+                        std::thread worker( EMST::worker_fun,
+                                            tid,
+                                            prefix,
+                                            std::ref(table),
+                                            std::ref(running_result),
+                                            std::ref(found),
+                                            std::ref(max_weight),
+                                            std::ref(count_distances),
+                                            std::ref(count_collisions),
+                                            std::ref(work),
+                                            std::ref(partials) );
+                        workers.push_back( std::move( worker ) );
+                    }
+
+                    // Collect results from workers, batching for efficiency
+                    size_t completed_repetitions = 0;
+                    std::vector<Edge> batch_updates;
+                    const size_t BATCH_SIZE = std::max( (size_t)1, max_threads / 2 );
+                    size_t batch_count = 0;
+
+                    for ( std::optional<std::vector<Edge>> local_tree = partials.receive();
+                          local_tree.has_value() && !found && completed_repetitions < max_repetitions;
+                          local_tree = partials.receive() ) {
+                        std::vector<Edge> update = std::move( *local_tree );
+                        LOG_INFO( "logger", "collector", "msg", "received update",
+                                  "update-size", update.size() );
+
+                        completed_repetitions++;
+                        batch_count++;
+
+                        // Accumulate partial results into a batch
+                        batch_updates.insert( batch_updates.end(),
+                            std::make_move_iterator( update.begin() ),
+                            std::make_move_iterator( update.end() ) );
+
+                        // Process batch when full or when all repetitions are done
+                        bool should_process_batch =
+                            ( batch_count >= BATCH_SIZE ) ||
+                            ( completed_repetitions >= max_repetitions );
+                        if ( !should_process_batch ) continue;
+                        batch_count = 0;
+
+                        // Merge: the running result tree is sorted, so we can use merge
+                        std::vector<Edge> tree( running_result.read()->tree );
+                        DSU filter( num_data );
+                        std::sort( batch_updates.begin(), batch_updates.end() );
+                        std::vector<Edge> merged;
+                        merged.reserve( tree.size() + batch_updates.size() );
+                        std::merge( tree.begin(), tree.end(),
+                                    batch_updates.begin(), batch_updates.end(),
+                                    std::back_inserter( merged ) );
+                        tree.clear();
+                        kruskal( filter, merged, tree );
+                        batch_updates.clear();
+                        merged.clear();
+
+                        LOG_INFO( "logger", "collector", "tree-size", tree.size(),
+                                  "completed-repetitions", completed_repetitions );
+
+                        if ( tree.size() == num_data - 1 ) {
+                            StoppingConditionInfo stop =
+                                stopping_condition_with_history(
+                                    tree, prefix, completed_repetitions,
+                                    previous_hashers );
+                            float weight_lower_bound =
+                                stop.confirmed_weight +
+                                stop.edges_to_confirm * stop.heaviest_confirmed_edge;
+                            LOG_INFO( "weight-lower-bound", weight_lower_bound );
+                            bool should_stop =
+                                stop.total_weight <= ( 1 + epsilon ) * weight_lower_bound;
+                            // clang-format off
+                            LOG_INFO( "logger", "collector",
+                                      "stop.total_weight", stop.total_weight,
+                                      "stop.confirmed_weight", stop.confirmed_weight,
+                                      "stop.heaviest_confirmed_edge", stop.heaviest_confirmed_edge,
+                                      "stop.edges_to_confirm", stop.edges_to_confirm,
+                                      "heaviest_edge", tree.at(num_data-2).weight,
+                                      "weight_lower_bound", weight_lower_bound,
+                                      "should_stop", should_stop,
+                                      "rehash_round", rehash_round );
+                            // clang-format on
+                            max_weight = tree.back().weight;
+                            LOG_INFO( "logger", "collector", "max-weight", max_weight.load() );
+
+                            if ( should_stop ) {
+                                LOG_INFO( "msg", "tree found, signalling stop" );
+                                found = true;
+                                tree_weight = stop.total_weight;
+                            }
+                            // Fill the DSU filter with confirmed edges + seen pairs
+                            filter.reset();
+                            for ( size_t idx = 0; idx < stop.confirmed_edges; idx++ ) {
+                                auto edge = tree.at(idx);
+                                filter.union_sets( edge.a, edge.b );
+                            }
+                            // Merge seen_pairs into filter so workers skip them
+                            for ( size_t i = 0; i < num_data; i++ ) {
+                                uint32_t sp_root = seen_pairs.cfind( i );
+                                if ( sp_root != i ) {
+                                    filter.union_sets( i, sp_root );
+                                }
+                            }
+                        } else {
+                            filter.reset();
+                            // Still merge seen_pairs when tree is incomplete
+                            for ( size_t i = 0; i < num_data; i++ ) {
+                                uint32_t sp_root = seen_pairs.cfind( i );
+                                if ( sp_root != i ) {
+                                    filter.union_sets( i, sp_root );
+                                }
+                            }
+                        }
+                        // Publish the new running result
+                        filter.compress_all();
+                        running_result.update(
+                            RunningResult( std::move( tree ), std::move( filter ) ) );
+
+                        if ( completed_repetitions >= max_repetitions ) {
+                            break;
+                        }
+                    }
+
+                    // Wait for workers to finish
+                    for ( auto&& worker : workers ) {
+                        worker.join();
+                    }
+                    LOG_INFO( "msg", "completed prefix", "prefix", prefix );
                 }
-                LOG_INFO( "msg", "completed prefix", "prefix", prefix );
+
+                LOG_INFO( "msg", "completed rehash round", "round", rehash_round );
             }
 
             std::vector<Edge> tree(running_result.read()->tree);
@@ -622,7 +728,10 @@ namespace panna {
 
             // This is just a sanity check to see if dsu works as intended
             is_connected( tree );
-            LOG_INFO( "msg", "EMST finished", "distances_computed", distances_computed, "num_collisions", num_collisions, "num_total_pairs", ((size_t)num_data -1) *(size_t) num_data/ 2 );
+            LOG_INFO( "msg", "EMST finished",
+                      "distances_computed", distances_computed,
+                      "num_collisions", num_collisions,
+                      "num_total_pairs", ((size_t)num_data -1) *(size_t) num_data/ 2 );
             return { tree_weight, tree };
         }
 
@@ -906,12 +1015,36 @@ namespace panna {
         }
 
         StoppingConditionInfo stopping_condition( std::vector<Edge> tree, size_t i, size_t j ) {
+            std::vector<Hasher> empty;
+            return stopping_condition_with_history( tree, i, j, empty );
+        }
+
+        /// Like stopping_condition, but accounts for cumulative failure probability
+        /// across multiple rehashing rounds. Each entry in previous_hashers
+        /// represents a completed round where all L repetitions were exhausted
+        /// at all prefix levels.
+        StoppingConditionInfo stopping_condition_with_history(
+            std::vector<Edge>& tree,
+            size_t i,
+            size_t j,
+            const std::vector<Hasher>& previous_hashers ) {
             float prob = 0.0f;
             float weight = 0.0f;
             size_t idx = 0;
             while ( idx < tree.size() ) {
                 const float w = tree.at(idx).weight;
-                const float fp = table.fail_probability( w, i, j );
+
+                // Current round failure probability
+                float fp = table.fail_probability( w, i, j );
+
+                // Multiply by each previous round's failure probability.
+                // A completed round at prefix 1 with all L repetitions
+                // has failure prob = (1 - cp)^L
+                for ( const auto& prev_h : previous_hashers ) {
+                    float cp = prev_h.collision_probability( w );
+                    fp *= std::pow( 1.0f - cp,
+                                    static_cast<float>( max_repetitions ) );
+                }
 
                 if ( prob + fp > delta ) {
                     break;
