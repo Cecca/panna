@@ -4,6 +4,8 @@
 #include <random>
 #include <stdexcept>
 #include <vector>
+#include <algorithm>
+#include <numeric>
 
 #include "panna/expect.hpp"
 #include "panna/linalg.hpp"
@@ -119,6 +121,28 @@ namespace panna {
                 return;
             }
 
+            Dataset* points_ptr = &points;
+            std::optional<Dataset> sampled_dataset;
+            double sampling_ratio = 1.0;
+            const size_t original_size = points.size();
+
+            if ( points.size() > 5000 ) {
+                const size_t sample_size = 2000;
+                sampling_ratio = static_cast<double>( sample_size ) / points.size();
+                sampled_dataset.emplace( dimensions );
+                std::vector<size_t> indices( points.size() );
+                std::iota( indices.begin(), indices.end(), 0 );
+
+                auto& rng = get_global_rng();
+                std::shuffle( indices.begin(), indices.end(), rng );
+
+                for ( size_t i = 0; i < sample_size; i++ ) {
+                    auto pt = points[indices[i]];
+                    sampled_dataset->push_back( pt );
+                }
+                points_ptr = &*sampled_dataset;
+            }
+
             Dataset random(dimensions);
             for (size_t i = 0; i < 1000; i++) {
                 std::vector<float> dir = sample_random_normal_vector(dimensions);
@@ -128,8 +152,8 @@ namespace panna {
             float min = std::numeric_limits<float>::infinity();
             float max = -std::numeric_limits<float>::infinity();
             for (size_t i = 0; i < random.size(); i++) {
-                for (size_t j = 0; j < points.size(); j++) {
-                    float dotp = dot_product(random[i], points[j]);
+                for (size_t j = 0; j < points_ptr->size(); j++) {
+                    float dotp = dot_product(random[i], (*points_ptr)[j]);
                     if (dotp < min) min = dotp;
                     if (dotp > max) max = dotp;
                 }
@@ -139,8 +163,8 @@ namespace panna {
             LOG_INFO("msg", "Quantization width guess", "quantization_width", quantization_width);
 
             const size_t sample_repetitions = 4;
-            size_t high_thresh = static_cast<size_t>(sqrt(points.size()) * 1.3);
-            size_t low_thresh  = static_cast<size_t>(sqrt(points.size()) * 0.7);
+            size_t high_thresh = static_cast<size_t>(sqrt(original_size) * 1.3 * sampling_ratio * sampling_ratio);
+            size_t low_thresh  = static_cast<size_t>(sqrt(original_size) * 0.7 * sampling_ratio * sampling_ratio);
 
             std::optional<float> qw_lower = std::nullopt;
             std::optional<float> qw_upper = std::nullopt;
@@ -148,7 +172,7 @@ namespace panna {
             auto compute_avg_collisions = [&](float qwidth) -> float {
                 std::vector<PrefixMap<typename Output::Value>> pmaps(sample_repetitions);
                 Output hasher(qwidth, dimensions, sample_repetitions);
-                PrefixMap<typename Output::Value>::populate_from(pmaps, points, hasher);
+                PrefixMap<typename Output::Value>::populate_from(pmaps, *points_ptr, hasher);
 
                 size_t collisions = 0;
                 for (auto& pmap : pmaps) {

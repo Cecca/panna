@@ -4,6 +4,8 @@
 #include <omp.h>
 #include <random>
 #include <vector>
+#include <algorithm>
+#include <numeric>
 
 #include "panna/data.hpp"
 #include "panna/distance.hpp"
@@ -240,16 +242,38 @@ namespace panna {
             if ( scaling_factor != 0.0 ) {
                 return;
             }
-            const size_t n = points.size();
-            offset = mean_point(points);
-            const float diameter = approximate_diameter<Distance>(points);
+            Dataset* points_ptr = &points;
+            std::optional<Dataset> sampled_dataset;
+            double sampling_ratio = 1.0;
+            const size_t original_size = points.size();
+
+            if ( points.size() > 5000 ) {
+                const size_t sample_size = 2000;
+                sampling_ratio = static_cast<double>( sample_size ) / points.size();
+                sampled_dataset.emplace( dimensions );
+                std::vector<size_t> indices( points.size() );
+                std::iota( indices.begin(), indices.end(), 0 );
+
+                auto& rng = get_global_rng();
+                std::shuffle( indices.begin(), indices.end(), rng );
+
+                for ( size_t i = 0; i < sample_size; i++ ) {
+                    auto pt = points[indices[i]];
+                    sampled_dataset->push_back( pt );
+                }
+                points_ptr = &*sampled_dataset;
+            }
+
+            // const size_t n = points_ptr->size();
+            offset = mean_point(*points_ptr);
+            const float diameter = approximate_diameter<Distance>(*points_ptr);
             const size_t sample_repetitions = 4;
             LOG_INFO("diameter", diameter);
 
             auto compute_avg_collisions = [&](float scale) -> float {
                 std::vector<PrefixMap<typename Output::Value>> pmaps(sample_repetitions);
                 Output hasher(offset, scale, dimensions, sample_repetitions);
-                PrefixMap<typename Output::Value>::populate_from(pmaps, points, hasher);
+                PrefixMap<typename Output::Value>::populate_from(pmaps, *points_ptr, hasher);
 
                 size_t collisions = 0;
                 for (auto& pmap : pmaps) {
@@ -261,8 +285,8 @@ namespace panna {
             };
 
             // TODO: make these configurable to handle different scenarios
-            const float threshold_low = n / 2.0;
-            const float threshold_high = n * 2.0;
+            const float threshold_low = (original_size / 2.0) * sampling_ratio * sampling_ratio;
+            const float threshold_high = (original_size * 2.0) * sampling_ratio * sampling_ratio;
             LOG_INFO("threshold-low", threshold_low, "threshold_high", threshold_high);
 
             float low=0.0, high=diameter;

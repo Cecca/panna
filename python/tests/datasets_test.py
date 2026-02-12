@@ -47,14 +47,16 @@ if __name__ == "__main__":
         stem = Path(path).stem
         _, data = panna.datasets.load(name=stem, pca_dimensions=4 if 'pamap2' in stem.lower() else None)
         data = np.array(data).astype(np.float32)
+        
+        lsh_family = "lattice" #if data.shape[1] >= 20 else "e2lsh"
 
-        emst = panna.EMST(data, delta=0.01, epsilon=0, family="lattice")
+        emst = panna.EMST(data, delta=0.01, epsilon=0, family=lsh_family)
         start_time = perf_counter()
         emst.find_mst()
         end_time = perf_counter()
         elapsed_time = end_time - start_time
 
-        emst = panna.EMST(data, delta=0.01, epsilon=0.2, family="lattice")
+        emst = panna.EMST(data, delta=0.01, epsilon=0.2, family=lsh_family)
         start_time = perf_counter()
         emst.find_mst()
         end_time = perf_counter()

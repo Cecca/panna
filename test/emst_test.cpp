@@ -25,8 +25,8 @@ int main() {
     const size_t n = 100;
     using Dataset = NormedPoints;         // UnitNormPoints or EuclideanPoints
     using Distance = EuclideanDistance; // EuclideanDistance or AngularDistance or CosineDistance
-    // using Hasher = E2LSH<conc, Dataset, Distance>;
-    using Hasher = LatticeLSH<4, Dataset, Distance>;
+    using Hasher = E2LSH<conc, Dataset, Distance>;
+    //using Hasher = LatticeLSH<4, Dataset, Distance>;
 
     // CrossPolytopeBuilder<conc, Point, Distance, rotations> builder( dimensions );
 

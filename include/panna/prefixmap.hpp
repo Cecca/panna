@@ -871,5 +871,16 @@ namespace panna {
             expect( pos < hashes.size() );
             return hashes.at(pos);
         }
+
+        void populate_dsu( DSU& dsu ) const {
+            if ( indices.empty() ) {
+                return;
+            }
+            for ( size_t i = 0; i < indices.size() - 1; i++ ) {
+                if ( hashes.at(i) == hashes.at(i + 1) ) {
+                    dsu.union_sets( indices.at(i), indices.at(i + 1) );
+                }
+            }
+        }
     };
 } // namespace panna

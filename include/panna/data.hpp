@@ -163,6 +163,13 @@ namespace panna {
             }
         }
 
+        void push_back( PointHandle ph ) {
+            expect( ph.dimensions == dimensions );
+            for(size_t i=0; i<ph.num_chunks; ++i) {
+                chunks.push_back(ph.chunks[i]);
+            }
+        }
+
         PointHandle push_back_random() {
             std::vector<float> values;
             for ( unsigned int i = 0; i < dimensions; i++ ) {
@@ -251,6 +258,12 @@ namespace panna {
             squared_norms.push_back( sq_norm );
         }
 
+        void push_back( PointHandle ph ) {
+            expect( ph.inner.dimensions == dimensions );
+            normalized_points.push_back(ph.inner);
+            squared_norms.push_back(ph.sq_norm);
+        }
+
         PointHandle push_back_random() {
             std::vector<float> values;
             for ( unsigned int i = 0; i < dimensions; i++ ) {
@@ -331,6 +344,11 @@ namespace panna {
                 cnt+=1;
             }
             expect(cnt == dimensions);
+        }
+
+        void push_back( PointHandle ph ) {
+            expect( ph.dimensions == dimensions );
+            data.insert(data.end(), ph.vector, ph.vector + dimensions);
         }
 
         PointHandle push_back_random() {

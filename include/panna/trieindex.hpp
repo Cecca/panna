@@ -43,6 +43,11 @@ namespace panna {
 
         size_t hashed_points = 0;
 
+        std::vector<DSU> prev_dsus;
+        // Global DSU merging collision groups from all repetitions across rehashes.
+        // Used for cross-repetition deduplication of distance computations.
+        std::optional<DSU> global_prev_dsu;
+
     public:
         Index() {
         }
@@ -176,6 +181,35 @@ namespace panna {
         /// collisions of points from different groups.
         void rehash( std::function<uint32_t( uint32_t )> group_fun ) {
             Timer timer("reshashing");
+
+            if ( hasher.has_value() && dataset.size() > 0 ) {
+                // Keep prev_dsus cumulative across rehashes: don't clear,
+                // so collision groups from previous hashes are preserved.
+                if ( prev_dsus.empty() ) {
+                    prev_dsus.reserve( repetitions );
+                    for ( size_t rep = 0; rep < repetitions; rep++ ) {
+                        prev_dsus.emplace_back( dataset.size() );
+                    }
+                }
+
+                // Initialize global DSU if needed
+                if ( !global_prev_dsu.has_value() ) {
+                    global_prev_dsu.emplace( dataset.size() );
+                }
+
+#pragma omp parallel for
+                for ( size_t rep = 0; rep < repetitions; rep++ ) {
+                    lsh_maps.at( rep ).populate_dsu( prev_dsus.at( rep ) );
+                    prev_dsus.at( rep ).compress_all();
+                }
+
+                // Merge all repetitions into global DSU for cross-rep dedup
+                for ( size_t rep = 0; rep < repetitions; rep++ ) {
+                    lsh_maps.at( rep ).populate_dsu( *global_prev_dsu );
+                }
+                global_prev_dsu->compress_all();
+            }
+
             builder.fit(dataset, group_fun);
             hasher = builder.build( repetitions );
             for (auto & map : lsh_maps) {
@@ -333,6 +367,21 @@ namespace panna {
                     PointHandle a = dataset[a_idx];
                     PointHandle b = dataset[b_idx];
                     collision_cnt++;
+
+                    // Cross-repetition dedup: skip if globally seen across all reps/rehashes
+                    if ( global_prev_dsu.has_value() &&
+                         global_prev_dsu->cfind( a_idx ) ==
+                             global_prev_dsu->cfind( b_idx ) ) {
+                        continue;
+                    }
+
+                    // Per-repetition dedup for same rep index across rehashes
+                    if ( prev_dsus.size() > repetition &&
+                         prev_dsus[repetition].cfind( a_idx ) ==
+                             prev_dsus[repetition].cfind( b_idx ) ) {
+                        continue;
+                    }
+
                     float distance = Distance::compute( a, b );
                     distance_cnt++;
                     if ( distance <= weight_filter ) {
