@@ -124,6 +124,13 @@ namespace panna {
             lsh_maps[ repetition ].union_at_prefix( dsu, prefix );
         }
 
+        /// Iterate over all buckets at the given prefix and repetition,
+        /// calling callback(begin, end) for each bucket with ≥2 points.
+        template <typename F>
+        void for_each_bucket( size_t repetition, uint8_t prefix, F&& callback ) const {
+            lsh_maps[ repetition ].for_each_bucket( prefix, std::forward<F>( callback ) );
+        }
+
         /// Extract compressed parent arrays for all repetitions at the given prefix.
         /// Each entry is a compressed DSU parent vector: parent[i] gives the root
         /// of point i's bucket in that repetition. Within one repetition, points

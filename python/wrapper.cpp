@@ -194,11 +194,11 @@ EuclideanHashFamily string_to_family(std::string s) {
 }
 
 struct EMST_exposed {
-    using LatticeHasher = panna::LatticeLSH<4, panna::NormedPoints, panna::EuclideanDistance>;
-    using E2LSHHasher = panna::E2LSH<12, panna::NormedPoints, panna::EuclideanDistance>;
+    using LatticeHasher = panna::LatticeLSH<4, panna::EuclideanPoints, panna::EuclideanDistance>;
+    using E2LSHHasher = panna::E2LSH<12, panna::EuclideanPoints, panna::EuclideanDistance>;
     using Variants = std::variant<
-        panna::EMST<panna::NormedPoints, LatticeHasher, panna::EuclideanDistance>,
-        panna::EMST<panna::NormedPoints, E2LSHHasher, panna::EuclideanDistance>
+        panna::EMST<panna::EuclideanPoints, LatticeHasher, panna::EuclideanDistance>,
+        panna::EMST<panna::EuclideanPoints, E2LSHHasher, panna::EuclideanDistance>
     >;
 
     Variants inner;
@@ -239,12 +239,12 @@ struct EMST_exposed {
         switch ( family ) {
         case Lattice:
             inner
-                .emplace<panna::EMST<panna::NormedPoints, LatticeHasher, panna::EuclideanDistance>>(
+                .emplace<panna::EMST<panna::EuclideanPoints, LatticeHasher, panna::EuclideanDistance>>(
                     dimensions, repetitions, data_cpp, delta, epsilon );
             break;
         case E2LSH:
             inner
-                .emplace<panna::EMST<panna::NormedPoints, E2LSHHasher, panna::EuclideanDistance>>(
+                .emplace<panna::EMST<panna::EuclideanPoints, E2LSHHasher, panna::EuclideanDistance>>(
                     dimensions, repetitions, data_cpp, delta, epsilon );
             break;
         }
@@ -369,7 +369,7 @@ nb::tuple emst_theory_of_computing( nb::ndarray<float, nb::c_contig>& data_in, n
 
     size_t nrows = data_in.shape( 0 );
     size_t dimensionality = data_in.shape( 1 );
-    panna::NormedPoints dataset( dimensionality );
+    panna::EuclideanPoints dataset( dimensionality );
     float* data = data_in.data();
     for ( size_t row = 0; row < nrows; row++ ) {
         float* begin = data + row * dimensionality;
@@ -380,11 +380,11 @@ nb::tuple emst_theory_of_computing( nb::ndarray<float, nb::c_contig>& data_in, n
     LOG_INFO("nrows", nrows, "dimensionality", dimensionality);
 
     using Distance = panna::EuclideanDistance;
-    using Hasher = panna::LatticeLSH<4, panna::NormedPoints, Distance>;
+    using Hasher = panna::LatticeLSH<4, panna::EuclideanPoints, Distance>;
     Hasher::Builder builder( dimensionality );
 
     auto res =
-        panna::baselines::emst_theory_of_computing<panna::NormedPoints, Hasher::Builder, Distance>(
+        panna::baselines::emst_theory_of_computing<panna::EuclideanPoints, Hasher::Builder, Distance>(
             dataset, gamma, delta, builder );
     auto tree = res.second;
 
@@ -416,7 +416,7 @@ distance_histogram( nb::ndarray<float, nb::c_contig>& data_in,
                     size_t sample_size ) {
     size_t nrows = data_in.shape( 0 );
     size_t dimensionality = data_in.shape( 1 );
-    panna::NormedPoints dataset( dimensionality );
+    panna::EuclideanPoints dataset( dimensionality );
     float* data = data_in.data();
     for ( size_t row = 0; row < nrows; row++ ) {
         float* begin = data + row * dimensionality;
@@ -454,7 +454,7 @@ float
 approximate_diameter( nb::ndarray<float, nb::c_contig>& data_in ) {
     size_t nrows = data_in.shape( 0 );
     size_t dimensionality = data_in.shape( 1 );
-    panna::NormedPoints dataset( dimensionality );
+    panna::EuclideanPoints dataset( dimensionality );
     float* data = data_in.data();
     for ( size_t row = 0; row < nrows; row++ ) {
         float* begin = data + row * dimensionality;

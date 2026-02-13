@@ -18,9 +18,9 @@ namespace panna {
                 UnitNormPointHandle a = dataset[0];
                 UnitNormPointHandle b = dataset[1];
 
-                int16_t simple = dot_product_chunks16_simple( a, b );
+                int32_t simple = dot_product_chunks_simple( a, b );
 #ifdef __AVX2__
-                int16_t avx2 = dot_product_chunks16_avx2( a, b );
+                int32_t avx2 = dot_product_chunks_avx2( a, b );
                 REQUIRE( simple == avx2 );
 #endif
             }

@@ -5,6 +5,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <queue>
 #include <random>
 #include <unistd.h>
 #include <vector>
@@ -94,6 +95,14 @@ namespace panna {
             }
             if ( dist < max_distances[src] ) {
                 size_t offset = src * num_neighbors;
+
+                // Check if dst is already among the neighbors — skip duplicates
+                for ( size_t i = offset; i < offset + num_neighbors; i++ ) {
+                    if ( neighbors[i].second == dst ) {
+                        return;
+                    }
+                }
+
                 // Handle special case of num_neighbors and == 1
                 if ( num_neighbors == 1 ) {
                     if ( dist < neighbors[offset].first ) {
@@ -111,6 +120,8 @@ namespace panna {
                         smax = fmax;
                         fmax = neighbors[i].first;
                         ifmax = i;
+                    } else if ( neighbors[i].first > smax ) {
+                        smax = neighbors[i].first;
                     }
                 }
                 // replace the farthest point
@@ -161,6 +172,107 @@ namespace panna {
                 }
                 self.max_distances[a] = farthest;
             }
+            return self;
+        }
+
+        /// Compute exact k-nearest neighbors via brute force O(n²).
+        /// This gives exact core distances needed for correct mutual reachability MST.
+        template <typename Dataset, typename Distance>
+        static CoreDistances brute_force( const Dataset& data, size_t num_neighbors ) {
+            CoreDistances self( data.size(), num_neighbors );
+            const size_t n = data.size();
+
+            #pragma omp parallel for schedule(dynamic, 64)
+            for ( size_t a = 0; a < n; a++ ) {
+                // Use a max-heap of size num_neighbors to track closest points
+                // heap element: (distance, point_id) — largest distance on top
+                std::priority_queue<std::pair<float, uint32_t>> heap;
+                for ( size_t b = 0; b < n; b++ ) {
+                    if ( a == b ) continue;
+                    float dist = Distance::compute( data[a], data[b] );
+                    if ( heap.size() < num_neighbors ) {
+                        heap.push( { dist, (uint32_t)b } );
+                    } else if ( dist < heap.top().first ) {
+                        heap.pop();
+                        heap.push( { dist, (uint32_t)b } );
+                    }
+                }
+                // Fill neighbors array — order doesn't matter for core distance
+                size_t offset = a * num_neighbors;
+                float farthest = 0.0;
+                size_t idx = 0;
+                while ( !heap.empty() ) {
+                    auto [d, id] = heap.top();
+                    heap.pop();
+                    self.neighbors[offset + idx] = { d, id };
+                    if ( d > farthest ) farthest = d;
+                    idx++;
+                }
+                self.max_distances[a] = farthest;
+            }
+            LOG_INFO( "msg", "Computed exact core distances",
+                      "n", n, "k", num_neighbors );
+            return self;
+        }
+
+        /// Compute approximate k-nearest neighbors by scanning LSH collisions.
+        /// Uses the already-built index: iterates over all repetitions at each
+        /// prefix level and updates core distances from each colliding pair.
+        /// Much faster than brute force — only processes pairs that hash together.
+        template <typename Dataset, typename Hasher, typename Distance>
+        static CoreDistances from_index(
+            const Index<Dataset, Hasher, Distance>& index,
+            size_t num_neighbors ) {
+            const size_t n = index.num_points();
+            const size_t L = index.num_repetitions();
+            const size_t K = index.num_concatenations();
+            const auto& data = index.get_dataset();
+            CoreDistances self( n, num_neighbors );
+
+            // Initialize with random pivots as a starting point
+            std::vector<size_t> pivots = sample_k( n - 1, std::min(n - 1, num_neighbors + 1) );
+            #pragma omp parallel for
+            for ( size_t a = 0; a < n; a++ ) {
+                size_t offset = a * num_neighbors;
+                size_t neighbor_idx = 0;
+                float farthest = 0.0;
+                for ( size_t b : pivots ) {
+                    if ( neighbor_idx >= num_neighbors ) break;
+                    if ( a != b ) {
+                        float dist = Distance::compute( data[a], data[b] );
+                        self.neighbors[offset + neighbor_idx] = { dist, (uint32_t)b };
+                        if ( dist > farthest ) farthest = dist;
+                        neighbor_idx++;
+                    }
+                }
+                self.max_distances[a] = farthest;
+            }
+
+            // Scan LSH buckets from the longest prefix down to shorter ones.
+            // At each prefix level, iterate all repetitions and update core
+            // distances from every pair in each bucket.
+            // Process reps sequentially to avoid concurrent writes to CoreDistances.
+            size_t total_pairs = 0;
+            size_t min_prefix = std::max( (size_t)1, K / 2 );
+            for ( size_t prefix = K; prefix >= min_prefix; prefix-- ) {
+                for ( size_t rep = 0; rep < L; rep++ ) {
+                    index.for_each_bucket( rep, prefix, [&]( const uint32_t* begin, const uint32_t* end ) {
+                        size_t bucket_size = end - begin;
+                        // Cap bucket processing to avoid quadratic blowup on huge buckets
+                        if ( bucket_size > 256 ) return;
+                        for ( const uint32_t* a = begin; a != end; a++ ) {
+                            for ( const uint32_t* b = a + 1; b != end; b++ ) {
+                                float dist = Distance::compute( data[*a], data[*b] );
+                                self.update( *a, *b, dist );
+                                total_pairs++;
+                            }
+                        }
+                    } );
+                }
+            }
+
+            LOG_INFO( "msg", "Computed core distances from index",
+                      "n", n, "k", num_neighbors, "pairs_scanned", total_pairs );
             return self;
         }
 
@@ -760,7 +872,7 @@ namespace panna {
             clear();
 
             CoreDistances cs =
-                CoreDistances::random<Dataset, Distance>( table.get_dataset(), num_neighbors );
+                CoreDistances::from_index<Dataset, Hasher, Distance>( table, num_neighbors );
             Billboard<MRRunningResult> running_result;
             running_result.update(
                 MRRunningResult( std::vector<Edge>(), DSU( num_data ), std::move( cs ) ) );

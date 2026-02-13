@@ -54,67 +54,78 @@ namespace panna {
     }
 
 #ifdef __AVX2__
-    inline static int16_t reduce_sum( __m256i values ) {
-        const static unsigned int VALUES_PER_CHUNK = 16;
-        alignas( 32 ) int16_t stored[VALUES_PER_CHUNK];
-        _mm256_store_si256( (__m256i*)stored, values );
-        int16_t ret = 0;
-        for ( unsigned i = 0; i < VALUES_PER_CHUNK; i++ ) {
-            ret += stored[i];
-        }
-        return ret;
+    // Horizontal sum of 8 x int32 lanes into a single int32.
+    inline static int32_t reduce_sum_i32( __m256i v ) {
+        // v = [a0 a1 a2 a3 | a4 a5 a6 a7]
+        __m128i lo = _mm256_castsi256_si128( v );
+        __m128i hi = _mm256_extracti128_si256( v, 1 );
+        __m128i sum = _mm_add_epi32( lo, hi );       // [a0+a4, a1+a5, a2+a6, a3+a7]
+        sum = _mm_hadd_epi32( sum, sum );             // [s01, s23, s01, s23]
+        sum = _mm_hadd_epi32( sum, sum );             // [s0123, ...]
+        return _mm_cvtsi128_si32( sum );
     }
 
-    inline static int16_t dot_product_chunks16_avx2( UnitNormPointHandle lhs,
-                                                     UnitNormPointHandle rhs ) {
+    // Dot product using _mm256_madd_epi16: multiplies int16 pairs and sums
+    // adjacent products into int32, accumulating in int32 throughout.
+    // This avoids the int16 overflow of the old mulhrs approach and gives
+    // full precision (the only error is the original Q15 quantization).
+    // Result is in Q30 format (two Q15 values multiplied).
+    inline static int32_t dot_product_chunks_avx2( UnitNormPointHandle lhs,
+                                                   UnitNormPointHandle rhs ) {
         assert( lhs.num_chunks == rhs.num_chunks );
-        __m256i res =
-            _mm256_mulhrs_epi16( _mm256_load_si256( (__m256i*)lhs.chunks[0].chunk.data() ),
-                                 _mm256_load_si256( (__m256i*)rhs.chunks[0].chunk.data() ) );
-        for ( size_t i = 1; i < lhs.num_chunks; i += 1 ) {
-            __m256i tmp =
-                _mm256_mulhrs_epi16( _mm256_load_si256( (__m256i*)lhs.chunks[i].chunk.data() ),
-                                     _mm256_load_si256( (__m256i*)rhs.chunks[i].chunk.data() ) );
-            res = _mm256_add_epi16( res, tmp );
+        __m256i acc = _mm256_madd_epi16(
+            _mm256_load_si256( (__m256i*)lhs.chunks[0].chunk.data() ),
+            _mm256_load_si256( (__m256i*)rhs.chunks[0].chunk.data() ) );
+        for ( size_t i = 1; i < lhs.num_chunks; i++ ) {
+            __m256i prod = _mm256_madd_epi16(
+                _mm256_load_si256( (__m256i*)lhs.chunks[i].chunk.data() ),
+                _mm256_load_si256( (__m256i*)rhs.chunks[i].chunk.data() ) );
+            acc = _mm256_add_epi32( acc, prod );
         }
-        return reduce_sum( res );
+        return reduce_sum_i32( acc );
     }
 #endif
 
-    inline static int16_t dot_product_chunks16_simple( UnitNormPointHandle lhs,
-                                                       UnitNormPointHandle rhs ) {
+    // Scalar fallback: accumulate int16*int16 products in int32.
+    // Result is in Q30 format.
+    inline static int32_t dot_product_chunks_simple( UnitNormPointHandle lhs,
+                                                     UnitNormPointHandle rhs ) {
         assert( lhs.num_chunks == rhs.num_chunks );
         const static unsigned int VALUES_PER_CHUNK = 16;
-
-        int16_t res = 0;
+        int32_t acc = 0;
         for ( size_t chunk_idx = 0; chunk_idx < lhs.num_chunks; chunk_idx++ ) {
             for ( size_t i = 0; i < VALUES_PER_CHUNK; i++ ) {
-                int32_t precise = static_cast<int32_t>( lhs.chunks[chunk_idx].chunk[i] ) *
-                                  static_cast<int32_t>( rhs.chunks[chunk_idx].chunk[i] );
-                res += static_cast<int16_t>( ( ( precise >> 14 ) + 1 ) >> 1 );
+                acc += static_cast<int32_t>( lhs.chunks[chunk_idx].chunk[i] ) *
+                       static_cast<int32_t>( rhs.chunks[chunk_idx].chunk[i] );
             }
         }
-        return res;
+        return acc;
     }
 
-    static inline int16_t dot_product_chunks16( UnitNormPointHandle lhs, UnitNormPointHandle rhs ) {
+    // Returns the dot product of the unit-norm vectors in Q30 fixed-point.
+    static inline int32_t dot_product_q30( UnitNormPointHandle lhs, UnitNormPointHandle rhs ) {
 #ifdef __AVX2__
-        return dot_product_chunks16_avx2( lhs, rhs );
+        return dot_product_chunks_avx2( lhs, rhs );
 #else
     #pragma message( \
         "there is no AVX instruction set on this machine, performance is severely limited" )
-        return dot_product_chunks16_simple( lhs, rhs );
+        return dot_product_chunks_simple( lhs, rhs );
 #endif
+    }
+
+    // Convert Q30 fixed-point to float (divide by 2^30).
+    static inline float from_q30( int32_t val ) {
+        return static_cast<float>( val ) / static_cast<float>( 1 << 30 );
     }
 
     template <>
     float dot_product( UnitNormPointHandle a, UnitNormPointHandle b ) {
-        return from_16bit_fixed_point( dot_product_chunks16( a, b ) );
+        return from_q30( dot_product_q30( a, b ) );
     }
 
     template <>
     float dot_product( NormedPointHandle a, NormedPointHandle b ) {
-        float inner_dot = from_16bit_fixed_point( dot_product_chunks16( a.inner, b.inner ) );
+        float inner_dot = from_q30( dot_product_q30( a.inner, b.inner ) );
         return std::sqrt( a.squared_norm() ) * std::sqrt( b.squared_norm() ) * inner_dot;
     }
 
@@ -141,8 +152,18 @@ namespace panna {
 
     template <>
     float euclidean( NormedPointHandle a, NormedPointHandle b ) {
-        float dot = dot_product( a, b );
-        return std::sqrt( a.squared_norm() + b.squared_norm() - 2 * dot );
+        // Use the numerically stable formulation:
+        //   ||a-b||² = (||a|| - ||b||)² + 2·||a||·||b||·(1 - cos(a,b))
+        // This avoids catastrophic cancellation in (||a||² + ||b||² - 2·dot)
+        // when points are close, and is guaranteed non-negative.
+        float cos_ab = from_q30( dot_product_q30( a.inner, b.inner ) );
+        // Clamp cosine to [-1, 1] to account for Q15 quantization rounding
+        cos_ab = std::min( 1.0f, std::max( -1.0f, cos_ab ) );
+        float norm_a = std::sqrt( a.squared_norm() );
+        float norm_b = std::sqrt( b.squared_norm() );
+        float norm_diff = norm_a - norm_b;
+        float angular = 2.0f * norm_a * norm_b * ( 1.0f - cos_ab );
+        return std::sqrt( norm_diff * norm_diff + angular );
     }
 
     template <>

@@ -765,6 +765,25 @@ namespace panna {
             }
         }
 
+        /// Iterate over each bucket at the given prefix level and call `callback`
+        /// with (begin, end) pointers into the indices array for each bucket.
+        /// Buckets with a single element are skipped (no pairs to form).
+        template <typename F>
+        void for_each_bucket( uint8_t prefix, F&& callback ) const {
+            size_t i = 0;
+            while ( i < hashes.size() ) {
+                size_t group_start = i;
+                i++;
+                while ( i < hashes.size() &&
+                        hashes[ group_start ].prefix_eq( hashes[ i ], prefix ) ) {
+                    i++;
+                }
+                if ( i - group_start > 1 ) {
+                    callback( &indices[group_start], &indices[i] );
+                }
+            }
+        }
+
         // Add a hash value, and associated index, to be included next time rebuild is called.
         void insert( int tid, uint32_t idx, THashValue hash_value ) {
             parallel_rebuilding_data[tid].push_back( { idx, hash_value } );
