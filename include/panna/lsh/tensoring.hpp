@@ -56,9 +56,9 @@ namespace panna {
 
             for ( size_t rep = 0; rep < repetitions; rep++ ) {
                 auto index_pair = get_minimal_index_pair( rep );
-                HalfValue h_left = scratch.at(index_pair.first);
-                HalfValue h_right = scratch.at(right_start + index_pair.second);
-                output.at(rep) = Value::interleave( h_left, h_right );
+                HalfValue h_left = scratch[index_pair.first];
+                HalfValue h_right = scratch[right_start + index_pair.second];
+                output[rep] = Value::interleave( h_left, h_right );
             }
             // hide the scratch space
             output.resize( repetitions );

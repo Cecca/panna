@@ -31,7 +31,7 @@ namespace panna {
         size_t offset = 1;
         size_t lower = from;
         size_t upper = from + offset;
-        while ( upper < hashes.size() && !needle.prefix_less( hashes.at(upper), prefix ) ) {
+        while ( upper < hashes.size() && !needle.prefix_less( hashes[upper], prefix ) ) {
             offset *= 2;
             lower = upper;
             upper = std::min( from + offset, hashes.size() );
@@ -44,7 +44,7 @@ namespace panna {
             if ( mid >= hashes.size() ) {
                 return hashes.size();
             }
-            lower = ( !needle.prefix_less( hashes.at(mid), prefix ) ) ? ( mid + 1 ) : lower;
+            lower = ( !needle.prefix_less( hashes[mid], prefix ) ) ? ( mid + 1 ) : lower;
         }
         return lower;
     }
@@ -61,7 +61,7 @@ namespace panna {
         size_t offset = 1;
         size_t upper = to;
         size_t lower = to - offset;
-        while ( lower > 0 && hashes.at(lower).prefix_eq( needle, prefix ) ) {
+        while ( lower > 0 && hashes[lower].prefix_eq( needle, prefix ) ) {
             upper = lower;
             lower = ( to > offset ) ? to - offset : 0;
             offset *= 2;
@@ -78,10 +78,10 @@ namespace panna {
                 return to;
             }
             assert( mid < hashes.size() );
-            lower = ( hashes.at(mid).prefix_less( needle, prefix ) ) ? ( mid + 1 ) : lower;
+            lower = ( hashes[mid].prefix_less( needle, prefix ) ) ? ( mid + 1 ) : lower;
         }
         assert( lower < hashes.size() );
-        if ( !needle.prefix_eq( hashes.at(lower), prefix ) ) {
+        if ( !needle.prefix_eq( hashes[lower], prefix ) ) {
             return to;
         }
         return lower;
@@ -213,7 +213,7 @@ namespace panna {
         //! Builds the cursor, placing it at the smallest hash value in the provided list
         PrefixMapCursor( const std::vector<THashValue>& hashes,
                          const std::vector<uint32_t>& indices ):
-            PrefixMapCursor( hashes.at(0), hashes, indices ) {
+            PrefixMapCursor( hashes[0], hashes, indices ) {
         }
 
         size_t current_prefix() const {
@@ -259,7 +259,7 @@ namespace panna {
             update_range_end();
 
             if ( range_start < range_end && range_start > 0 ) {
-                expect( hashes.at(range_start - 1).prefix_less( hash, prefix_length ) );
+                expect( hashes[range_start - 1].prefix_less( hash, prefix_length ) );
             }
 
             assert( range_start <= range_end );
@@ -298,8 +298,8 @@ namespace panna {
         std::array<std::pair<Iter, Iter>, 2> get_indices() const {
             auto ranges = get_ranges();
             return {
-                std::make_pair( &indices.at(ranges[0].first), &indices.at(ranges[0].second) ),
-                std::make_pair( &indices.at(ranges[1].first), &indices.at(ranges[1].second) ),
+                std::make_pair( &indices[ranges[0].first], &indices[ranges[0].second] ),
+                std::make_pair( &indices[ranges[1].first], &indices[ranges[1].second] ),
             };
         }
 
@@ -348,7 +348,7 @@ namespace panna {
             if ( range_end == hashes.size() ) {
                 return false;
             }
-            hash = hashes.at(range_end);
+            hash = hashes[range_end];
             // We don't need to search for the start
             range_start = range_end;
             // but we do need to search for the end
@@ -376,7 +376,7 @@ namespace panna {
             assert( hashes.size() > 0 );
             assert( std::is_sorted( hashes.begin(), hashes.end() ) );
 
-            hash = hashes.at(0);
+            hash = hashes[0];
             range_start = 0;
             range_end = first_gt_pos( hash, prefix );
             idx = CombinationsIndex( range_start, range_end );
@@ -398,12 +398,12 @@ namespace panna {
                 expect( idx.j < indices.size() );
                 // check if we had a collision at the previous prefix
                 if ( prev_prefix_length &&
-                     hashes.at(idx.i).prefix_eq( hashes.at(idx.j), *prev_prefix_length ) ) {
+                     hashes[idx.i].prefix_eq( hashes[idx.j], *prev_prefix_length ) ) {
                     // skip the pair, in this case
                     continue;
                 }
                 buffer.emplace_back(
-                    indices.at(idx.i), indices.at(idx.j), std::numeric_limits<float>::infinity() );
+                    indices[idx.i], indices[idx.j], std::numeric_limits<float>::infinity() );
             }
         }
 
@@ -466,7 +466,7 @@ namespace panna {
             if ( range_end == hashes.size() ) {
                 return false;
             }
-            hash = hashes.at(range_end);
+            hash = hashes[range_end];
             // We don't need to search for the start
             range_start = range_end;
             // but we do need to search for the end
@@ -474,7 +474,7 @@ namespace panna {
 
             grouped_indices.clear();
             for ( size_t i = range_start; i < range_end; i++ ) {
-                grouped_indices.push_back( std::make_pair( group_fun( indices.at(i) ), std::make_pair(indices.at(i), hashes.at(i)) ) );
+                grouped_indices.push_back( std::make_pair( group_fun( indices[i] ), std::make_pair(indices[i], hashes[i]) ) );
             }
             std::sort(grouped_indices.begin(), grouped_indices.end());
             // populate the chained index
@@ -483,7 +483,7 @@ namespace panna {
             // identify the ranges
             size_t sub_start = 0;
             while ( sub_start < grouped_indices.size() ) {
-                uint32_t needle = grouped_indices.at(sub_start).first;
+                uint32_t needle = grouped_indices[sub_start].first;
                 size_t sub_end = std::distance(
                     grouped_indices.cbegin(),
                     std::partition_point( grouped_indices.cbegin(),
@@ -551,14 +551,14 @@ namespace panna {
                 // check if we had a collision at the previous prefix
                 // TODO: handle this with grouping as well
                 if ( prev_prefix_length &&
-                     grouped_indices.at(i).second.second.prefix_eq( grouped_indices.at(j).second.second,
+                     grouped_indices[i].second.second.prefix_eq( grouped_indices[j].second.second,
                                                                  *prev_prefix_length ) ) {
                     // skip the pair, in this case
                     continue;
                 }
                 buffer.emplace_back( std::numeric_limits<float>::infinity(),
-                                     grouped_indices.at(i).second.first,
-                                     grouped_indices.at(j).second.first );
+                                     grouped_indices[i].second.first,
+                                     grouped_indices[j].second.first );
             }
         }
 
@@ -602,7 +602,7 @@ namespace panna {
 
             range_start = range_end = 0;
             current_index = current_comparison = 0;
-            current_hash = hashes.at(0);
+            current_hash = hashes[0];
         }
 
         // Shortens the prefix by one
@@ -619,7 +619,7 @@ namespace panna {
             }
             prefix_length = new_prefix;
             current_index = current_comparison = 0;
-            current_hash = hashes.at(0);
+            current_hash = hashes[0];
         }
 
         // Find the first index such that the prefix is >= the given hash.
@@ -654,12 +654,12 @@ namespace panna {
                 for ( size_t current = range_start; current < range_end; current++ ) {
                     for ( size_t next = current + 1; next < range_end; next++ ) {
 
-                        scratch_space.emplace_back( &indices.at(current), &indices.at(next) );
+                        scratch_space.emplace_back( &indices[current], &indices[next] );
                         collisions++;
                     }
                 }
                 // Switch to the next hash
-                current_hash = hashes.at(range_end);
+                current_hash = hashes[range_end];
             }
 
             return std::make_pair( collisions, continue_cycle );
@@ -670,31 +670,31 @@ namespace panna {
             update_range_end();
             std::vector<std::pair<Iter, Iter>> split_ranges;
 
-            current_hash = hashes.at(range_end);
+            current_hash = hashes[range_end];
             bool continue_cycle = true;
             if ( range_end >= hashes.size() ) {
                 continue_cycle = false;
             }
             // If we are at the beginning, we have to compare everything in the range
             if ( prefix_length == THashValue::get_concatenations() ) {
-                split_ranges.emplace_back( &indices.at(range_start), &indices.at(range_end) );
-                return std::make_tuple( &indices.at(range_start), &indices.at(range_end), split_ranges, continue_cycle );
+                split_ranges.emplace_back( &indices[range_start], &indices[range_end] );
+                return std::make_tuple( &indices[range_start], &indices[range_end], split_ranges, continue_cycle );
             }
             // Find the portions of the indices that are new
             // since we reduced the prefix, there is a part of comparisons that we already did
-            Iter current_range_start = &indices.at(range_start);
+            Iter current_range_start = &indices[range_start];
             for (size_t i = range_start + 1; i < range_end; ++i) {
                 // A split happens when the prefix of the current hash differs from the previous one
-                if (hashes.at(i - 1).prefix_less(hashes.at(i), prefix_length + 1)) {
-                    split_ranges.emplace_back(current_range_start, &indices.at(i));
-                    current_range_start = &indices.at(i);
+                if (hashes[i - 1].prefix_less(hashes[i], prefix_length + 1)) {
+                    split_ranges.emplace_back(current_range_start, &indices[i]);
+                    current_range_start = &indices[i];
                 }
             }
-            if (current_range_start != &indices.at(range_end)) {
-                split_ranges.emplace_back(current_range_start, &indices.at(range_end));
+            if (current_range_start != &indices[range_end]) {
+                split_ranges.emplace_back(current_range_start, &indices[range_end]);
             }
 
-            return std::make_tuple( &indices.at(range_start), &indices.at(range_end), split_ranges, continue_cycle );
+            return std::make_tuple( &indices[range_start], &indices[range_end], split_ranges, continue_cycle );
         }
     };
 
@@ -758,8 +758,8 @@ namespace panna {
                 size_t group_start = i;
                 i++;
                 while ( i < hashes.size() &&
-                        hashes.at( group_start ).prefix_eq( hashes.at( i ), prefix ) ) {
-                    dsu.union_sets( indices.at( group_start ), indices.at( i ) );
+                        hashes[ group_start ].prefix_eq( hashes[ i ], prefix ) ) {
+                    dsu.union_sets( indices[ group_start ], indices[ i ] );
                     i++;
                 }
             }
@@ -767,7 +767,7 @@ namespace panna {
 
         // Add a hash value, and associated index, to be included next time rebuild is called.
         void insert( int tid, uint32_t idx, THashValue hash_value ) {
-            parallel_rebuilding_data.at(tid).push_back( { idx, hash_value } );
+            parallel_rebuilding_data[tid].push_back( { idx, hash_value } );
         }
 
         template <typename Dataset, typename Hasher>
@@ -782,7 +782,7 @@ namespace panna {
                 auto tid = omp_get_thread_num();
                 hasher.hash( points[i], hashes );
                 for ( size_t rep = 0; rep < prefix_maps.size(); rep++ ) {
-                    prefix_maps[rep].insert( tid, i, hashes.at(rep) );
+                    prefix_maps[rep].insert( tid, i, hashes[rep] );
                 }
             }
 
@@ -810,7 +810,7 @@ namespace panna {
             if ( hashes.size() != 0 ) {
                 // Move data to temporary vector for sorting.
                 for ( size_t i = 0; i < hashes.size(); i++ ) {
-                    tmp.push_back( std::make_pair( hashes.at(i), indices.at(i) ) );
+                    tmp.push_back( std::make_pair( hashes[i], indices[i] ) );
                 }
             }
             for ( auto& rebuilding_data : parallel_rebuilding_data ) {
@@ -828,8 +828,8 @@ namespace panna {
             hashes.reserve( tmp.size() );
 
             for ( size_t i = 0; i < tmp.size(); i++ ) {
-                hashes.push_back( tmp.at(i).first );
-                indices.push_back( tmp.at(i).second );
+                hashes.push_back( tmp[i].first );
+                indices.push_back( tmp[i].second );
             }
             assert( std::is_sorted( hashes.begin(), hashes.end() ) );
 
@@ -868,7 +868,7 @@ namespace panna {
             auto pos =
                 std::distance( indices.begin(), std::find( indices.begin(), indices.end(), idx ) );
             expect( pos < hashes.size() );
-            return hashes.at(pos);
+            return hashes[pos];
         }
     };
 } // namespace panna

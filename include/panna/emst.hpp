@@ -1,6 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <iostream>
 #include <iterator>
 #include <limits>
@@ -91,13 +92,13 @@ namespace panna {
             if ( num_neighbors == 0 ) {
                 return;
             }
-            if ( dist < max_distances.at(src) ) {
+            if ( dist < max_distances[src] ) {
                 size_t offset = src * num_neighbors;
                 // Handle special case of num_neighbors and == 1
                 if ( num_neighbors == 1 ) {
-                    if ( dist < neighbors.at(offset).first ) {
-                        neighbors.at(offset) = { dist, dst };
-                        max_distances.at(src) = dist;
+                    if ( dist < neighbors[offset].first ) {
+                        neighbors[offset] = { dist, dst };
+                        max_distances[src] = dist;
                     }
                     return;
                 }
@@ -106,19 +107,19 @@ namespace panna {
                 float fmax = -std::numeric_limits<float>::infinity();
                 float smax = -std::numeric_limits<float>::infinity();
                 for ( size_t i = offset; i < offset + num_neighbors; i++ ) {
-                    if ( neighbors.at(i).first > fmax ) {
+                    if ( neighbors[i].first > fmax ) {
                         smax = fmax;
-                        fmax = neighbors.at(i).first;
+                        fmax = neighbors[i].first;
                         ifmax = i;
                     }
                 }
                 // replace the farthest point
-                neighbors.at(ifmax) = { dist, dst };
+                neighbors[ifmax] = { dist, dst };
                 // update the maximum distance
                 if ( dist > smax ) {
-                    max_distances.at(src) = dist;
+                    max_distances[src] = dist;
                 } else {
-                    max_distances.at(src) = smax;
+                    max_distances[src] = smax;
                 }
             }
         }
@@ -151,14 +152,14 @@ namespace panna {
                     if ( a != b ) {
                         float dist = Distance::compute( data[a], data[b] );
                         expect(neighbor_idx < num_neighbors);
-                        self.neighbors.at(offset + neighbor_idx) = { dist, b };
+                        self.neighbors[offset + neighbor_idx] = { dist, b };
                         if (dist > farthest) {
                             farthest = dist;
                         }
                         neighbor_idx++;
                     }
                 }
-                self.max_distances.at(a) = farthest;
+                self.max_distances[a] = farthest;
             }
             return self;
         }
@@ -172,7 +173,7 @@ namespace panna {
             nn.reserve(num_neighbors);
                 size_t offset = v* num_neighbors;
             for ( size_t i = offset; i < offset + num_neighbors; i++ ) {
-                nn.push_back(neighbors.at(i).second);
+                nn.push_back(neighbors[i].second);
             }
             return nn;
         }
@@ -191,7 +192,7 @@ namespace panna {
         /// the distance of the farthest among the num_points
         /// neighbors we keep track of
         float core_distance( uint32_t a ) const {
-            return max_distances.at(a);
+            return max_distances[a];
         }
 
         /// The current best guess of the mutual reachability
@@ -332,7 +333,7 @@ namespace panna {
             for ( size_t i = 0; i < num_data; i++ ) {
                 for ( size_t j = i + 1; j < num_data; j++ ) {
                     float dist = table.get_distance( i, j );
-                    all_edges.at(i * ( num_data - 1 ) - ( i * ( i + 1 ) / 2 ) + j - 1) =
+                    all_edges[i * ( num_data - 1 ) - ( i * ( i + 1 ) / 2 ) + j - 1] =
                         Edge{ .weight = dist, .a = (uint32_t)i, .b = (uint32_t)j };
                 }
             }
@@ -363,7 +364,7 @@ namespace panna {
             for ( size_t i = 0; i < num_data; i++ ) {
                 for ( size_t j = i + 1; j < num_data; j++ ) {
                     float dist = table.get_distance( i, j );
-                    all_edges.at(i * ( num_data - 1 ) - ( i * ( i + 1 ) / 2 ) + j - 1) =
+                    all_edges[i * ( num_data - 1 ) - ( i * ( i + 1 ) / 2 ) + j - 1] =
                         Edge{ .weight = dist, .a = (uint32_t)i, .b = (uint32_t)j };
                 }
             }
@@ -390,16 +391,31 @@ namespace panna {
         static void worker_fun( const size_t tid,
                                 const size_t prefix,
                                 const Index<Dataset, Hasher, Distance> &table,
-                                // const std::vector<Edge>& tree,
-                                // const DSU& filter,
                                 Billboard<RunningResult> &running_result,
                                 std::atomic_bool &found,
                                 std::atomic<float> &max_weight,
                                 std::atomic_size_t &count_distances,
                                 std::atomic_size_t &count_collisions,
                                 Channel<size_t> &work,
-                                Channel<std::vector<Edge>> &partials ) {
+                                Channel<std::vector<Edge>> &partials,
+                                std::shared_ptr<const std::vector<std::vector<uint32_t>>> seen_groups ) {
             std::vector<Edge> local_tree(running_result.read()->tree);
+
+            // Build the pair_filter lambda: skip (a,b) if they share
+            // a root in ANY per-repetition parent array from previous rounds.
+            // Use raw pointer access (no bounds checking) for speed.
+            std::function<bool( uint32_t, uint32_t )> pair_filter = nullptr;
+            if ( seen_groups && !seen_groups->empty() ) {
+                pair_filter = [sg = seen_groups.get()]( uint32_t a, uint32_t b ) -> bool {
+                    for ( const auto& parents : *sg ) {
+                        if ( parents[a] == parents[b] ) {
+                            return true; // skip: already enumerated in a previous round
+                        }
+                    }
+                    return false;
+                };
+            }
+
             for ( std::optional<size_t> orepetition = work.receive(); orepetition.has_value();
                   orepetition = work.receive() ) {
                 size_t repetition = *orepetition;
@@ -412,10 +428,17 @@ namespace panna {
                 DSU filter = running_result.read()->filter;
                 DSU dsu( filter );
                 const size_t n = dsu.size();
+                // Cap buffer size: frequent callbacks with small batches
+                // keep filters fresh and avoid huge allocations.
+                const size_t max_buf_size = n < 10000000 ? n : sqrt(n) * 10;
+                const size_t buf_size = max_buf_size; // std::min( (size_t)65536, std::max( (size_t)1024, (size_t)std::sqrt(n) * 10 ) );
+                // Distance budget: scale sub-linearly with n to avoid
+                // spending too much time on a single repetition.
+                const size_t dist_budget = std::max( (size_t)100000, (size_t)std::sqrt((double)n) * 1000 );
                 auto [cnt_dist, cnt_collisions] = table.search_pairs_different_groups(
                     repetition,
                     prefix,
-                    std::max( (size_t)1024, n ), // smaller buffer for more frequent callbacks
+                    buf_size,
                     max_weight,
                     [&]( uint32_t x ) { return filter.cfind( x ); },
                     [&]( std::vector<Edge>& scratch ) {
@@ -436,11 +459,10 @@ namespace panna {
                         filter.compress_all();
                         return found.load(); // early stop if the solution has been found in the meantime
                     },
-                    10 * n ); // distance budget per repetition
+                    dist_budget,
+                    pair_filter );
                 count_distances += cnt_dist;
                 count_collisions += cnt_collisions;
-                // OPTIMIZE: do not send the edges that
-                // we know are already in the best tree found so far
                 partials.send( std::move( local_tree ) );
             }
         }
@@ -475,10 +497,12 @@ namespace panna {
                 }
                 DSU filter = rr->filter;
                 const size_t n = filter.size();
+                const size_t buf_size = std::min( (size_t)65536, std::max( (size_t)1024, (size_t)std::sqrt(n) * 10 ) );
+                const size_t dist_budget = std::max( (size_t)100000, (size_t)std::sqrt((double)n) * 1000 );
                 auto [cnt_dist, cnt_collisions] = table.search_pairs_different_groups(
                     repetition,
                     prefix,
-                    std::max( (size_t)1024, n ), // smaller buffer for more frequent callbacks
+                    buf_size,
                     max_weight,
                     [&]( uint32_t x ) { return filter.cfind( x ); },
                     [&]( std::vector<Edge>& updates ) {
@@ -499,7 +523,7 @@ namespace panna {
                         // early stop if the solution has been found in the meantime
                         return found.load();
                     },
-                    10 * n ); // distance budget per repetition
+                    dist_budget );
                 count_distances += cnt_dist;
                 count_collisions += cnt_collisions;
                 possibly_useful_edges.insert( possibly_useful_edges.end(),
@@ -512,8 +536,7 @@ namespace panna {
         /// find the minimum spanning tree, using channels to handle parallelism.
         /// If all hash prefixes are exhausted without finding a valid tree,
         /// rehashes with a 2x wider scaling factor and continues.
-        /// Pairs that collided at the shortest prefix in previous rounds
-        /// are tracked in a DSU and skipped in subsequent rounds.
+        /// The cumulative failure probability accounts for all previous rounds.
         std::pair<float, std::vector<Edge>> find_tree() {
             clear();
 
@@ -530,8 +553,11 @@ namespace panna {
 
             // Track previous hashers for cumulative failure probability
             std::vector<Hasher> previous_hashers;
-            // Track pairs seen at the shortest prefix across rehash rounds
-            DSU seen_pairs( num_data );
+            // Per-repetition compressed parent arrays from previous rounds.
+            // Each entry is one rep's parent vector: parent[i] = root of i's bucket.
+            // Within one rep, transitivity is correct (same bucket = all pairs enumerated).
+            // Across reps, we check independently to avoid false groupings.
+            auto seen_groups = std::make_shared<std::vector<std::vector<uint32_t>>>();
 
             const size_t MAX_REHASH_ROUNDS = 10;
             for ( size_t rehash_round = 0;
@@ -540,14 +566,21 @@ namespace panna {
 
                 if ( rehash_round > 0 ) {
                     LOG_INFO( "msg", "Rehashing with wider scaling factor",
-                              "round", rehash_round );
+                              "round", rehash_round,
+                              "family", table.describe_family() );
 
-                    // Record pairs sharing the shortest prefix (prefix 1)
-                    // in the current hash tables before they are destroyed.
-                    for ( size_t rep = 0; rep < max_repetitions; rep++ ) {
-                        table.union_at_prefix( seen_pairs, rep, 1 );
-                    }
-                    seen_pairs.compress_all();
+                    // Extract per-rep parent arrays at prefix 1 BEFORE rebuilding.
+                    // This captures which pairs shared the shortest prefix bucket
+                    // in each repetition of the current (old) hash tables.
+                    auto new_groups = table.extract_prefix_groups( 1 );
+                    auto updated = std::make_shared<std::vector<std::vector<uint32_t>>>(*seen_groups);
+                    updated->insert( updated->end(),
+                        std::make_move_iterator( new_groups.begin() ),
+                        std::make_move_iterator( new_groups.end() ) );
+                    seen_groups = updated;
+                    LOG_INFO( "msg", "Extracted prefix groups",
+                              "total_stored_reps", seen_groups->size(),
+                              "memory_MB", (seen_groups->size() * num_data * 4) / (1024.0 * 1024.0) );
 
                     // Save current hasher for failure probability computation
                     previous_hashers.push_back( table.get_hasher() );
@@ -555,21 +588,8 @@ namespace panna {
                     // Rebuild with 2x wider scaling/quantization
                     table.rebuild_wider( 2.0 );
 
-                    // Merge seen_pairs into the filter of the running result
-                    auto rr = running_result.read();
-                    DSU combined_filter( num_data );
-                    for ( auto& edge : rr->tree ) {
-                        combined_filter.union_sets( edge.a, edge.b );
-                    }
-                    for ( size_t i = 0; i < num_data; i++ ) {
-                        uint32_t sp_root = seen_pairs.cfind( i );
-                        if ( sp_root != i ) {
-                            combined_filter.union_sets( i, sp_root );
-                        }
-                    }
-                    combined_filter.compress_all();
-                    running_result.update( RunningResult(
-                        std::vector<Edge>( rr->tree ), std::move( combined_filter ) ) );
+                    LOG_INFO( "msg", "Rehashed",
+                              "family", table.describe_family() );
                 }
 
                 for ( size_t prefix = max_hashbits; prefix > 0 && !found; prefix-- ) {
@@ -596,14 +616,18 @@ namespace panna {
                                             std::ref(count_distances),
                                             std::ref(count_collisions),
                                             std::ref(work),
-                                            std::ref(partials) );
+                                            std::ref(partials),
+                                            seen_groups );
                         workers.push_back( std::move( worker ) );
                     }
 
                     // Collect results from workers, batching for efficiency
                     size_t completed_repetitions = 0;
                     std::vector<Edge> batch_updates;
-                    const size_t BATCH_SIZE = std::max( (size_t)1, max_threads / 2 );
+                    // Batch size: process every result immediately for small L,
+                    // but batch up for large L to amortize collector overhead.
+                    const size_t BATCH_SIZE = std::min( max_repetitions,
+                        std::max( (size_t)1, max_threads / 2 ) );
                     size_t batch_count = 0;
 
                     for ( std::optional<std::vector<Edge>> local_tree = partials.receive();
@@ -627,6 +651,16 @@ namespace panna {
                             ( completed_repetitions >= max_repetitions );
                         if ( !should_process_batch ) continue;
                         batch_count = 0;
+
+                        // Pre-filter: discard edges heavier than the current
+                        // max_weight to reduce sort and Kruskal cost.
+                        {
+                            float wf = max_weight.load( std::memory_order_relaxed );
+                            auto new_end = std::remove_if(
+                                batch_updates.begin(), batch_updates.end(),
+                                [wf]( const Edge& e ) { return e.weight > wf; } );
+                            batch_updates.erase( new_end, batch_updates.end() );
+                        }
 
                         // Merge: the running result tree is sorted, so we can use merge
                         std::vector<Edge> tree( running_result.read()->tree );
@@ -662,7 +696,7 @@ namespace panna {
                                       "stop.confirmed_weight", stop.confirmed_weight,
                                       "stop.heaviest_confirmed_edge", stop.heaviest_confirmed_edge,
                                       "stop.edges_to_confirm", stop.edges_to_confirm,
-                                      "heaviest_edge", tree.at(num_data-2).weight,
+                                      "heaviest_edge", tree[num_data-2].weight,
                                       "weight_lower_bound", weight_lower_bound,
                                       "should_stop", should_stop,
                                       "rehash_round", rehash_round );
@@ -675,28 +709,14 @@ namespace panna {
                                 found = true;
                                 tree_weight = stop.total_weight;
                             }
-                            // Fill the DSU filter with confirmed edges + seen pairs
+                            // Fill the DSU filter with just the confirmed edges
                             filter.reset();
                             for ( size_t idx = 0; idx < stop.confirmed_edges; idx++ ) {
-                                auto edge = tree.at(idx);
+                                auto edge = tree[idx];
                                 filter.union_sets( edge.a, edge.b );
-                            }
-                            // Merge seen_pairs into filter so workers skip them
-                            for ( size_t i = 0; i < num_data; i++ ) {
-                                uint32_t sp_root = seen_pairs.cfind( i );
-                                if ( sp_root != i ) {
-                                    filter.union_sets( i, sp_root );
-                                }
                             }
                         } else {
                             filter.reset();
-                            // Still merge seen_pairs when tree is incomplete
-                            for ( size_t i = 0; i < num_data; i++ ) {
-                                uint32_t sp_root = seen_pairs.cfind( i );
-                                if ( sp_root != i ) {
-                                    filter.union_sets( i, sp_root );
-                                }
-                            }
                         }
                         // Publish the new running result
                         filter.compress_all();
@@ -823,7 +843,7 @@ namespace panna {
                                   "stop.confirmed_weight", stop.confirmed_weight,
                                   "stop.heaviest_confirmed_edge", stop.heaviest_confirmed_edge,
                                   "stop.edges_to_confirm", stop.edges_to_confirm,
-                                  "heaviest_edge", tree.at(num_data-2).weight,
+                                  "heaviest_edge", tree[num_data-2].weight,
                                   "weight_lower_bound", weight_lower_bound,
                                   "should_stop", should_stop );
                         // clang-format on
@@ -838,7 +858,7 @@ namespace panna {
                         // Fill the DSU filter with just the confirmed edges
                         filter.reset();
                         for ( size_t idx = 0; idx < stop.confirmed_edges; idx++ ) {
-                            auto edge = tree.at(idx);
+                            auto edge = tree[idx];
                             filter.union_sets( edge.a, edge.b );
                         }
                     } else {
@@ -898,13 +918,13 @@ namespace panna {
             }
             std::vector<unsigned int> stack;
             stack.push_back( 0 );
-            visited.at(0) = true;
+            visited[0] = true;
             while ( !stack.empty() ) {
                 unsigned int node = stack.back();
                 stack.pop_back();
                 for ( const auto& neighbor : adj_list[node] ) {
-                    if ( !visited.at(neighbor) ) {
-                        visited.at(neighbor) = true;
+                    if ( !visited[neighbor] ) {
+                        visited[neighbor] = true;
                         stack.push_back( neighbor );
                     }
                 }
@@ -1009,8 +1029,8 @@ namespace panna {
             std::shuffle(
                 vertices.begin(), vertices.end(), std::mt19937{ std::random_device{}() } );
             for ( size_t i = 1; i < vertices.size(); i++ ) {
-                clean.emplace_back( table.get_distance( vertices.at(i - 1), vertices.at(i) ),
-                                    std::make_pair( vertices.at(i - 1), vertices.at(i) ) );
+                clean.emplace_back( table.get_distance( vertices[i - 1], vertices[i] ),
+                                    std::make_pair( vertices[i - 1], vertices[i] ) );
             }
         }
 
@@ -1032,7 +1052,7 @@ namespace panna {
             float weight = 0.0f;
             size_t idx = 0;
             while ( idx < tree.size() ) {
-                const float w = tree.at(idx).weight;
+                const float w = tree[idx].weight;
 
                 // Current round failure probability
                 float fp = table.fail_probability( w, i, j );
@@ -1058,14 +1078,14 @@ namespace panna {
 
             float total_weight = weight;
             for (size_t jj=idx; jj<tree.size(); jj++) {
-                float w =  tree.at(jj).weight ;
+                float w =  tree[jj].weight ;
                 total_weight += w;
             }
 
             return StoppingConditionInfo{ .total_weight = total_weight,
                                           .confirmed_weight = weight,
                                           .heaviest_confirmed_edge =
-                                              ( idx > 0 ) ?  tree.at(idx - 1).weight  : 0.0f,
+                                              ( idx > 0 ) ?  tree[idx - 1].weight  : 0.0f,
                                           .edges_to_confirm = edges_to_confirm,
                                           .confirmed_edges = idx };
         }

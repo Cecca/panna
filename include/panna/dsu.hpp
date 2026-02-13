@@ -30,17 +30,17 @@ namespace panna {
         /// @param x, the element to find
         /// @return the parent of the set containing x
         uint32_t find( uint32_t x ) {
-            if ( parent.at(x) != x )
-                parent.at(x) = find( parent.at(x) ); // Path compression
-            return parent.at(x);
+            if ( parent[x] != x )
+                parent[x] = find( parent[x] ); // Path compression
+            return parent[x];
         }
 
         /// Find without path compression, so the operation can be const.
         /// For this to be efficient, paths need to have been compressed
         /// previously by other calls to `find`
         uint32_t cfind( uint32_t x ) const {
-            if ( parent.at(x) != x )
-                x = cfind( parent.at(x) );
+            while ( parent[x] != x )
+                x = parent[x];
             return x;
         }
 
@@ -72,13 +72,13 @@ namespace panna {
                 return false; // Cycle detected
 
             // Union by rank
-            if ( rank.at(rootX) > rank.at(rootY) ) {
-                parent.at(rootY) = rootX;
-            } else if ( rank.at(rootX) < rank.at(rootY) ) {
-                parent.at(rootX) = rootY;
+            if ( rank[rootX] > rank[rootY] ) {
+                parent[rootY] = rootX;
+            } else if ( rank[rootX] < rank[rootY] ) {
+                parent[rootX] = rootY;
             } else {
-                parent.at(rootY) = rootX;
-                rank.at(rootX)++;
+                parent[rootY] = rootX;
+                rank[rootX]++;
             }
             // Union by size
             // if (rank.at(rootX) < rank.at(rootY)) {

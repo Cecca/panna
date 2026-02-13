@@ -72,7 +72,7 @@ namespace panna {
                     typename Dataset::PointHandle rand_vec = random_vectors[K * rep + concat];
                     float dotp = dot_product( point, rand_vec );
                     float quantized =
-                        std::floor( ( dotp + offsets.at(K * rep + concat) ) / quantization_width );
+                        std::floor( ( dotp + offsets[K * rep + concat] ) / quantization_width );
                     int8_t code = static_cast<int8_t>( quantized );
                     cur.set( concat, code );
                 }
@@ -180,7 +180,7 @@ namespace panna {
 
             // Step 2: binary search between bounds
             if (qw_lower && qw_upper) {
-                for (int iter = 0; iter < 5; ++iter) {
+                for (int iter = 0; iter < 15; ++iter) {
                     quantization_width = (*qw_lower + *qw_upper) / 2.0f;
                     float avg_collisions = compute_avg_collisions(quantization_width);
                     LOG_INFO("msg", "Binary search quantization width",

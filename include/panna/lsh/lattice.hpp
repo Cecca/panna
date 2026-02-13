@@ -129,7 +129,7 @@ namespace panna {
             const size_t end = start + LATTICE_DIMENSIONS;
             expect(end <= random_vectors.size());
             for (size_t i=0; i<LATTICE_DIMENSIONS; i++) {
-                out[i] = dot_product(point, random_vectors[start+i]) / scaling_factor - corrections.at(start+i) + offsets.at(start+i);
+                out[i] = dot_product(point, random_vectors[start+i]) / scaling_factor - corrections[start+i] + offsets[start+i];
             }
             return out;
         }

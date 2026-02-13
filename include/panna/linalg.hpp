@@ -23,7 +23,7 @@ namespace panna {
         expect(a.size() == b.size());
         std::vector<float> out(a.size());
         for (size_t i=0; i<a.size(); i++) {
-            out.at(i) = a.at(i) + b.at(i);
+            out[i] = a[i] + b[i];
         }
         return out;
     }
@@ -38,7 +38,7 @@ namespace panna {
         assert( a.size() == b.size() );
         float sum = 0.0;
         for ( size_t i = 0; i < a.size(); i++ ) {
-            sum += a.at(i) * b.at(i);
+            sum += a[i] * b[i];
         }
         return sum;
     }
@@ -125,13 +125,13 @@ namespace panna {
             return;
         }
         for (size_t i=0; i<point.size(); i++) {
-            point.at(i) /= norm;
+            point[i] /= norm;
         }
     }
 
     static void rescale(std::vector<float> & point, float factor) {
         for (size_t i=0; i<point.size(); i++) {
-            point.at(i) *= factor;
+            point[i] *= factor;
         }
     }
 
@@ -159,7 +159,7 @@ namespace panna {
     float euclidean(std::vector<float> a, std::vector<float> b) {
         float d = 0;
         for (size_t i=0; i<a.size(); i++) {
-            float diff = a.at(i) - b.at(i);
+            float diff = a[i] - b[i];
             d += diff*diff;
         }
         return std::sqrt(d);
@@ -169,7 +169,7 @@ namespace panna {
     float euclidean(std::array<float, D> a, std::array<float, D> b) {
         float d = 0;
         for (size_t i=0; i<a.size(); i++) {
-            float diff = a.at(i) - b.at(i);
+            float diff = a[i] - b[i];
             d += diff*diff;
         }
         return std::sqrt(d);
@@ -179,7 +179,7 @@ namespace panna {
     float euclidean(std::array<float, D> a, std::array<long, D> b) {
         float d = 0;
         for (size_t i=0; i<a.size(); i++) {
-            float diff = a.at(i) - ((float) b.at(i));
+            float diff = a[i] - ((float) b[i]);
             d += diff*diff;
         }
         return std::sqrt(d);
@@ -241,7 +241,7 @@ namespace panna {
                 size_t base_idx = rotation * ( 1 << log_num_products );
                 for ( size_t i = 0; i < ( 1 << log_num_products ); i++ ) {
                     // OPTIMIZE use simd, this takes half as much time as the fht transform below
-                    in_out.at(i) *= random_signs.at(base_idx + i);
+                    in_out[i] *= random_signs[base_idx + i];
                 }
                 // Apply the fast hadamard transform
                 fht( in_out.data(), log_num_products );

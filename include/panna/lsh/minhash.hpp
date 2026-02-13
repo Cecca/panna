@@ -54,7 +54,7 @@ namespace panna {
         uint32_t hash_single( typename Dataset::PointHandle set,
                               size_t concatenation,
                               size_t repetition ) const {
-            TabulationHash hash = hashes.at(repetition * K + concatenation);
+            TabulationHash hash = hashes[repetition * K + concatenation];
             uint64_t min_hash = std::numeric_limits<uint64_t>::max();
             uint32_t min_token = 0;
             for ( const uint32_t* it = set.begin(); it != set.end(); it++ ) {

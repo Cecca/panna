@@ -121,7 +121,24 @@ namespace panna {
         /// Union into the given DSU all points that share the same bucket
         /// at the given prefix level in the specified repetition's prefix map.
         void union_at_prefix( DSU& dsu, size_t repetition, uint8_t prefix ) const {
-            lsh_maps.at( repetition ).union_at_prefix( dsu, prefix );
+            lsh_maps[ repetition ].union_at_prefix( dsu, prefix );
+        }
+
+        /// Extract compressed parent arrays for all repetitions at the given prefix.
+        /// Each entry is a compressed DSU parent vector: parent[i] gives the root
+        /// of point i's bucket in that repetition. Within one repetition, points
+        /// with the same root were all in the same hash bucket (and thus all pairs
+        /// were enumerated). This avoids the transitivity bug of merging across reps.
+        std::vector<std::vector<uint32_t>> extract_prefix_groups( uint8_t prefix ) const {
+            std::vector<std::vector<uint32_t>> result;
+            result.reserve( lsh_maps.size() );
+            for ( size_t rep = 0; rep < lsh_maps.size(); rep++ ) {
+                DSU dsu( dataset.size() );
+                lsh_maps[ rep ].union_at_prefix( dsu, prefix );
+                dsu.compress_all();
+                result.push_back( std::move( dsu.parent ) );
+            }
+            return result;
         }
 
         friend bool operator==( const Index<Dataset, Hasher, Distance>& a,
@@ -188,13 +205,13 @@ namespace panna {
                 // auto & hashes = tl_hash_values[tid];
                 hasher->hash( dataset[i], hashes );
                 for ( size_t rep = 0; rep < lsh_maps.size(); rep++ ) {
-                    lsh_maps.at(rep).insert( tid, i, hashes.at(rep) );
+                    lsh_maps[rep].insert( tid, i, hashes[rep] );
                 }
             }
 
 #pragma omp parallel for
             for ( size_t rep = 0; rep < lsh_maps.size(); rep++ ) {
-                lsh_maps.at(rep).rebuild();
+                lsh_maps[rep].rebuild();
             }
 
             hashed_points = dataset.size();
@@ -252,7 +269,7 @@ namespace panna {
             // FIXME: remove this allocation
             std::vector<PrefixMapCursor<typename Hasher::Value>> cursors;
             for ( size_t rep = 0; rep < lsh_maps.size(); rep++ ) {
-                cursors.push_back( lsh_maps.at(rep).create_cursor( q_hashes.at(rep) ) );
+                cursors.push_back( lsh_maps[rep].create_cursor( q_hashes[rep] ) );
             }
 
             // Search
@@ -263,8 +280,8 @@ namespace panna {
                     break;
                 }
                 for ( size_t rep = 0; rep < lsh_maps.size(); rep++ ) {
-                    cursors.at(rep).shorten_prefix( concat );
-                    for ( auto range : cursors.at(rep).get_indices() ) {
+                    cursors[rep].shorten_prefix( concat );
+                    for ( auto range : cursors[rep].get_indices() ) {
                         for ( const uint32_t* it = range.first; it != range.second; it++ ) {
                             PointHandle x = dataset[*it];
                             float dist = Distance::compute( q, x );
@@ -309,7 +326,8 @@ namespace panna {
             const std::atomic<float>& weight_filter,
             std::function<uint32_t( uint32_t )> group_fun,
             std::function<bool( std::vector<Edge>& )> batch_output,
-            size_t max_distances = 0 ) const {
+            size_t max_distances = 0,
+            std::function<bool( uint32_t, uint32_t )> pair_filter = nullptr ) const {
             expect( hasher );
             size_t distance_cnt = 0;
             size_t collision_cnt = 0;
@@ -317,7 +335,7 @@ namespace panna {
             scratch.reserve(buffer_size);
 
             PairPrefixMapCursorGrouped<typename Hasher::Value> cursor =
-                lsh_maps.at(repetition).create_pair_cursor_grouped(
+                lsh_maps[repetition].create_pair_cursor_grouped(
                     concatenations,
                     ( concatenations < hasher->get_concatenations() )
                         ? std::optional( concatenations + 1 )
@@ -346,8 +364,8 @@ namespace panna {
                            "num_new_pairs",
                            scratch.size() );
                 for ( size_t i = 0; i < scratch.size(); i++ ) {
-                    uint32_t a_idx = scratch.at(i).a;
-                    uint32_t b_idx = scratch.at(i).b;
+                    uint32_t a_idx = scratch[i].a;
+                    uint32_t b_idx = scratch[i].b;
                     if (b_idx < a_idx) {
                         // ensure that a_idx is always smaller
                         uint32_t tmp = b_idx;
@@ -355,11 +373,16 @@ namespace panna {
                         a_idx = tmp;
                     }
 
+                    // Skip pairs already seen in previous rehash rounds
+                    if ( pair_filter && pair_filter( a_idx, b_idx ) ) {
+                        continue;
+                    }
+
                     PointHandle a = dataset[a_idx];
                     PointHandle b = dataset[b_idx];
                     collision_cnt++;
                     float distance = Distance::compute( a, b );
-                    scratch.at(i).weight = distance;
+                    scratch[i].weight = distance;
                     distance_cnt++;
                     if ( distance > wf ) {
                         continue;
@@ -388,7 +411,7 @@ namespace panna {
             scratch.reserve( 1 << 16 );
 
             PairPrefixMapCursorNew<typename Hasher::Value> cursor =
-                lsh_maps.at(repetition).create_pair_cursor_new(
+                lsh_maps[repetition].create_pair_cursor_new(
                     concatenations,
                     ( concatenations < hasher->get_concatenations() )
                         ? std::optional( concatenations + 1 )
@@ -407,8 +430,8 @@ namespace panna {
                            "num_new_pairs",
                            scratch.size() );
                 for ( size_t i = 0; i < scratch.size(); i++ ) {
-                    uint32_t a_idx = std::get<0>( scratch.at(i) );
-                    uint32_t b_idx = std::get<1>( scratch.at(i) );
+                    uint32_t a_idx = std::get<0>( scratch[i] );
+                    uint32_t b_idx = std::get<1>( scratch[i] );
                     if (b_idx < a_idx) {
                         // ensure that a_idx is always smaller
                         uint32_t tmp = b_idx;
@@ -416,8 +439,8 @@ namespace panna {
                         a_idx = tmp;
                     }
 
-                    PointHandle a = dataset[std::get<0>( scratch.at(i) )];
-                    PointHandle b = dataset[std::get<1>( scratch.at(i) )];
+                    PointHandle a = dataset[std::get<0>( scratch[i] )];
+                    PointHandle b = dataset[std::get<1>( scratch[i] )];
                     collision_cnt++;
                     if ( dsu_true.is_connected( a_idx, b_idx ) ) {
                         continue;
@@ -443,7 +466,7 @@ namespace panna {
             // TO DO: Find a way to create the cursors once and for all, maybe you also have to
             // store them
             PairPrefixMapCursor<typename Hasher::Value> cursor =
-                lsh_maps.at(repetition).create_pair_cursor();
+                lsh_maps[repetition].create_pair_cursor();
             bool keep_going = true;
             if ( concatenations != hasher->get_concatenations() ) {
                 cursor.shorten_prefix( concatenations );
@@ -457,20 +480,20 @@ namespace panna {
                 for ( size_t num = 0; num < cursor_collisions; num++ ) {
                     output.emplace_back(
                         std::numeric_limits<float>::infinity(),
-                        std::make_pair( *scratch.at(num).first,
-                                        *scratch.at(num).second ) ); // We put a mock value?
+                        std::make_pair( *scratch[num].first,
+                                        *scratch[num].second ) ); // We put a mock value?
                 }
 
 #pragma omp parallel for
                 for ( size_t num = 0; num < cursor_collisions; num++ ) {
                     uint32_t x_p, y_p;
-                    std::tie( x_p, y_p ) = std::get<1>( output.at(current_size + num) );
+                    std::tie( x_p, y_p ) = std::get<1>( output[current_size + num] );
                     PointHandle x = dataset[x_p];
                     PointHandle y = dataset[y_p];
                     float dist = Distance::compute( y, x );
                     // If the pairs are already in the list we just have to access them so no race
                     // conditions
-                    std::get<float>( output.at(current_size + num) ) = dist;
+                    std::get<float>( output[current_size + num] ) = dist;
                 }
             }
 

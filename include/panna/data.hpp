@@ -63,7 +63,7 @@ namespace panna {
                     if ( i >= dimensions ) {
                         break;
                     }
-                    vec.at(i) = from_16bit_fixed_point( chunk.chunk[j] );
+                    vec[i] = from_16bit_fixed_point( chunk.chunk[j] );
                     i++;
                 }
             }
@@ -129,7 +129,7 @@ namespace panna {
         PointHandle operator[]( size_t i ) const {
             assert( i * chunks_per_point < chunks.size() );
             UnitNormPointHandle handle;
-            handle.chunks = &chunks.at(i * chunks_per_point);
+            handle.chunks = &chunks[i * chunks_per_point];
             handle.num_chunks = chunks_per_point;
             handle.dimensions = dimensions;
             return handle;
@@ -153,12 +153,12 @@ namespace panna {
             size_t i = 0;
             for ( FloatIter it = begin; it != end; it++ ) {
                 float normalized = ( norm == 0.0 ) ? *it : *it / norm;
-                chunks.at(base_chunk_idx + i / Int16Chunk::CHUNK_SIZE)
+                chunks[base_chunk_idx + i / Int16Chunk::CHUNK_SIZE]
                     .chunk[i % Int16Chunk::CHUNK_SIZE] = to_16bit_fixed_point( normalized );
                 i++;
             }
             for ( size_t i = dimensions; i < dimensions + padding; i++ ) {
-                chunks.at(base_chunk_idx + i / Int16Chunk::CHUNK_SIZE)
+                chunks[base_chunk_idx + i / Int16Chunk::CHUNK_SIZE]
                     .chunk[i % Int16Chunk::CHUNK_SIZE] = to_16bit_fixed_point( 0.0 );
             }
         }
@@ -236,7 +236,7 @@ namespace panna {
         PointHandle operator[]( size_t i ) const {
             PointHandle handle;
             handle.inner = normalized_points[i];
-            handle.sq_norm = squared_norms.at(i);
+            handle.sq_norm = squared_norms[i];
             return handle;
         }
 
@@ -318,7 +318,7 @@ namespace panna {
             expect(dimensions*i + dimensions <= data.size());
             PointHandle handle {
                 .dimensions = dimensions,
-                .vector = &data.at(dimensions*i)
+                .vector = &data[dimensions*i]
             };
             return handle;
         }
@@ -428,8 +428,8 @@ namespace panna {
 
         PointHandle operator[]( size_t i ) const {
             PointHandle handle;
-            handle.tokens = &set_data.at(starts.at(i));
-            handle.set_size = starts.at(i + 1) - starts.at(i);
+            handle.tokens = &set_data[starts[i]];
+            handle.set_size = starts[i + 1] - starts[i];
             return handle;
         }
 
@@ -472,7 +472,7 @@ namespace panna {
     void add_to( std::vector<float>& accumulator, const EuclideanPointHandle& point ) {
         expect( accumulator.size() == point.dimensions );
         for ( size_t i = 0; i < point.dimensions; i++ ) {
-            accumulator.at(i) += point.vector[i];
+            accumulator[i] += point.vector[i];
         }
     }
 
@@ -482,7 +482,7 @@ namespace panna {
         std::vector<float> v(point.inner.dimensions);
         point.inner.into_vec(v);
         for ( size_t i = 0; i < point.inner.dimensions; i++ ) {
-            accumulator.at(i) += v.at(i) * std::sqrt(point.sq_norm);
+            accumulator[i] += v[i] * std::sqrt(point.sq_norm);
         }
     }
 
@@ -494,7 +494,7 @@ namespace panna {
             add_to( mean, dataset[i] );
         }
         for ( size_t i = 0; i < dataset.get_dimensions(); i++ ) {
-            mean.at(i) /= (float)n;
+            mean[i] /= (float)n;
         }
         return mean;
     }
@@ -570,9 +570,9 @@ namespace panna {
 
         const double width = ( max_distance - min_distance ) / static_cast<double>( n_bins );
         std::vector<float> bounds( n_bins + 1 );
-        bounds.at(0) = 0.0;
+        bounds[0] = 0.0;
         for ( std::size_t i = 1; i < bounds.size(); ++i ) {
-            bounds.at(i) = min_distance + i * width;
+            bounds[i] = min_distance + i * width;
         }
         size_t oob = 0;
         float max_dist_found = 0.0;
@@ -602,13 +602,13 @@ namespace panna {
                     LOG_INFO( "i", i, "dist", dist, "mindistance", min_distance, "width", width );
                 }
                 expect(i < counts_private.size());
-                counts_private.at(i) += sampling_factor;
+                counts_private[i] += sampling_factor;
             }
 
 #pragma omp critical
             {
                 for ( size_t i = 0; i < counts_private.size(); i++ ) {
-                    counts.at(i) += counts_private.at(i);
+                    counts[i] += counts_private[i];
                 }
                 oob += private_oob;
                 if (private_max_dist_found> max_dist_found) {

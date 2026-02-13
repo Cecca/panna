@@ -87,11 +87,16 @@ def _load_ht(path: Path):
 
 def _load_chem(path: Path):
     # Unzip
-    with zipfile.ZipFile(path, 'r') as zip_ref:
-        zip_ref.extractall(path.parent)
-    # Load data
-    data_path = path.parent / "gas+sensor+array+under+dynamic+gas+mixtures/ethylene_CO.txt"
-    data = pd.read_csv(data_path, sep=r'\s+').to_numpy().astype(np.float32)
+    # Catch and handle not finding the file, try with the explicit file name
+    try:
+        with zipfile.ZipFile(path, 'r') as zip_ref:
+            zip_ref.extractall(path.parent)
+        # Load data
+        data_path = path.parent / "gas+sensor+array+under+dynamic+gas+mixtures/ethylene_CO.txt"
+        data = pd.read_csv(data_path, sep=r'\s+').to_numpy().astype(np.float32)
+    except Exception as e:
+        data_path = path.parent / "ethylene_CO.txt"
+        data = pd.read_csv(data_path, sep=r'\s+').to_numpy().astype(np.float32)
     data = np.nan_to_num(data)
     # Remove duplicate rows
     data = np.unique(data, axis=0)
