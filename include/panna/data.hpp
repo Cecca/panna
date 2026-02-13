@@ -5,7 +5,9 @@
 #include <cassert>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
+#include <new>
 #include <omp.h>
 #include <random>
 #include <stdexcept>
@@ -272,10 +274,11 @@ namespace panna {
 
     struct EuclideanPointHandle {
         const size_t dimensions;
+        /// Stride between rows (dimensions rounded up to multiple of 8 for AVX2).
+        const size_t stride;
         const float * vector;
 
         friend std::ostream& operator<<( std::ostream& os, const EuclideanPointHandle& handle ) {
-            std::vector<float> vec( handle.dimensions );
             os << "[";
             for (size_t i=0; i<handle.dimensions; i++) {
                 os << handle.vector[i] << ", ";
@@ -287,50 +290,143 @@ namespace panna {
 
     class EuclideanPoints {
         size_t dimensions = 0;
-        // OPTIMIZE: use a better layout, with padding and alignment,
-        // so to enable SIMD optimization
-        std::vector<float> data;
+        /// Stride per row: dimensions rounded up to the next multiple of 8,
+        /// so that each row is 32-byte aligned for AVX2 loads.
+        size_t stride = 0;
+        size_t count = 0;
+        /// Flat, 32-byte-aligned storage. Each row occupies `stride` floats;
+        /// padding floats (stride - dimensions) are kept at zero.
+        float* data = nullptr;
+        size_t capacity = 0; // number of rows allocated
+
+        void grow( size_t new_cap ) {
+            size_t alloc_bytes = new_cap * stride * sizeof(float);
+            float* new_data = static_cast<float*>( std::aligned_alloc( 32, alloc_bytes ) );
+            if ( !new_data ) throw std::bad_alloc();
+            std::memset( new_data, 0, alloc_bytes );
+            if ( data ) {
+                std::memcpy( new_data, data, count * stride * sizeof(float) );
+                std::free( data );
+            }
+            data = new_data;
+            capacity = new_cap;
+        }
+
+        static size_t round_up_8( size_t d ) { return ( d + 7 ) & ~(size_t)7; }
 
     public:
         using PointHandle = EuclideanPointHandle;
 
-        EuclideanPoints() {
-        }
+        EuclideanPoints(): dimensions(0), stride(0), count(0), data(nullptr), capacity(0) {}
 
         EuclideanPoints( size_t dimensions ):
-            dimensions( dimensions ), data( ) {
+            dimensions( dimensions ), stride( round_up_8(dimensions) ),
+            count(0), data(nullptr), capacity(0) {}
+
+        ~EuclideanPoints() { std::free( data ); }
+
+        // Move semantics
+        EuclideanPoints( EuclideanPoints&& o ) noexcept
+            : dimensions(o.dimensions), stride(o.stride), count(o.count),
+              data(o.data), capacity(o.capacity) {
+            o.data = nullptr; o.count = 0; o.capacity = 0;
+        }
+        EuclideanPoints& operator=( EuclideanPoints&& o ) noexcept {
+            if ( this != &o ) {
+                std::free( data );
+                dimensions = o.dimensions; stride = o.stride;
+                count = o.count; data = o.data; capacity = o.capacity;
+                o.data = nullptr; o.count = 0; o.capacity = 0;
+            }
+            return *this;
+        }
+
+        // Copy semantics
+        EuclideanPoints( const EuclideanPoints& o )
+            : dimensions(o.dimensions), stride(o.stride), count(o.count),
+              data(nullptr), capacity(o.count) {
+            if ( count > 0 ) {
+                size_t alloc_bytes = capacity * stride * sizeof(float);
+                data = static_cast<float*>( std::aligned_alloc( 32, alloc_bytes ) );
+                if ( !data ) throw std::bad_alloc();
+                std::memcpy( data, o.data, count * stride * sizeof(float) );
+            }
+        }
+        EuclideanPoints& operator=( const EuclideanPoints& o ) {
+            if ( this != &o ) {
+                EuclideanPoints tmp( o );
+                *this = std::move( tmp );
+            }
+            return *this;
         }
 
         template <typename Archive>
         void serialize( Archive& ar ) {
-            ar( dimensions, data );
+            // Serialize the logical dimensions and a flat vector of just the
+            // meaningful values (no padding), for backwards compatibility.
+            if constexpr ( Archive::is_saving::value ) {
+                std::vector<float> flat( count * dimensions );
+                for ( size_t r = 0; r < count; r++ )
+                    std::memcpy( &flat[r * dimensions], data + r * stride,
+                                 dimensions * sizeof(float) );
+                ar( dimensions, flat );
+            } else {
+                std::vector<float> flat;
+                ar( dimensions, flat );
+                stride = round_up_8( dimensions );
+                count = flat.size() / dimensions;
+                capacity = count;
+                std::free( data );
+                data = nullptr;
+                if ( count > 0 ) {
+                    size_t alloc_bytes = capacity * stride * sizeof(float);
+                    data = static_cast<float*>( std::aligned_alloc( 32, alloc_bytes ) );
+                    if ( !data ) throw std::bad_alloc();
+                    std::memset( data, 0, alloc_bytes );
+                    for ( size_t r = 0; r < count; r++ )
+                        std::memcpy( data + r * stride, &flat[r * dimensions],
+                                     dimensions * sizeof(float) );
+                }
+            }
         }
 
         friend bool operator==( const EuclideanPoints& a, const EuclideanPoints& b ) {
-            return a.dimensions == b.dimensions && a.data == b.data;
+            if ( a.dimensions != b.dimensions || a.count != b.count ) return false;
+            for ( size_t r = 0; r < a.count; r++ ) {
+                if ( std::memcmp( a.data + r * a.stride, b.data + r * b.stride,
+                                  a.dimensions * sizeof(float) ) != 0 )
+                    return false;
+            }
+            return true;
         }
 
         void clear() {
-            data.clear();
+            count = 0;
         }
 
         PointHandle operator[]( size_t i ) const {
-            expect(dimensions*i + dimensions <= data.size());
+            expect( i < count );
             PointHandle handle {
                 .dimensions = dimensions,
-                .vector = &data[dimensions*i]
+                .stride = stride,
+                .vector = data + i * stride
             };
             return handle;
         }
 
         template <typename FloatIter>
         void push_back( FloatIter begin, FloatIter end ) {
-            size_t cnt=0;
-            for (auto it=begin; it!= end; it++)  {
-                data.push_back(*it);
-                cnt+=1;
+            if ( count == capacity ) {
+                grow( capacity == 0 ? 16 : capacity * 2 );
             }
-            expect(cnt == dimensions);
+            float* dst = data + count * stride;
+            size_t cnt = 0;
+            for ( auto it = begin; it != end; it++ ) {
+                dst[cnt++] = *it;
+            }
+            expect( cnt == dimensions );
+            // Padding bytes are already zero from grow()
+            count++;
         }
 
         PointHandle push_back_random() {
@@ -344,11 +440,15 @@ namespace panna {
         }
 
         size_t size() const {
-            return data.size() / dimensions;
+            return count;
         }
         
         size_t get_dimensions() const {
             return dimensions;
+        }
+
+        size_t get_stride() const {
+            return stride;
         }
     };
 

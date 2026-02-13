@@ -46,11 +46,31 @@ namespace panna {
     template<>
     float dot_product( EuclideanPointHandle a, EuclideanPointHandle b ) {
         expect( a.dimensions == b.dimensions );
-        float sum = 0.0;
+#ifdef __AVX2__
+        // Process 8 floats per iteration using aligned loads.
+        // Stride is padded to multiple of 8 and padding is zero,
+        // so we can iterate over the full stride without a scalar tail.
+        __m256 acc = _mm256_setzero_ps();
+        size_t n = a.stride;
+        for ( size_t i = 0; i < n; i += 8 ) {
+            __m256 va = _mm256_load_ps( a.vector + i );
+            __m256 vb = _mm256_load_ps( b.vector + i );
+            acc = _mm256_fmadd_ps( va, vb, acc );
+        }
+        // Horizontal sum of 8 floats
+        __m128 hi = _mm256_extractf128_ps( acc, 1 );
+        __m128 lo = _mm256_castps256_ps128( acc );
+        __m128 sum4 = _mm_add_ps( lo, hi );
+        sum4 = _mm_hadd_ps( sum4, sum4 );
+        sum4 = _mm_hadd_ps( sum4, sum4 );
+        return _mm_cvtss_f32( sum4 );
+#else
+        float sum = 0.0f;
         for ( size_t i = 0; i < a.dimensions; i++ ) {
             sum += a.vector[i] * b.vector[i];
         }
         return sum;
+#endif
     }
 
 #ifdef __AVX2__
@@ -168,12 +188,30 @@ namespace panna {
 
     template <>
     float euclidean( EuclideanPointHandle a, EuclideanPointHandle b ) {
+        expect( a.dimensions == b.dimensions );
+#ifdef __AVX2__
+        __m256 acc = _mm256_setzero_ps();
+        size_t n = a.stride;
+        for ( size_t i = 0; i < n; i += 8 ) {
+            __m256 va = _mm256_load_ps( a.vector + i );
+            __m256 vb = _mm256_load_ps( b.vector + i );
+            __m256 diff = _mm256_sub_ps( va, vb );
+            acc = _mm256_fmadd_ps( diff, diff, acc );
+        }
+        __m128 hi = _mm256_extractf128_ps( acc, 1 );
+        __m128 lo = _mm256_castps256_ps128( acc );
+        __m128 sum4 = _mm_add_ps( lo, hi );
+        sum4 = _mm_hadd_ps( sum4, sum4 );
+        sum4 = _mm_hadd_ps( sum4, sum4 );
+        return std::sqrt( _mm_cvtss_f32( sum4 ) );
+#else
         float d = 0;
         for (size_t i=0; i<a.dimensions; i++) {
             float diff = a.vector[i] - b.vector[i];
             d += diff*diff;
         }
         return std::sqrt(d);
+#endif
     }
 
     template <>

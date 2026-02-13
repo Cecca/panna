@@ -47,7 +47,7 @@ if __name__ == "__main__":
         stem = Path(path).stem
         _, data = panna.datasets.load(name=stem, pca_dimensions=4 if 'pamap2' in stem.lower() else None, normalize=True if 'chem' in stem.lower() else False)
         data = np.array(data).astype(np.float32)
-        family = "lattice" if data.shape[1] >= 2000 else "e2lsh"
+        family = "lattice" if data.shape[1] >= 20 else "e2lsh"
 
         emst = panna.EMST(data, delta=0.01, epsilon=0, family=family)
         start_time = perf_counter()

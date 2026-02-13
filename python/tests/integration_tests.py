@@ -89,8 +89,8 @@ def check_mutual_reachability(dataset_name, knn=5, sample_size=10000):
         baseline_weight=baseline_weight,
     )
 
-# results = [check(dataset) for dataset in ["ht", "fashion-mnist-784-euclidean"]]
-results = []
+results = [check(dataset) for dataset in ["ht", "fashion-mnist-784-euclidean"]]
+#results = []
 results_mutual_reachability = [check_mutual_reachability(dataset) for dataset in ["fashion-mnist-784-euclidean"]]
 
 overall_success = True

@@ -22,7 +22,7 @@ int main () {
     const std::vector<size_t> lenghts = {10000, 100000, 1000000};
     using Point = NormedPoints; // UnitNormPoints or NormedPoints
     using Distance = EuclideanDistance; // EuclideanDistance or AngularDistance or CosineDistance
-    using Hasher = LatticeLSH<4, Point, Distance>;
+    using Hasher = E2LSH<conc, Point, Distance>; //LatticeLSH<4, Point, Distance>;
     // using Hasher = CrossPolytope<conc, Point, Distance, rotations>;
     std::ofstream outfile("results/weight_results.csv", std::ios_base::app);
 
