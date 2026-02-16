@@ -14,7 +14,7 @@ enum LogLevel {
   TRACE
 };
 
-static LogLevel CURRENT_LEVEL = LogLevel::ERROR;
+static LogLevel CURRENT_LEVEL = LogLevel::INFO;
 
 static void set_log_level(LogLevel level) {
   CURRENT_LEVEL = level;
