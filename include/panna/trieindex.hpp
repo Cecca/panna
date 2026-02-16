@@ -13,6 +13,7 @@
 #include "cereal/archives/binary.hpp"
 #include "panna/expect.hpp"
 #include "panna/logging.hpp"
+#include "panna/timer.hpp"
 #include "panna/lsh/predicates.hpp"
 #include "panna/prefixmap.hpp"
 
@@ -357,7 +358,10 @@ namespace panna {
                                "distance_cnt", distance_cnt );
                     break;
                 }
-                cursor.fill_pairs_buffer( scratch, buffer_size );
+                {
+                    Timer scan_timer("emst_bucket_scan");
+                    cursor.fill_pairs_buffer( scratch, buffer_size );
+                }
                 if ( scratch.size() == 0 ) {
                     // no new pairs
                     break;
@@ -370,31 +374,34 @@ namespace panna {
                            concatenations,
                            "num_new_pairs",
                            scratch.size() );
-                for ( size_t i = 0; i < scratch.size(); i++ ) {
-                    uint32_t a_idx = scratch[i].a;
-                    uint32_t b_idx = scratch[i].b;
-                    if (b_idx < a_idx) {
-                        // ensure that a_idx is always smaller
-                        uint32_t tmp = b_idx;
-                        b_idx = a_idx;
-                        a_idx = tmp;
-                    }
+                {
+                    Timer dist_timer("emst_compute_distances");
+                    for ( size_t i = 0; i < scratch.size(); i++ ) {
+                        uint32_t a_idx = scratch[i].a;
+                        uint32_t b_idx = scratch[i].b;
+                        if (b_idx < a_idx) {
+                            // ensure that a_idx is always smaller
+                            uint32_t tmp = b_idx;
+                            b_idx = a_idx;
+                            a_idx = tmp;
+                        }
 
-                    // Skip pairs already seen in previous rehash rounds
-                    if ( pair_filter && pair_filter( a_idx, b_idx ) ) {
-                        continue;
-                    }
+                        // Skip pairs already seen in previous rehash rounds
+                        if ( pair_filter && pair_filter( a_idx, b_idx ) ) {
+                            continue;
+                        }
 
-                    PointHandle a = dataset[a_idx];
-                    PointHandle b = dataset[b_idx];
-                    collision_cnt++;
-                    float distance = Distance::compute( a, b );
-                    scratch[i].weight = distance;
-                    distance_cnt++;
-                    if ( distance > wf ) {
-                        continue;
+                        PointHandle a = dataset[a_idx];
+                        PointHandle b = dataset[b_idx];
+                        collision_cnt++;
+                        float distance = Distance::compute( a, b );
+                        scratch[i].weight = distance;
+                        distance_cnt++;
+                        if ( distance > wf ) {
+                            continue;
+                        }
+                        // output.emplace_back( distance, a_idx, b_idx );
                     }
-                    // output.emplace_back( distance, a_idx, b_idx );
                 }
                 if (batch_output(scratch)) {
                     // early return if the callback says so

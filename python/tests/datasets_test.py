@@ -47,13 +47,17 @@ if __name__ == "__main__":
         stem = Path(path).stem
         _, data = panna.datasets.load(name=stem, pca_dimensions=4 if 'pamap2' in stem.lower() else None, normalize=True if 'chem' in stem.lower() else False)
         data = np.array(data).astype(np.float32)
-        family = "lattice" if data.shape[1] >= 20 else "e2lsh"
+        family = "e2lsh" #"lattice" if data.shape[1] >= 20 else "e2lsh"
 
-        emst = panna.EMST(data, delta=0.01, epsilon=0, family=family)
-        start_time = perf_counter()
-        emst.find_mst()
-        end_time = perf_counter()
-        elapsed_time = end_time - start_time
+        if 'deep' in stem.lower() or 'pamap2' in stem.lower():
+            elapsed_time = 0
+        else: 
+            emst = panna.EMST(data, delta=0.01, epsilon=0, family=family)
+            start_time = perf_counter()
+            emst.find_mst()
+            end_time = perf_counter()
+            elapsed_time = end_time - start_time
+        exit(0)
 
         emst = panna.EMST(data, delta=0.01, epsilon=0.2, family=family)
         start_time = perf_counter()

@@ -15,6 +15,7 @@
 #include "panna/channel.hpp"
 #include "panna/dsu.hpp"
 #include "panna/logging.hpp"
+#include "panna/timer.hpp"
 #include "panna/rand.hpp"
 #include "panna/trieindex.hpp"
 #include "panna/git_version.hpp"
@@ -515,7 +516,6 @@ namespace panna {
 
             // Build the pair_filter lambda: skip (a,b) if they share
             // a root in ANY per-repetition parent array from previous rounds.
-            // Use raw pointer access (no bounds checking) for speed.
             std::function<bool( uint32_t, uint32_t )> pair_filter = nullptr;
             if ( seen_groups && !seen_groups->empty() ) {
                 pair_filter = [sg = seen_groups.get()]( uint32_t a, uint32_t b ) -> bool {
@@ -547,32 +547,47 @@ namespace panna {
                 // Distance budget: scale sub-linearly with n to avoid
                 // spending too much time on a single repetition.
                 const size_t dist_budget = std::max( (size_t)100000, (size_t)std::sqrt((double)n) * 1000 );
-                auto [cnt_dist, cnt_collisions] = table.search_pairs_different_groups(
-                    repetition,
-                    prefix,
-                    buf_size,
-                    max_weight,
-                    [&]( uint32_t x ) { return filter.cfind( x ); },
-                    [&]( std::vector<Edge>& scratch ) {
-                        LOG_INFO( "msg", "building tree on batch", "logger", "worker", "batch_size", scratch.size() );
-                        scratch.insert( scratch.end(),
-                                        std::make_move_iterator( local_tree.begin() ),
-                                        std::make_move_iterator( local_tree.end() ) );
-                        std::sort( scratch.begin(), scratch.end() );
-                        local_tree.clear();
-                        dsu.reset();
-                        kruskal( dsu, scratch, local_tree );
-                        // Refresh filter from the latest published result.
-                        // This helps skip pairs already connected in the global tree.
-                        filter = running_result.read()->filter;
-                        for ( auto& e : local_tree ) {
-                            filter.union_sets( e.a, e.b );
-                        }
-                        filter.compress_all();
-                        return found.load(); // early stop if the solution has been found in the meantime
-                    },
-                    dist_budget,
-                    pair_filter );
+                auto [cnt_dist, cnt_collisions] = [&]() {
+                    Timer scan_timer("emst_scan_index");
+                    return table.search_pairs_different_groups(
+                        repetition,
+                        prefix,
+                        buf_size,
+                        max_weight,
+                        [&]( uint32_t x ) { return filter.cfind( x ); },
+                        [&]( std::vector<Edge>& scratch ) {
+                            LOG_INFO( "msg", "building tree on batch", "logger", "worker", "batch_size", scratch.size() );
+                            {
+                                Timer collect_timer("emst_worker_collect");
+                                scratch.insert( scratch.end(),
+                                                std::make_move_iterator( local_tree.begin() ),
+                                                std::make_move_iterator( local_tree.end() ) );
+                            }
+                            {
+                                Timer sort_timer("emst_worker_sort");
+                                std::sort( scratch.begin(), scratch.end() );
+                            }
+                            local_tree.clear();
+                            {
+                                Timer kruskal_timer("emst_worker_kruskal");
+                                dsu.reset();
+                                kruskal( dsu, scratch, local_tree );
+                            }
+                            // Refresh filter from the latest published result.
+                            // This helps skip pairs already connected in the global tree.
+                            {
+                                Timer filter_timer("emst_worker_filter_refresh");
+                                filter = running_result.read()->filter;
+                                for ( auto& e : local_tree ) {
+                                    filter.union_sets( e.a, e.b );
+                                }
+                                filter.compress_all();
+                            }
+                            return found.load(); // early stop if the solution has been found in the meantime
+                        },
+                        dist_budget,
+                        pair_filter );
+                }();
                 count_distances += cnt_dist;
                 count_collisions += cnt_collisions;
                 partials.send( std::move( local_tree ) );
@@ -651,6 +666,7 @@ namespace panna {
         /// The cumulative failure probability accounts for all previous rounds.
         std::pair<float, std::vector<Edge>> find_tree() {
             clear();
+            Timer find_tree_timer("emst_total");
 
             Billboard<RunningResult> running_result;
             running_result.update( RunningResult( std::vector<Edge>(), DSU( num_data ) ) );
@@ -767,6 +783,7 @@ namespace panna {
                         // Pre-filter: discard edges heavier than the current
                         // max_weight to reduce sort and Kruskal cost.
                         {
+                            Timer collect_timer("emst_collect_edges");
                             float wf = max_weight.load( std::memory_order_relaxed );
                             auto new_end = std::remove_if(
                                 batch_updates.begin(), batch_updates.end(),
@@ -775,18 +792,27 @@ namespace panna {
                         }
 
                         // Merge: the running result tree is sorted, so we can use merge
-                        std::vector<Edge> tree( running_result.read()->tree );
+                        std::vector<Edge> tree;
                         DSU filter( num_data );
-                        std::sort( batch_updates.begin(), batch_updates.end() );
-                        std::vector<Edge> merged;
-                        merged.reserve( tree.size() + batch_updates.size() );
-                        std::merge( tree.begin(), tree.end(),
-                                    batch_updates.begin(), batch_updates.end(),
-                                    std::back_inserter( merged ) );
-                        tree.clear();
-                        kruskal( filter, merged, tree );
-                        batch_updates.clear();
-                        merged.clear();
+                        {
+                            Timer sort_timer("emst_collector_sort");
+                            tree = running_result.read()->tree;
+                            std::sort( batch_updates.begin(), batch_updates.end() );
+                            std::vector<Edge> merged;
+                            merged.reserve( tree.size() + batch_updates.size() );
+                            std::merge( tree.begin(), tree.end(),
+                                        batch_updates.begin(), batch_updates.end(),
+                                        std::back_inserter( merged ) );
+                            tree.clear();
+                            tree.swap( merged );
+                        }
+                        {
+                            Timer kruskal_timer("emst_collector_kruskal");
+                            std::vector<Edge> mst;
+                            kruskal( filter, tree, mst );
+                            tree.swap( mst );
+                            batch_updates.clear();
+                        }
 
                         LOG_INFO( "logger", "collector", "tree-size", tree.size(),
                                   "completed-repetitions", completed_repetitions );
