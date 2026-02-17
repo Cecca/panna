@@ -45,7 +45,7 @@ if __name__ == "__main__":
             pca_dimensions=4 if "pamap2" in stem.lower() else None,
             normalize=True if "chem" in stem.lower() else False,
         )
-        data = np.array(data).astype(np.float32)[:10000]
+        data = np.array(data).astype(np.float32)#[:10000]
 
         algo = panna.EMST(data, epsilon=0.0, delta=0.05, repetitions=512, family="e2lsh")
         start_time = perf_counter()
@@ -58,9 +58,9 @@ if __name__ == "__main__":
             f"knn={args.knn} | time={elapsed_time:.4f}s"
         )
 
-        lock_path = os.path.join(results_folder, "hdbscan_results.csv.lock")
-        out_path = os.path.join(results_folder, "hdbscan_results.csv")
-        with FileLock(lock_path):
-            with open(out_path, "a+") as f_out:
-                f_out.write(f"hdbscan, {data.shape[0]}, {path}, {args.knn}, {elapsed_time}\n")
-                f_out.flush()
+        # lock_path = os.path.join(results_folder, "hdbscan_results.csv.lock")
+        # out_path = os.path.join(results_folder, "hdbscan_results.csv")
+        # with FileLock(lock_path):
+        #     with open(out_path, "a+") as f_out:
+        #         f_out.write(f"hdbscan, {data.shape[0]}, {path}, {args.knn}, {elapsed_time}\n")
+        #         f_out.flush()
