@@ -34,5 +34,6 @@ recall
 scalability
 .venv/
 /dist
+logs/
 *.pyc
 /.cache

@@ -27,6 +27,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import seaborn as sns
 import numpy as np
 
 
@@ -57,7 +58,7 @@ CATEGORY_DEFS = [
         "coarse": ["emst_worker_mst", "emst_collector_mst"],
     },
     {
-        "label": "Filter / bookkeeping",
+        "label": "Update filter",
         "fine":  ["emst_worker_filter_refresh", "emst_collect_edges"],
         "coarse": ["emst_collect_edges"],
     },
@@ -204,11 +205,12 @@ def main():
     ax.set_xticklabels(datasets, rotation=30, ha="right")
     ax.set_ylabel(ylabel)
     ax.set_title("EMST timing breakdown")
-    ax.legend(loc="upper left", fontsize="small", framealpha=0.9)
-    ax.grid(axis="y", alpha=0.3)
+    ax.legend(loc="upper left", fontsize="medium", framealpha=0.9)
+    #ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
+    sns.despine()
 
-    fig.savefig(args.output, dpi=300)
+    fig.savefig(args.output, dpi=400)
     print(f"Saved plot to {args.output}")
 
 
