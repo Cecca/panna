@@ -57,7 +57,7 @@ if __name__ == "__main__":
             emst.find_mst()
             end_time = perf_counter()
             elapsed_time = end_time - start_time
-        exit(0)
+        #exit(0)
 
         emst = panna.EMST(data, delta=0.01, epsilon=0.2, family=family)
         start_time = perf_counter()

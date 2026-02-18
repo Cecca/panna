@@ -64,7 +64,7 @@ if __name__ == "__main__":
                 # "deep-image-96-angular",
                 # "chem",
                 # "ht",
-                # "imagenet-align-640-normalized",
+                # "imagenet-clip-512-normalized",
                 # "landmark-nomic-768-normalized",
                 # "census",
                 # "pamap2",
@@ -77,11 +77,12 @@ if __name__ == "__main__":
             for path in paths:
                 _, data = panna.datasets.load(name=path, pca_dimensions=4 if path == "pamap2" else None)
                 data = data[:1000]
+                epsilon = 0.2
                 
-                tree_weights, tree_edges = panna.EMST(data, epsilon=0, delta=0.001, family="lattice").find_mst()
+                tree_weights, tree_edges = panna.EMST(data, epsilon=0, delta=0.001, family="e2lsh").find_mst()
 
                 
-                emst_approx = panna.EMST(data, epsilon=0.1, delta=0.001, family="lattice").find_mst()
+                emst_approx = panna.EMST(data, epsilon=epsilon, delta=0.001, family="e2lsh").find_mst()
                 tree_weights_approx, tree_edges_approx = emst_approx
                 
                 tree1 = edges_to_bracket_notation_tree(tree_weights, tree_edges)
@@ -106,7 +107,7 @@ if __name__ == "__main__":
                 # so we extract the last line and get the integer value
                 ted_distance = int(result.stdout.strip().split("\n")[-1].split(":")[-1])
                 
-                f_out.write(f"{path},0.1,{ted_distance}\n")
+                f_out.write(f"{path},{epsilon},{ted_distance}\n")
         print("Done.")
                 
                 
