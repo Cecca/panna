@@ -599,6 +599,36 @@ namespace panna {
         return mean;
     }
 
+    // Extract a point as a std::vector<float> from a PointHandle
+    static std::vector<float> extract_point( const EuclideanPointHandle& handle ) {
+        return std::vector<float>( handle.vector, handle.vector + handle.dimensions );
+    }
+
+    static std::vector<float> extract_point( const NormedPointHandle& handle ) {
+        std::vector<float> v( handle.inner.dimensions );
+        handle.inner.into_vec( v );
+        float scale = std::sqrt( handle.sq_norm );
+        for ( auto& x : v ) x *= scale;
+        return v;
+    }
+
+    // Create a random sample of the given dataset.
+    // If sample_size >= n returns the full dataset.
+    template <typename Dataset>
+    Dataset sample_dataset( const Dataset& source, size_t sample_size ) {
+        const size_t n = source.size();
+        if ( sample_size >= n ) {
+            return Dataset( source );
+        }
+        auto indices = sample_k( n, sample_size );
+        Dataset result( source.get_dimensions() );
+        for ( size_t idx : indices ) {
+            auto point = extract_point( source[idx] );
+            result.push_back( point.begin(), point.end() );
+        }
+        return result;
+    }
+
     //! Computes a lower bound to the diameter of the dataset
     template <typename Distance, typename Dataset>
     float approximate_diameter( Dataset& dataset ) {

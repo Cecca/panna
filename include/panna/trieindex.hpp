@@ -210,7 +210,6 @@ namespace panna {
 #pragma omp parallel for private( hashes )
             for ( size_t i = hashed_points; i < dataset.size(); i++ ) {
                 auto tid = omp_get_thread_num();
-                // auto & hashes = tl_hash_values[tid];
                 hasher->hash( dataset[i], hashes );
                 for ( size_t rep = 0; rep < lsh_maps.size(); rep++ ) {
                     lsh_maps[rep].insert( tid, i, hashes[rep] );

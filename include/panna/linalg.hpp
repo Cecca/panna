@@ -33,14 +33,45 @@ namespace panna {
     template <typename T>
     static float dot_product( T a, T b );
 
-    template<>
-    float dot_product( std::vector<float> a, std::vector<float> b ) {
+    // Overload for std::vector<float> taking const references (avoids copies)
+    // and using AVX2 when available.
+    static float dot_product( const std::vector<float>& a, const std::vector<float>& b ) {
         assert( a.size() == b.size() );
-        float sum = 0.0;
+#ifdef __AVX2__
+        const size_t n = a.size();
+        const size_t n8 = n & ~(size_t)7; // round down to multiple of 8
+        __m256 acc = _mm256_setzero_ps();
+        for ( size_t i = 0; i < n8; i += 8 ) {
+            __m256 va = _mm256_loadu_ps( &a[i] );
+            __m256 vb = _mm256_loadu_ps( &b[i] );
+            acc = _mm256_fmadd_ps( va, vb, acc );
+        }
+        // Horizontal sum of 8 floats
+        __m128 hi = _mm256_extractf128_ps( acc, 1 );
+        __m128 lo = _mm256_castps256_ps128( acc );
+        __m128 sum4 = _mm_add_ps( lo, hi );
+        sum4 = _mm_hadd_ps( sum4, sum4 );
+        sum4 = _mm_hadd_ps( sum4, sum4 );
+        float sum = _mm_cvtss_f32( sum4 );
+        // Scalar tail for remaining elements
+        for ( size_t i = n8; i < n; i++ ) {
+            sum += a[i] * b[i];
+        }
+        return sum;
+#else
+        float sum = 0.0f;
         for ( size_t i = 0; i < a.size(); i++ ) {
             sum += a[i] * b[i];
         }
         return sum;
+#endif
+    }
+
+    template<>
+    float dot_product( std::vector<float> a, std::vector<float> b ) {
+        // Forward to the const-ref overload to avoid duplicating logic
+        return dot_product( static_cast<const std::vector<float>&>(a),
+                            static_cast<const std::vector<float>&>(b) );
     }
 
     template<>

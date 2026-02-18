@@ -47,7 +47,7 @@ if __name__ == "__main__":
         )
         data = np.array(data).astype(np.float32)#[:10000]
 
-        algo = panna.EMST(data, epsilon=0.0, delta=0.05, repetitions=512, family="e2lsh")
+        algo = panna.EMST(data, epsilon=0.1, delta=0.05, repetitions=512, family="e2lsh")
         start_time = perf_counter()
         emst, core, _neighs = algo.find_mst_dbscan(args.knn)
         end_time = perf_counter()

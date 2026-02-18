@@ -42,6 +42,9 @@ mpl.rcParams.update(
         "ytick.labelsize": 10,
         "legend.fontsize": 10,
         "legend.title_fontsize": 11,
+        "legend.markerscale": 1.5,
+        "legend.handlelength": 1.5,
+        "legend.handleheight": 1.0,
         "figure.titlesize": 12,
     }
 )

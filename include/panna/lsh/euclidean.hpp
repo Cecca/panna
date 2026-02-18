@@ -81,6 +81,42 @@ namespace panna {
             }
         }
 
+        /// Number of raw dot-product projections per point (one per random vector)
+        size_t num_raw_projections() const {
+            return repetitions * K;
+        }
+
+        /// Compute the raw dot products of `point` with every random vector.
+        /// `out` must point to at least `num_raw_projections()` floats.
+        void compute_raw_projections( typename Dataset::PointHandle point, float* out ) const {
+            const size_t total = num_raw_projections();
+            for ( size_t i = 0; i < total; i++ ) {
+                out[i] = dot_product( point, random_vectors[i] );
+            }
+        }
+
+        /// Hash a point from pre-computed raw projections (avoids recomputing dot products).
+        void hash_from_projections( const float* raw_projections, std::vector<Value>& output ) const {
+            output.clear();
+            BytewiseLshValue<K> cur;
+            for ( size_t rep = 0; rep < repetitions; rep++ ) {
+                for ( size_t concat = 0; concat < K; concat++ ) {
+                    float dotp = raw_projections[K * rep + concat];
+                    float quantized =
+                        std::floor( ( dotp + offsets[K * rep + concat] ) / quantization_width );
+                    int8_t code = static_cast<int8_t>( quantized );
+                    cur.set( concat, code );
+                }
+                output.push_back( cur );
+                cur = BytewiseLshValue<K>();
+            }
+        }
+
+        /// Update the quantization width by `factor` without regenerating random vectors.
+        void update_scaling( float factor ) {
+            quantization_width *= factor;
+        }
+
         float collision_probability( float distance ) const {
             distance = Distance::to_euclidean(distance); // This gives the chance of applying the square root
             float r = quantization_width;
@@ -118,17 +154,29 @@ namespace panna {
                 return;
             }
 
+            const size_t n = points.size();
+
+            // Use a sample of the dataset to guess the quantization 
+            const size_t FIT_SAMPLE_SIZE = 5000;
+            const size_t s = std::min( FIT_SAMPLE_SIZE, n );
+            Dataset sample = ( s < n ) ? sample_dataset( points, s ) : Dataset( points );
+            const float sample_ratio = static_cast<float>( s ) / static_cast<float>( n );
+            LOG_INFO("msg", "E2LSH fit sampling", "sample-size", s, "sample-ratio", sample_ratio);
+
+            // --- Estimate initial quantization_width from sampled dot products ---
+            const size_t num_random_dirs = 1000;
             Dataset random(dimensions);
-            for (size_t i = 0; i < 1000; i++) {
+            for (size_t i = 0; i < num_random_dirs; i++) {
                 std::vector<float> dir = sample_random_normal_vector(dimensions);
                 random.push_back(dir.begin(), dir.end());
             }
 
             float min = std::numeric_limits<float>::infinity();
             float max = -std::numeric_limits<float>::infinity();
+#pragma omp parallel for reduction(min:min) reduction(max:max)
             for (size_t i = 0; i < random.size(); i++) {
-                for (size_t j = 0; j < points.size(); j++) {
-                    float dotp = dot_product(random[i], points[j]);
+                for (size_t j = 0; j < s; j++) {
+                    float dotp = dot_product(random[i], sample[j]);
                     if (dotp < min) min = dotp;
                     if (dotp > max) max = dotp;
                 }
@@ -137,22 +185,80 @@ namespace panna {
             quantization_width = (max - min) / 16.0f;
             LOG_INFO("msg", "Quantization width guess", "quantization_width", quantization_width);
 
+            // --- Optimization 2: pre-generate random vectors and pre-compute projections ---
             const size_t sample_repetitions = 4;
-            size_t high_thresh = static_cast<size_t>(sqrt(points.size()) * 1.3);
-            size_t low_thresh  = static_cast<size_t>(sqrt(points.size()) * 0.7);
+            const size_t num_vectors = sample_repetitions * K;
+
+            Dataset random_vecs(dimensions);
+            std::vector<float> fit_offsets;
+            auto& rng = get_global_rng();
+
+            for (size_t vec_idx = 0; vec_idx < num_vectors; vec_idx++) {
+                std::vector<float> dir = sample_random_normal_vector(dimensions, rng);
+                random_vecs.push_back(dir.begin(), dir.end());
+            }
+
+            // Pre-compute raw projections: raw[i * num_vectors + v] = dot(sample[i], random_vecs[v])
+            std::vector<float> raw_projections(s * num_vectors);
+#pragma omp parallel for
+            for (size_t i = 0; i < s; i++) {
+                for (size_t v = 0; v < num_vectors; v++) {
+                    raw_projections[i * num_vectors + v] =
+                        dot_product(sample[i], random_vecs[v]);
+                }
+            }
+
+            // Pre-generate random offsets for each candidate quantization width.
+            // Offsets are uniform in [0, qw), so we generate uniform [0, 1) and scale later.
+            std::vector<float> unit_offsets(num_vectors);
+            for (size_t v = 0; v < num_vectors; v++) {
+                unit_offsets[v] = sample_random_01(rng);
+            }
+
+            // Scale thresholds for the sample
+            size_t high_thresh = static_cast<size_t>(sqrt(n) * 1.3 * sample_ratio * sample_ratio);
+            size_t low_thresh  = static_cast<size_t>(sqrt(n) * 0.7 * sample_ratio * sample_ratio);
+            // Ensure at least 1 to avoid zero thresholds on very small samples
+            if (low_thresh == 0) low_thresh = 1;
+            if (high_thresh == 0) high_thresh = 1;
 
             std::optional<float> qw_lower = std::nullopt;
             std::optional<float> qw_upper = std::nullopt;
 
+            // Count collisions from pre-computed projections (no new dot products)
             auto compute_avg_collisions = [&](float qwidth) -> float {
-                std::vector<PrefixMap<typename Output::Value>> pmaps(sample_repetitions);
-                Output hasher(qwidth, dimensions, sample_repetitions);
-                PrefixMap<typename Output::Value>::populate_from(pmaps, points, hasher);
+                using Value = typename Output::Value;
+                std::vector<PrefixMap<Value>> pmaps(sample_repetitions);
+
+#pragma omp parallel
+                {
+                    auto tid = omp_get_thread_num();
+#pragma omp for
+                    for (size_t i = 0; i < s; i++) {
+                        for (size_t rep = 0; rep < sample_repetitions; rep++) {
+                            BytewiseLshValue<K> cur;
+                            for (size_t concat = 0; concat < K; concat++) {
+                                size_t v = K * rep + concat;
+                                float dotp = raw_projections[i * num_vectors + v];
+                                float quantized =
+                                    std::floor((dotp + unit_offsets[v] * qwidth) / qwidth);
+                                int8_t code = static_cast<int8_t>(quantized);
+                                cur.set(concat, code);
+                            }
+                            pmaps[rep].insert(tid, i, cur);
+                        }
+                    }
+                }
+
+#pragma omp parallel for
+                for (size_t rep = 0; rep < sample_repetitions; rep++) {
+                    pmaps[rep].rebuild();
+                }
 
                 size_t collisions = 0;
                 for (auto& pmap : pmaps) {
-                    PairPrefixMapCursorNew<typename Output::Value> cursor =
-                        pmap.create_pair_cursor_new(hasher.get_concatenations(), std::nullopt);
+                    PairPrefixMapCursorNew<Value> cursor =
+                        pmap.create_pair_cursor_new(K, std::nullopt);
                     collisions += cursor.total_collisions();
                 }
                 return static_cast<float>(collisions) / pmaps.size();
@@ -202,11 +308,6 @@ namespace panna {
                     }
                 }
             }
-
-            // If the target is not met, just return to the intial guess
-            // if (!qw_lower || !qw_upper) {
-            //     quantization_width = (max - min) / 16.0f;
-            // }
 
             LOG_INFO("msg", "Quantization width set to", "quantization_width", quantization_width);
         }

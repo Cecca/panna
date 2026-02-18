@@ -18,12 +18,12 @@ if __name__ == "__main__":
             "axes.labelsize": 11,
             "xtick.labelsize": 10,
             "ytick.labelsize": 10,
-            "legend.fontsize": 10,
+            "legend.fontsize": 13,
             "legend.title_fontsize": 11,
             "figure.titlesize": 12,
         }
     )
-    sns.set_theme(palette="muted", style="white", font_scale=1.3)
+    sns.set_theme(palette="muted", style="white", font_scale=1.7)
 
     # Filepaths
     filepath_prefix = Path(__file__).resolve().parents[2]
@@ -34,16 +34,17 @@ if __name__ == "__main__":
     color_mapping = {
         "mlpack-Boruvka": "tab:orange",
         "K+": "tab:green",
-        "K+ ɛ 0.1": "tab:red",
+        r"K+ $\varepsilon$ 0.1": "tab:red",
         "K+ 1 thread": "tab:purple",
         "Tutte-Boruvka": "tab:brown",
         "Wang-GFK": "tab:pink",
         "ToC-Kr": "tab:blue",
-        "K+ ɛ 5.0": "tab:cyan",
+        r"K+ $\varepsilon$ 5.0": "tab:cyan",
     }
 
     # DIMENSIONALITY SCALABILITY PLOT
     df = pd.read_csv(filepath_dim)
+    df["Algorithm"] = df["Algorithm"].str.replace("ɛ", r"$\varepsilon$", regex=False)
 
     # Create a figure with an extra column for the legend
     fig = plt.figure(figsize=(11, 6))
@@ -72,8 +73,8 @@ if __name__ == "__main__":
 
     # Tufte-style axis bounds
     ax.spines["left"].set_bounds(
-        df[df["Algorithm"].isin(["K+", "K+ ɛ 5.0"])]["Time (s)"].min(),
-        df[df["Algorithm"].isin(["K+", "K+ ɛ 5.0"])]["Time (s)"].max(),
+        df[df["Algorithm"].isin(["K+", r"K+ $\varepsilon$ 5.0"])]["Time (s)"].min(),
+        df[df["Algorithm"].isin(["K+", r"K+ $\varepsilon$ 5.0"])]["Time (s)"].max(),
     )
     ax.spines["bottom"].set_bounds(df["D"].min(), df["D"].max())
 
@@ -97,6 +98,7 @@ if __name__ == "__main__":
 
     # LENGTH SCALABILITY PLOT
     df_length = pd.read_csv(filepath_len)
+    df_length["Algorithm"] = df_length["Algorithm"].str.replace("ɛ", r"$\varepsilon$", regex=False)
     dimensions = sorted(df_length["D"].unique())
     timeout = 28800  # 8 hours
 
@@ -148,8 +150,8 @@ if __name__ == "__main__":
         ax.set_ylabel("")
         ax.set_xlabel("")
         ax.spines["left"].set_bounds(
-            subset[subset["Algorithm"].isin(["K+", "K+ ɛ 5.0"])]["Time (s)"].min(),
-            subset[subset["Algorithm"].isin(["K+", "K+ ɛ 5.0"])]["Time (s)"].max(),
+            subset[subset["Algorithm"].isin(["K+", r"K+ $\varepsilon$ 5.0"])]["Time (s)"].min(),
+            subset[subset["Algorithm"].isin(["K+", r"K+ $\varepsilon$ 5.0"])]["Time (s)"].max(),
         )
         ax.spines["bottom"].set_bounds(subset["n"].min(), subset["n"].max())
 

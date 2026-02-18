@@ -194,6 +194,50 @@ namespace panna {
             }
         }
 
+        /// Number of raw dot-product projections per point (one per random vector)
+        size_t num_raw_projections() const {
+            return repetitions * K * LATTICE_DIMENSIONS;
+        }
+
+        /// Compute the raw dot products of `point` with every random vector.
+        /// `out` must point to at least `num_raw_projections()` floats.
+        void compute_raw_projections( typename Dataset::PointHandle point, float* out ) const {
+            const size_t total = num_raw_projections();
+            for ( size_t i = 0; i < total; i++ ) {
+                out[i] = dot_product( point, random_vectors[i] );
+            }
+        }
+
+        /// Hash a point from pre-computed raw projections (avoids recomputing dot products).
+        void hash_from_projections( const float* raw_projections, std::vector<Value>& output ) const {
+            output.clear();
+            for ( size_t rep = 0; rep < repetitions; rep++ ) {
+                Value cur;
+                for ( size_t concat = 0; concat < K; concat++ ) {
+                    std::array<float, LATTICE_DIMENSIONS> prj;
+                    const size_t start = rep * LATTICE_DIMENSIONS * K + concat * LATTICE_DIMENSIONS;
+                    for ( size_t d = 0; d < LATTICE_DIMENSIONS; d++ ) {
+                        prj[d] = raw_projections[start + d] / scaling_factor
+                                 - corrections[start + d] + offsets[start + d];
+                    }
+                    auto decoded = decode_e8( prj );
+                    int64_t code = to_int64( to_integer_coords( decoded ) );
+                    cur.set( concat, code );
+                }
+                output.push_back( cur );
+                cur = Value();
+            }
+        }
+
+        /// Update the scaling factor by `factor` without regenerating random vectors.
+        /// Corrections are adjusted to match the new scaling factor.
+        void update_scaling( float factor ) {
+            for ( size_t i = 0; i < corrections.size(); i++ ) {
+                corrections[i] /= factor;
+            }
+            scaling_factor *= factor;
+        }
+
         float collision_probability( float distance ) const {
             distance = Distance::to_euclidean(distance); // This gives the chance of applying the square root
             distance = distance / scaling_factor;
@@ -241,38 +285,102 @@ namespace panna {
             const size_t n = points.size();
             offset = mean_point(points);
             const float diameter = approximate_diameter<Distance>(points);
-            const size_t sample_repetitions = 4;
             LOG_INFO("diameter", diameter);
 
-            auto compute_avg_collisions = [&](float scale) -> float {
-                std::vector<PrefixMap<typename Output::Value>> pmaps(sample_repetitions);
-                Output hasher(offset, scale, dimensions, sample_repetitions);
-                PrefixMap<typename Output::Value>::populate_from(pmaps, points, hasher);
+            // --- Optimization 1: use a sample of the dataset for fitting ---
+            const size_t FIT_SAMPLE_SIZE = 5000;
+            const size_t s = std::min( FIT_SAMPLE_SIZE, n );
+            Dataset sample = ( s < n ) ? sample_dataset( points, s ) : Dataset( points );
+            const float sample_ratio = static_cast<float>( s ) / static_cast<float>( n );
+            LOG_INFO("fit-sample-size", s, "sample-ratio", sample_ratio);
+
+            const size_t sample_repetitions = 4;
+            static const size_t LDIM = Output::LATTICE_DIMENSIONS;
+            const size_t num_vectors = sample_repetitions * K * LDIM;
+
+            // --- Optimization 2: pre-generate random vectors and pre-compute projections ---
+            auto& rng = get_global_rng();
+            Dataset random_vecs( dimensions );
+            std::vector<float> fit_offsets;
+            std::vector<float> offset_corrections; // dot(random_vec, data_offset), unscaled
+
+            for ( size_t vec_idx = 0; vec_idx < num_vectors; vec_idx++ ) {
+                std::vector<float> dir = sample_random_normal_vector( dimensions, rng );
+                panna::rescale( dir, 1.0 / std::sqrt( static_cast<double>( LDIM ) ) );
+                random_vecs.push_back( dir.begin(), dir.end() );
+                fit_offsets.push_back( sample_random_01( rng ) );
+                offset_corrections.push_back( dot_product( dir, offset ) );
+            }
+
+            // Pre-compute raw projections: raw[i * num_vectors + v] =
+            //   dot(sample[i], random_vecs[v]) - dot(random_vecs[v], offset)
+            // These are independent of the scaling factor.
+            std::vector<float> raw_projections( s * num_vectors );
+#pragma omp parallel for
+            for ( size_t i = 0; i < s; i++ ) {
+                for ( size_t v = 0; v < num_vectors; v++ ) {
+                    raw_projections[i * num_vectors + v] =
+                        dot_product( sample[i], random_vecs[v] ) - offset_corrections[v];
+                }
+            }
+
+            // Count collisions from pre-computed projections (no new dot products)
+            auto compute_avg_collisions = [&]( float scale ) -> float {
+                using Value = typename Output::Value;
+                std::vector<PrefixMap<Value>> pmaps( sample_repetitions );
+
+#pragma omp parallel
+                {
+                    auto tid = omp_get_thread_num();
+#pragma omp for
+                    for ( size_t i = 0; i < s; i++ ) {
+                        for ( size_t rep = 0; rep < sample_repetitions; rep++ ) {
+                            Value cur;
+                            for ( size_t concat = 0; concat < K; concat++ ) {
+                                std::array<float, LDIM> prj;
+                                const size_t base = rep * LDIM * K + concat * LDIM;
+                                for ( size_t d = 0; d < LDIM; d++ ) {
+                                    prj[d] = raw_projections[i * num_vectors + base + d] / scale
+                                             + fit_offsets[base + d];
+                                }
+                                auto decoded = decode_e8( prj );
+                                int64_t code = to_int64( to_integer_coords( decoded ) );
+                                cur.set( concat, code );
+                            }
+                            pmaps[rep].insert( tid, i, cur );
+                        }
+                    }
+                }
+
+#pragma omp parallel for
+                for ( size_t rep = 0; rep < sample_repetitions; rep++ ) {
+                    pmaps[rep].rebuild();
+                }
 
                 size_t collisions = 0;
-                for (auto& pmap : pmaps) {
-                    PairPrefixMapCursorNew<typename Output::Value> cursor =
-                        pmap.create_pair_cursor_new(hasher.get_concatenations(), std::nullopt);
+                for ( auto& pmap : pmaps ) {
+                    PairPrefixMapCursorNew<Value> cursor =
+                        pmap.create_pair_cursor_new( K, std::nullopt );
                     collisions += cursor.total_collisions();
                 }
-                return static_cast<float>(collisions) / pmaps.size();
+                return static_cast<float>( collisions ) / pmaps.size();
             };
 
-            // TODO: make these configurable to handle different scenarios
-            const float threshold_low = n / 2.0;
-            const float threshold_high = n * 2.0;
+            // Scale thresholds: collisions grow ~quadratically with dataset size
+            const float threshold_low = ( n / 2.0 ) * sample_ratio * sample_ratio;
+            const float threshold_high = ( n * 2.0 ) * sample_ratio * sample_ratio;
             LOG_INFO("threshold-low", threshold_low, "threshold_high", threshold_high);
 
-            float low=0.0, high=diameter;
+            float low = 0.0, high = diameter;
             const size_t MAX_ITER = 40;
-            for(size_t iter=0; iter<MAX_ITER; iter++) {
-                float scale = (low+high) / 2.0;
-                float avg_collisions = compute_avg_collisions(scale);
+            for ( size_t iter = 0; iter < MAX_ITER; iter++ ) {
+                float scale = ( low + high ) / 2.0;
+                float avg_collisions = compute_avg_collisions( scale );
                 LOG_INFO("scale", scale, "avg-collisions", avg_collisions);
-                if (threshold_low <= avg_collisions && avg_collisions <= threshold_high) {
+                if ( threshold_low <= avg_collisions && avg_collisions <= threshold_high ) {
                     scaling_factor = scale;
                     break;
-                } else if (avg_collisions < threshold_low) {
+                } else if ( avg_collisions < threshold_low ) {
                     low = scale;
                 } else {
                     high = scale;
