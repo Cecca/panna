@@ -22,6 +22,80 @@
 
 namespace panna {
 
+    // --- LSD radix sort infrastructure ---
+
+    // SFINAE trait: detect whether T has radix_key_byte() and radix_key_bytes()
+    template <typename T, typename = void>
+    struct is_radix_sortable : std::false_type {};
+
+    template <typename T>
+    struct is_radix_sortable<T,
+        std::void_t<
+            decltype( T::radix_key_bytes() ),
+            decltype( std::declval<const T>().radix_key_byte( size_t{0} ) )
+        >
+    > : std::true_type {};
+
+    /// LSD (least-significant-byte-first) radix sort for pairs of (hash, index).
+    /// Sorts by the hash component using 256-way counting sort per byte pass.
+    /// Uses double-buffering to avoid copying; skips uniform passes.
+    template <typename THashValue>
+    void radix_sort_pairs( std::vector<std::pair<THashValue, uint32_t>>& data ) {
+        static_assert( is_radix_sortable<THashValue>::value,
+                       "THashValue must provide radix_key_bytes() and radix_key_byte()" );
+
+        const size_t n = data.size();
+        if ( n <= 1 ) return;
+
+        constexpr size_t NUM_PASSES = THashValue::radix_key_bytes();
+        using Pair = std::pair<THashValue, uint32_t>;
+        std::vector<Pair> buffer( n );
+
+        // Track whether the current sorted result lives in `data` or `buffer`
+        bool in_buffer = false;
+
+        for ( size_t pass = 0; pass < NUM_PASSES; pass++ ) {
+            auto& src = in_buffer ? buffer : data;
+            auto& dst = in_buffer ? data : buffer;
+
+            // 1. Count occurrences of each byte value
+            size_t counts[256] = {};
+            for ( size_t i = 0; i < n; i++ ) {
+                counts[ src[i].first.radix_key_byte( pass ) ]++;
+            }
+
+            // Skip this pass if all elements have the same byte (common for
+            // high bytes of small hash values)
+            {
+                bool uniform = false;
+                for ( size_t b = 0; b < 256; b++ ) {
+                    if ( counts[b] == n ) { uniform = true; break; }
+                }
+                if ( uniform ) continue;
+            }
+
+            // 2. Exclusive prefix sum → write offsets
+            size_t offsets[256];
+            offsets[0] = 0;
+            for ( size_t b = 1; b < 256; b++ ) {
+                offsets[b] = offsets[b - 1] + counts[b - 1];
+            }
+
+            // 3. Scatter into destination in stable order
+            for ( size_t i = 0; i < n; i++ ) {
+                uint8_t b = src[i].first.radix_key_byte( pass );
+                dst[ offsets[b]++ ] = src[i];
+            }
+
+            in_buffer = !in_buffer;
+        }
+
+        // If the sorted result ended up in buffer, move it back to data
+        if ( in_buffer ) {
+            data.swap( buffer );
+        }
+    }
+
     //! Returns the index of the first element strictly larger than the `needle`, starting from
     //! position `from`. "Larger" is defined in terms of the `prefix_less` method.
     template <typename T>
@@ -838,8 +912,12 @@ namespace panna {
                 }
             }
 
-            // OPTIMIZE: use radix sort?
-            std::sort( tmp.begin(), tmp.end() );
+            // Use LSD radix sort when the hash type supports it, otherwise std::sort
+            if constexpr ( is_radix_sortable<THashValue>::value ) {
+                radix_sort_pairs( tmp );
+            } else {
+                std::sort( tmp.begin(), tmp.end() );
+            }
 
             indices.clear();
             indices.reserve( tmp.size() );

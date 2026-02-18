@@ -135,6 +135,17 @@ namespace panna {
             uint32_t res = ( abits << 1 ) | bbits;
             return BitwiseLshValue<K>::make( res );
         }
+
+        /// Number of bytes in the radix sort key.
+        static constexpr size_t radix_key_bytes() { return 4; }
+
+        /// Extract one byte for LSD radix sort.
+        /// Pass 0 = least significant byte in the sort order.
+        /// BitwiseLshValue wraps an unsigned uint32_t;
+        /// on little-endian x86, byte 0 is already the LSB.
+        uint8_t radix_key_byte( size_t pass ) const {
+            return reinterpret_cast<const uint8_t*>( &bits )[pass];
+        }
     };
 
     // simple static tests on the hash data type, checked at compile time
@@ -218,6 +229,31 @@ namespace panna {
 
         constexpr inline bool operator==( SymbolLshValue<Symbol, K> other ) const {
             return this->prefix_eq( other, K );
+        }
+
+        /// Number of bytes in the radix sort key.
+        static constexpr size_t radix_key_bytes() { return K * sizeof(Symbol); }
+
+        /// Extract one byte for LSD radix sort.
+        /// Pass 0 = least significant byte in the sort order.
+        /// Elements are in lexicographic order (element 0 = most significant).
+        /// On little-endian x86 each element has LSB at offset 0.
+        /// For signed Symbol types the MSB of each element is sign-flipped
+        /// so that unsigned byte comparison matches signed comparison.
+        uint8_t radix_key_byte( size_t pass ) const {
+            constexpr size_t ELEM_SIZE = sizeof(Symbol);
+            // LSD pass ordering: element K-1 bytes first, then K-2, ..., then 0
+            size_t element = K - 1 - pass / ELEM_SIZE;
+            size_t byte_within = pass % ELEM_SIZE;
+            const uint8_t* raw = reinterpret_cast<const uint8_t*>( &hashes[element] );
+            uint8_t b = raw[byte_within];
+            // Flip sign bit on MSB of each element for signed types
+            if constexpr ( std::is_signed_v<Symbol> ) {
+                if ( byte_within == ELEM_SIZE - 1 ) {
+                    b ^= 0x80;
+                }
+            }
+            return b;
         }
 
         static constexpr inline SymbolLshValue<Symbol, K>
