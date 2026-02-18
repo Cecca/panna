@@ -26,9 +26,26 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
+
+mpl.rcParams.update(
+    {
+        "text.usetex": True,
+        "text.latex.preamble": r"\usepackage{siunitx} \usepackage{sansmath} \sansmath",
+        "font.size": 11,
+        "axes.titlesize": 12,
+        "axes.labelsize": 11,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        "legend.fontsize": 10,
+        "legend.title_fontsize": 11,
+        "figure.titlesize": 12,
+    }
+)
+sns.set_theme(font_scale=1.3, style="white", palette="muted")
 
 
 # ── Category definitions ─────────────────────────────────────────────

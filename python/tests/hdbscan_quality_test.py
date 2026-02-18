@@ -14,16 +14,16 @@ import fast_hdbscan
 if __name__ == "__main__":
     
         paths = [
-                "fashion-mnist-784-euclidean",
-                "glove-100-angular",
-                "nytimes-256-angular",
-                "gist-960-euclidean",
-                "simplewiki-openai-3072-normalized",
-                "sift-128-euclidean",
-                "deep-image-96-angular",
-                "chem",
-                "ht",
-                "imagenet-align-640-normalized",
+                 "fashion-mnist-784-euclidean",
+                 "glove-100-angular",
+                 "nytimes-256-angular",
+                 "gist-960-euclidean",
+                 "simplewiki-openai-3072-normalized",
+                 "sift-128-euclidean",
+                 "deep-image-96-angular",
+                 "chem",
+                 "ht",
+                "imagenet-clip-512-normalized",
                 "landmark-nomic-768-normalized",
                 "census",
                 "pamap2",
@@ -39,10 +39,10 @@ if __name__ == "__main__":
                 data = data[:1000]
                 
                 # Compute the Ɛ-HDBSCAN clustering
-                mst_approx, core_approx, _ = panna.EMST(data, epsilon=0.2, delta=0.001).find_mst_dbscan(k = 10)
+                mst_approx, core_approx, _ = panna.EMST(data, epsilon=0.2, delta=0.001).find_mst_dbscan(k = 5)
                 
                 # Compute exact HDBSCAN clustering
-                mst_exact, core_exact, _ = panna.EMST(data, epsilon=0, delta=0.001).find_mst_dbscan(k = 10)
+                mst_exact, core_exact, _ = panna.EMST(data, epsilon=0, delta=0.001).find_mst_dbscan(k = 5)
                 # exact = fast_hdbscan.HDBSCAN(min_samples=10)
                 # result = exact.fit_predict(data)
                 # mst_exact = exact._min_spanning_tree

@@ -13,13 +13,21 @@ if __name__ == "__main__":
         {
             "text.usetex": True,
             "text.latex.preamble": r"\usepackage{siunitx} \usepackage{sansmath} \sansmath",
+            "font.size": 11,
+            "axes.titlesize": 12,
+            "axes.labelsize": 11,
+            "xtick.labelsize": 10,
+            "ytick.labelsize": 10,
+            "legend.fontsize": 10,
+            "legend.title_fontsize": 11,
+            "figure.titlesize": 12,
         }
     )
 
     filepath_prefix = Path(__file__).resolve().parents[2]
     filepath = os.path.join(filepath_prefix, "results/weight_results.csv")
     df = pd.read_csv(filepath)
-    sns.set_theme(palette="muted", style="white", context="paper")
+    sns.set_theme(palette="muted", style="white", context="paper", font_scale=1.3)
 
     df["Dataset"] = df["Dataset"].str.split("-").str[0]
     df["Dataset"] = df["Dataset"].str.replace("datasets/", "")

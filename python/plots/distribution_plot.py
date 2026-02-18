@@ -20,7 +20,21 @@ def norm(a):
 
 if __name__ == "__main__":
     mpl.use("WebAgg")
-    sns.set_theme(palette="pastel")
+    mpl.rcParams.update(
+        {
+            "text.usetex": True,
+            "text.latex.preamble": r"\usepackage{siunitx} \usepackage{sansmath} \sansmath",
+            "font.size": 11,
+            "axes.titlesize": 12,
+            "axes.labelsize": 11,
+            "xtick.labelsize": 10,
+            "ytick.labelsize": 10,
+            "legend.fontsize": 10,
+            "legend.title_fontsize": 11,
+            "figure.titlesize": 12,
+        }
+    )
+    sns.set_theme(palette="pastel", font_scale=1.3)
     sample_size = 1500
     filepath_prefix = Path(__file__).resolve().parents[2]
     datasets = [
