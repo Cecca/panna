@@ -157,8 +157,7 @@ namespace panna {
             const size_t n = points.size();
 
             // Use a sample of the dataset to guess the quantization 
-            const size_t FIT_SAMPLE_SIZE = 5000;
-            const size_t s = std::min( FIT_SAMPLE_SIZE, n );
+            const size_t s = std::max<size_t>( 10000, n / 10 );
             Dataset sample = ( s < n ) ? sample_dataset( points, s ) : Dataset( points );
             const float sample_ratio = static_cast<float>( s ) / static_cast<float>( n );
             LOG_INFO("msg", "E2LSH fit sampling", "sample-size", s, "sample-ratio", sample_ratio);

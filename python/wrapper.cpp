@@ -380,7 +380,7 @@ nb::tuple emst_theory_of_computing( nb::ndarray<float, nb::c_contig>& data_in, n
     LOG_INFO("nrows", nrows, "dimensionality", dimensionality);
 
     using Distance = panna::EuclideanDistance;
-    using Hasher = panna::LatticeLSH<4, panna::EuclideanPoints, Distance>;
+    using Hasher = panna::E2LSH<12, panna::EuclideanPoints, Distance>; //panna::LatticeLSH<4, panna::EuclideanPoints, Distance>;
     Hasher::Builder builder( dimensionality );
 
     auto res =

@@ -13,17 +13,17 @@ if __name__ == "__main__":
         {
             "text.usetex": True,
             "text.latex.preamble": r"\usepackage{siunitx} \usepackage{sansmath} \sansmath",
-            "font.size": 11,
+            "font.size": 12,
             "axes.titlesize": 12,
             "axes.labelsize": 11,
             "xtick.labelsize": 10,
             "ytick.labelsize": 10,
-            "legend.fontsize": 13,
+            "legend.fontsize": 15,
             "legend.title_fontsize": 11,
             "figure.titlesize": 12,
         }
     )
-    sns.set_theme(palette="muted", style="white", font_scale=1.7)
+    sns.set_theme(palette="muted", style="white", font_scale=1.5)
 
     # Filepaths
     filepath_prefix = Path(__file__).resolve().parents[2]
@@ -44,7 +44,35 @@ if __name__ == "__main__":
 
     # DIMENSIONALITY SCALABILITY PLOT
     df = pd.read_csv(filepath_dim)
-    df["Algorithm"] = df["Algorithm"].str.replace("ɛ", r"$\varepsilon$", regex=False)
+
+    # Normalize algorithm names to canonical labels for consistent coloring across plots
+    def canonicalize(name):
+        s = str(name)
+        s_lower = s.lower()
+        if "mlpack" in s_lower:
+            return "mlpack-Boruvka"
+        if "tutte" in s_lower:
+            return "Tutte-Boruvka"
+        if "wang" in s_lower:
+            return "Wang-GFK"
+        if "toc" in s_lower or "kr" in s_lower:
+            return "ToC-Kr"
+        if "k+" in s_lower:
+            # epsilon variants
+            if "varepsilon" in s_lower or "ε" in s or "ɛ" in s_lower or "epsilon" in s_lower:
+                import re
+
+                m = re.search(r"(\d+\.?\d*)", s)
+                if m:
+                    val = m.group(1)
+                    return f"K+ $\\varepsilon$ {val}"
+                return r"K+ $\varepsilon$ 0.1"
+            if "1 thread" in s_lower or "1thread" in s_lower:
+                return "K+ 1 thread"
+            return "K+"
+        return s
+
+    df["Algorithm"] = df["Algorithm"].apply(canonicalize)
 
     # Create a figure with an extra column for the legend
     fig = plt.figure(figsize=(11, 6))
@@ -53,6 +81,8 @@ if __name__ == "__main__":
     ax_leg = fig.add_subplot(gs[0, 1])
     ax_leg.axis("off")
 
+    # Only request hue entries for algorithms actually present in the dataframe
+    present_order = [k for k in color_mapping.keys() if k in df["Algorithm"].unique()]
     sns.lineplot(
         data=df,
         x="D",
@@ -61,10 +91,11 @@ if __name__ == "__main__":
         marker="o",
         ax=ax,
         palette=color_mapping,
+        hue_order=present_order,
         legend=True,
     )
 
-    plt.suptitle("Dimensionality Scalability")
+    plt.suptitle("Dimensionality Scalability", fontsize=16)
     plt.xlabel("Number of Dimensions (D)")
     plt.ylabel("Time (s)")
     ax.set_xscale("log")
@@ -82,12 +113,11 @@ if __name__ == "__main__":
     handles, labels = ax.get_legend_handles_labels()
     # Deactivate the legend in the main plot
     ax.legend_.remove()
-    ax_leg.legend(
+    leg = ax_leg.legend(
         handles,
         labels,
         loc="center left",
         frameon=False,
-        fontsize=9,
         title="Algorithm",
     )
 
@@ -98,7 +128,7 @@ if __name__ == "__main__":
 
     # LENGTH SCALABILITY PLOT
     df_length = pd.read_csv(filepath_len)
-    df_length["Algorithm"] = df_length["Algorithm"].str.replace("ɛ", r"$\varepsilon$", regex=False)
+    df_length["Algorithm"] = df_length["Algorithm"].apply(canonicalize)
     dimensions = sorted(df_length["D"].unique())
     timeout = 28800  # 8 hours
 
@@ -113,6 +143,8 @@ if __name__ == "__main__":
         axs.append(ax)
         subset = df_length[df_length["D"] == dim]
 
+        # For each subplot, only include hue entries for algorithms present in this subset
+        present_order_subset = [k for k in color_mapping.keys() if k in subset["Algorithm"].unique()]
         sns.lineplot(
             data=subset,
             x="n",
@@ -122,6 +154,7 @@ if __name__ == "__main__":
             ax=ax,
             errorbar=None,
             palette=color_mapping,
+            hue_order=present_order_subset,
             legend=False if i > 0 else True,
         )
 
@@ -158,7 +191,7 @@ if __name__ == "__main__":
     # Common labels
     fig.supylabel("Time (s)")
     fig.supxlabel("Number of Points (n)")
-    fig.suptitle("Length Scalability by Dimension")
+    fig.suptitle("Length Scalability by Dimension", fontsize=16)
 
     # Legend subplot
     ax_leg = fig.add_subplot(gs[:, 2])
@@ -166,12 +199,11 @@ if __name__ == "__main__":
     handles, labels = axs[0].get_legend_handles_labels()
     # Deactivate the legend in the main plot
     axs[0].legend_.remove()
-    ax_leg.legend(
+    leg = ax_leg.legend(
         handles,
         labels,
         loc="center left",
         frameon=False,
-        fontsize=9,
         title="Algorithm",
     )
 
