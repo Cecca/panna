@@ -1,4 +1,4 @@
-import pyhdbscan
+import fast_hdbscan
 import numpy as np
 from pathlib import Path
 from time import perf_counter
@@ -12,10 +12,10 @@ import panna
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run Wang-HDBSCAN (pyhdbscan) on a dataset")
+    parser = argparse.ArgumentParser(description="Run Tutte-Boruvka HDBSCAN on a dataset")
     parser.add_argument("--path", help="Dataset name to process (optional, runs all if omitted)")
     parser.add_argument(
-        "--min-pts", type=int, default=1, help="minPts for HDBSCAN (default: 10)"
+        "--min-samples", type=int, default=1, help="min_samples for HDBSCAN (default: 1)"
     )
     args = parser.parse_args()
 
@@ -48,21 +48,23 @@ if __name__ == "__main__":
             pca_dimensions=4 if "pamap2" in name.lower() else None,
             normalize=True if "chem" in name.lower() else False,
         )
-        data = np.array(data).astype(np.float32)[: len(data) // 100 * 25]  # Pick 10% of the data for testing
+        # Pick 25% of the data for testing
+        data = np.array(data).astype(np.float32)[: len(data) // 100 * 10]
 
-        print(f"Running Wang-HDBSCAN on {name} (n={data.shape[0]}, d={data.shape[1]})...")
-        start = perf_counter()
-        clusterer = pyhdbscan.HDBSCAN(data, minPts=args.min_pts)
-        elapsed_time = perf_counter() - start
+        print(f"Running Tutte-Boruvka HDBSCAN on {name} (n={data.shape[0]}, d={data.shape[1]})...")
+        start_time = perf_counter()
+        model = fast_hdbscan.HDBSCAN(min_samples=args.min_samples).fit(data)
+        end_time = perf_counter()
+        elapsed_time = end_time - start_time
 
         print(
             f"Finished dataset {name} | n={data.shape[0]} d={data.shape[1]} "
-            f"minPts={args.min_pts} | time={elapsed_time:.4f}s"
+            f"min_samples={args.min_samples} | time={elapsed_time:.4f}s"
         )
 
-        out_path = os.path.join(results_folder, "hdbscan_results_pyhdbscan.csv")
+        out_path = os.path.join(results_folder, "scalability_results_tutte.csv")
         with open(out_path, "a+") as f_out:
             f_out.write(
-                f"Wang-HDBSCAN, {data.shape[0]}, {name}, {args.min_pts}, {elapsed_time}\n"
+                f"Tutte-Boruvka, {data.shape[0]}, {name}, {args.min_samples}, {elapsed_time}\n"
             )
             f_out.flush()
