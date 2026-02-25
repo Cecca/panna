@@ -287,9 +287,8 @@ namespace panna {
             const float diameter = approximate_diameter<Distance>(points);
             LOG_INFO("diameter", diameter);
 
-            // --- Optimization 1: use a sample of the dataset for fitting ---
-            const size_t FIT_SAMPLE_SIZE = 5000;
-            const size_t s = std::min( FIT_SAMPLE_SIZE, n );
+            // Use a sample of the dataset for fitting
+            const size_t s = std::max<size_t>( 10000, n / 10 );
             Dataset sample = ( s < n ) ? sample_dataset( points, s ) : Dataset( points );
             const float sample_ratio = static_cast<float>( s ) / static_cast<float>( n );
             LOG_INFO("fit-sample-size", s, "sample-ratio", sample_ratio);

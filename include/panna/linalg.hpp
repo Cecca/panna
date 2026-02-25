@@ -221,27 +221,37 @@ namespace panna {
     float euclidean( EuclideanPointHandle a, EuclideanPointHandle b ) {
         expect( a.dimensions == b.dimensions );
 #ifdef __AVX2__
-        __m256 acc = _mm256_setzero_ps();
+        // Accumulate in double precision to avoid float32 rounding errors
+        // that can reorder nearly-equal edges and change the MST topology.
+        __m256d acc = _mm256_setzero_pd();
         size_t n = a.stride;
         for ( size_t i = 0; i < n; i += 8 ) {
             __m256 va = _mm256_load_ps( a.vector + i );
             __m256 vb = _mm256_load_ps( b.vector + i );
             __m256 diff = _mm256_sub_ps( va, vb );
-            acc = _mm256_fmadd_ps( diff, diff, acc );
+            // Convert lower 4 floats to double, square, accumulate
+            __m128 lo_f = _mm256_castps256_ps128( diff );
+            __m256d lo_d = _mm256_cvtps_pd( lo_f );
+            acc = _mm256_fmadd_pd( lo_d, lo_d, acc );
+            // Convert upper 4 floats to double, square, accumulate
+            __m128 hi_f = _mm256_extractf128_ps( diff, 1 );
+            __m256d hi_d = _mm256_cvtps_pd( hi_f );
+            acc = _mm256_fmadd_pd( hi_d, hi_d, acc );
         }
-        __m128 hi = _mm256_extractf128_ps( acc, 1 );
-        __m128 lo = _mm256_castps256_ps128( acc );
-        __m128 sum4 = _mm_add_ps( lo, hi );
-        sum4 = _mm_hadd_ps( sum4, sum4 );
-        sum4 = _mm_hadd_ps( sum4, sum4 );
-        return std::sqrt( _mm_cvtss_f32( sum4 ) );
+        // Horizontal sum of 4 doubles
+        __m128d hi2 = _mm256_extractf128_pd( acc, 1 );
+        __m128d lo2 = _mm256_castpd256_pd128( acc );
+        __m128d sum2 = _mm_add_pd( lo2, hi2 );
+        __m128d hi1 = _mm_unpackhi_pd( sum2, sum2 );
+        __m128d sum1 = _mm_add_sd( sum2, hi1 );
+        return static_cast<float>( std::sqrt( _mm_cvtsd_f64( sum1 ) ) );
 #else
-        float d = 0;
+        double d = 0.0;
         for (size_t i=0; i<a.dimensions; i++) {
-            float diff = a.vector[i] - b.vector[i];
+            double diff = static_cast<double>(a.vector[i]) - static_cast<double>(b.vector[i]);
             d += diff*diff;
         }
-        return std::sqrt(d);
+        return static_cast<float>(std::sqrt(d));
 #endif
     }
 
