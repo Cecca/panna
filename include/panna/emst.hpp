@@ -26,7 +26,7 @@ namespace panna {
     // 2: unrolled Euclidean distance
     // 1: collect additional metrics (memory index and execution profile)
     //    that are available through Python wrapper
-    const std::string EMST_VERSION = "3";
+    const std::string EMST_VERSION = "3s";
 
     struct StoppingConditionInfo {
         const float total_weight;

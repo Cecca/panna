@@ -427,10 +427,20 @@ namespace panna {
 
         std::array<std::pair<Iter, Iter>, 2> get_indices() const {
             auto ranges = get_ranges();
-            return {
-                std::make_pair( &indices.at(ranges[0].first), &indices.at(ranges[0].second) ),
-                std::make_pair( &indices.at(ranges[1].first), &indices.at(ranges[1].second) ),
+            // Use references instead of copies
+            auto ptr_at_or_end = [&]( size_t pos ) -> Iter {
+                expect( pos <= indices.size() );
+                if ( pos < indices.size() ) {
+                    return &indices.at( pos );
+                }
+                // One-past-end iterator without triggering at(size()) out_of_range.
+                return &indices.at( pos - 1 ) + 1;
             };
+            return {
+                std::make_pair( ptr_at_or_end( ranges[0].first ), ptr_at_or_end( ranges[0].second ) ),
+                std::make_pair( ptr_at_or_end( ranges[1].first ), ptr_at_or_end( ranges[1].second ) ),
+            };
+
         }
 
         // Fill the given output buffer, without changing its capacity.
