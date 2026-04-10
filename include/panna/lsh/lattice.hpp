@@ -428,7 +428,7 @@ namespace panna {
             };
 
             // TODO: make these configurable to handle different scenarios
-            const float threshold_low = std::sqrt(fit_n) / 2.0;
+            const float threshold_low = std::sqrt(fit_n)/2;
             const float threshold_high = fit_n * 2.0;
             LOG_INFO( "threshold-low", threshold_low, "threshold_high", threshold_high );
 

@@ -26,7 +26,7 @@ namespace panna {
     // 2: unrolled Euclidean distance
     // 1: collect additional metrics (memory index and execution profile)
     //    that are available through Python wrapper
-    const std::string EMST_VERSION = "3s";
+    const std::string EMST_VERSION = "3f";
 
     struct StoppingConditionInfo {
         const float total_weight;
@@ -1142,12 +1142,14 @@ namespace panna {
                 if (w > max) {max = w;}
                 if (w < min) {min= w;}
                 const float fp = table.fail_probability( w, i, j );
-                // LOG_INFO("logger", "stopping_condition", "w", w, "fp", fp, "cumulative-fp", prob + fp);
+                // Combine probabilities as independent failure events to avoid
+                // the overly conservative additive union bound.
+                const float combined_prob = 1.0f - ( 1.0f - prob ) * ( 1.0f - fp );
 
-                if ( prob + fp > delta ) {
+                if ( combined_prob > delta ) {
                     break;
                 }
-                prob += fp;
+                prob = combined_prob;
                 weight += w;
                 idx += 1;
             }
@@ -1190,10 +1192,13 @@ namespace panna {
                 // for (auto it=b_neighs.first; it != b_neighs.second; it++) {
                 //     cd_fp += table.fail_probability(it->first, i, j);
                 // }
-                if ( prob + fp + cd_fp > delta ) {
+                const float edge_fail_prob = std::clamp( fp + cd_fp, 0.0f, 1.0f );
+                const float combined_prob =
+                    1.0f - ( 1.0f - prob ) * ( 1.0f - edge_fail_prob );
+                if ( combined_prob > delta ) {
                     break;
                 }
-                prob += fp + cd_fp;
+                prob = combined_prob;
                 weight += w;
                 idx += 1;
             }

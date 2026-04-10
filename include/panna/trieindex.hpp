@@ -42,6 +42,8 @@ namespace panna {
         typename Hasher::Builder builder;
         // How to hash the points. Initialized upon the first call to "rebuild"
         std::optional<Hasher> hasher;
+        // Hasher used in the previous rehash round.
+        std::optional<Hasher> previous_hasher;
 
         size_t hashed_points = 0;
 
@@ -55,6 +57,7 @@ namespace panna {
             current_query( dimensions ),
             builder( builder ),
             hasher(),
+            previous_hasher(),
             hashed_points( 0 ) {
 
             static_assert( std::is_same<Hasher, typename Hasher::Builder::Output>::value );
@@ -204,6 +207,14 @@ namespace panna {
             return false;
         }
 
+        size_t num_previous_rehashes() const {
+            size_t rounds = 0;
+            for ( const auto& history : rehash_prefix_buckets ) {
+                rounds = std::max( rounds, history.size() );
+            }
+            return rounds;
+        }
+
     public:
 
         /// Rehash the index so that at the longest prefix there is a reasonable number of
@@ -212,6 +223,7 @@ namespace panna {
             Timer timer("reshashing");
             if ( hasher.has_value() ) {
                 record_current_prefix_buckets();
+                previous_hasher = hasher;
             }
             builder.fit(dataset, group_fun);
             hasher = builder.build( repetitions );
@@ -506,7 +518,29 @@ namespace panna {
         } // End search couples
 
         float fail_probability( float dist, size_t concat, size_t rep ) {
-            return failure_probability( *hasher, dist, concat, rep, lsh_maps.size() );
+            const float current_fp =
+                failure_probability( *hasher, dist, concat, rep, lsh_maps.size() );
+
+            if ( !previous_hasher.has_value() ) {
+                return current_fp;
+            }
+
+            // Hash-probability rule:
+            // total_visit_prob = current_visit_prob + previous_full_round_visit_prob,
+            // where the previous term is evaluated at prefix length 1 over all L repetitions.
+            const float current_visit_prob = 1.0f - current_fp;
+            const float previous_full_round_fp = std::clamp(
+                failure_probability(
+                    *previous_hasher, dist, 1, lsh_maps.size(), lsh_maps.size() ),
+                0.0f,
+                1.0f );
+            const float previous_visit_prob = 1.0f - previous_full_round_fp;
+            const float total_visit_prob = std::clamp(
+                current_visit_prob + previous_visit_prob,
+                0.0f,
+                1.0f );
+
+            return 1.0f - total_visit_prob;
         }
 
         // FIXME: I don't think this belongs here, form an API standpoint
