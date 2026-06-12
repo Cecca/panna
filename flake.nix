@@ -245,7 +245,7 @@
           ];
 
           shellHook = ''
-            export "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${libraryPath}"
+            #export "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${libraryPath}"
           '';
           NIX_ENFORCE_NO_NATIVE = false;
         };
