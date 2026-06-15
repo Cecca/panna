@@ -31,7 +31,7 @@ import gzip
 DATABASE_DIR = Path("results")
 DATABASE_FILE = DATABASE_DIR / "emst.json"
 LOCKFILE = DATABASE_DIR / "emst.lock"
-TIMEOUT_S = 5 * 3600 # 5 hours timeout
+TIMEOUT_S = 24 * 3600 # 24 hours timeout
 
 
 def get_git_version():
