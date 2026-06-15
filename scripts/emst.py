@@ -56,6 +56,8 @@ def get_version(algorithm: str):
         return dict(version=panna.EMST.version, git_version=get_git_version())
     elif algorithm == "tutte":
         return dict(version=version("fast_hdbscan"), git_version="")
+    elif algorithm == "pyhdbscan":
+        return dict(version=version("pyhdbscan"), git_version="")
     else:
         raise ValueError(f"unknown algorithm `{algorithm}`")
 
@@ -313,6 +315,21 @@ def _run_tutte(data, params):
     return res[0].astype(np.int64), None, dict()
 
 
+def _run_pyhdbscan(data, params):
+    import pyhdbscan
+
+    print("run pyhdbscan (Wang-GFK) algorithm")
+    min_pts = params.get("min_pts", 1)
+    # pyhdbscan returns a single-linkage dendrogram as an (n-1, 4) array: columns
+    # are [node, node, weight, size]. The weight column holds the (mutual
+    # reachability) MST edge weights, which for min_pts=1 coincide with the
+    # Euclidean EMST weights.
+    res = pyhdbscan.HDBSCAN(data, min_pts)
+    edges = res[:, :2].astype(np.int64)
+    weights = res[:, 2].astype(np.float64)
+    return edges, weights, dict()
+
+
 def _run_ours_with_options(data, params, cluster, cluster_k):
     return _run_ours(data, params, cluster=cluster, cluster_k=cluster_k)
 
@@ -413,7 +430,8 @@ def run_single(
 
     runners = {
         "k+": _run_ours_with_options,
-        "tutte": _run_tutte
+        "tutte": _run_tutte,
+        "pyhdbscan": _run_pyhdbscan,
     }
     if algorithm not in runners:
         raise ValueError(f"Unknown algorithm {algorithm}")
@@ -498,6 +516,13 @@ def run_experiments(datasets=None, cluster: bool = False, cluster_k: int = 5):
                     "tutte",
                     dataset,
                     tutte_params,
+                    sample_frac=sample_frac
+                )
+                pyhdbscan_params = {"min_pts": 5 if cluster else 1}
+                run_single(
+                    "pyhdbscan",
+                    dataset,
+                    pyhdbscan_params,
                     sample_frac=sample_frac
                 )
 
