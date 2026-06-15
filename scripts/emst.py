@@ -485,46 +485,59 @@ def run_single(
             fp.write(line + "\n")
 
 
-def run_experiments(datasets=None, cluster: bool = False, cluster_k: int = 5):
+ALGORITHMS = ["k+", "tutte", "pyhdbscan"]
+
+
+def run_experiments(
+    datasets=None,
+    algorithms=None,
+    cluster: bool = False,
+    cluster_k: int = 5,
+):
     if datasets is None:
         import panna.datasets
 
         datasets = panna.datasets.available_datasets()
+    if algorithms is None:
+        algorithms = ["k+"]
 
     for dataset in datasets:
         for sample_frac in [0.01, 0.1, 0.2, None]:
             print(f"Running experiments on {dataset} at sample fraction {sample_frac}")
-            for epsilon in [0.0, 0.1, 0.2, 0.5, 1.0]:
-                run_single(
-                    "k+",
-                    dataset,
-                    {
-                        "epsilon": epsilon,
-                        "delta": 0.1,
-                        "family": "lattice",
-                        "repetitions": 512,
-                    },
-                    sample_frac=sample_frac,
-                    emst_stats=epsilon == 0.0,
-                    cluster=cluster,
-                    cluster_k=cluster_k,
-                )
+            if "k+" in algorithms:
+                for epsilon in [0.0, 0.1, 0.2, 0.5, 1.0]:
+                    run_single(
+                        "k+",
+                        dataset,
+                        {
+                            "epsilon": epsilon,
+                            "delta": 0.1,
+                            "family": "lattice",
+                            "repetitions": 512,
+                        },
+                        sample_frac=sample_frac,
+                        emst_stats=epsilon == 0.0,
+                        cluster=cluster,
+                        cluster_k=cluster_k,
+                    )
 
             if sample_frac is not None:
-                tutte_params = {"min_samples": 5 if cluster else 1}
-                run_single(
-                    "tutte",
-                    dataset,
-                    tutte_params,
-                    sample_frac=sample_frac
-                )
-                pyhdbscan_params = {"min_pts": 5 if cluster else 1}
-                run_single(
-                    "pyhdbscan",
-                    dataset,
-                    pyhdbscan_params,
-                    sample_frac=sample_frac
-                )
+                if "tutte" in algorithms:
+                    tutte_params = {"min_samples": 5 if cluster else 1}
+                    run_single(
+                        "tutte",
+                        dataset,
+                        tutte_params,
+                        sample_frac=sample_frac
+                    )
+                if "pyhdbscan" in algorithms:
+                    pyhdbscan_params = {"min_pts": 5 if cluster else 1}
+                    run_single(
+                        "pyhdbscan",
+                        dataset,
+                        pyhdbscan_params,
+                        sample_frac=sample_frac
+                    )
 
 
 def merge_results(other_file: Path):
@@ -600,6 +613,12 @@ def main():
         help="Dataset to run on. If not provided, all available datasets are used.",
     )
     run_parser.add_argument(
+        "--algorithm",
+        choices=ALGORITHMS + ["all"],
+        default="k+",
+        help="Algorithm to run (default: k+, our own). Use 'all' to run every algorithm.",
+    )
+    run_parser.add_argument(
         "--cluster",
         action="store_true",
         help="Run the EMST clustering variant (uses find_mst_dbscan).",
@@ -632,7 +651,13 @@ def main():
             print(f"Running on specified datasets: {datasets_to_run}")
         else:
             print("Running on all available datasets.")
-        run_experiments(datasets_to_run, cluster=args.cluster, cluster_k=args.cluster_k)
+        algorithms = ALGORITHMS if args.algorithm == "all" else [args.algorithm]
+        run_experiments(
+            datasets_to_run,
+            algorithms=algorithms,
+            cluster=args.cluster,
+            cluster_k=args.cluster_k,
+        )
     elif args.command == "merge":
         merge_results(args.file)
     elif args.command == "convert":
