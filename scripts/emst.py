@@ -310,6 +310,8 @@ def _run_ours(data, params, cluster: bool = False, cluster_k: int = 5):
 
 
 def _run_tutte(data, params):
+    print("warmup")
+    res = fast_hdbscan.hdbscan.compute_minimum_spanning_tree(data[:10], **params)
     print("run tutte institute algorithm")
     res = fast_hdbscan.hdbscan.compute_minimum_spanning_tree(data, **params)
     return res[0].astype(np.int64), None, dict()
