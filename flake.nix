@@ -44,11 +44,19 @@
 
         fast-hdbscan = python.pkgs.buildPythonPackage rec {
           pname = "fast_hdbscan";
-          version = "0.2.2";
+          version = "0.3.2";
           src = python.pkgs.fetchPypi {
             inherit pname version;
-            hash = "sha256-6/2iCMhdM4FBzGyKa5XJ8vHqg9O5mC+YZLJdc7B9nMg=";
+            hash = "sha256-JI4JIC7aBNpLhN2BnePMcURpkSIFu0R61McTbbWA8gU=";
           };
+          # TODO: remove when we upgrade the flake
+          # the upstream pyproject.toml uses the PEP 639 SPDX string form
+          # (license = "BSD-2-Clause"), which the packaged setuptools rejects.
+          # Rewrite it to the legacy table form so the build succeeds.
+          postPatch = ''
+            substituteInPlace pyproject.toml \
+              --replace-fail 'license = "BSD-2-Clause"' 'license = {text = "BSD-2-Clause"}'
+          '';
           # do not run tests
           doCheck = false;
           # specific to buildPythonPackage, see its reference
@@ -56,6 +64,7 @@
           dependencies = with python.pkgs; [
             numba
             numpy
+            pynndescent
             scikit-learn
           ];
           build-system = with python.pkgs; [
