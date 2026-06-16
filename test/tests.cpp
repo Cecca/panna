@@ -8,6 +8,7 @@
 #include "panna/lsh/lattice.hpp"
 #include "trieindex_test.hpp"
 #include "emst_test.hpp"
+#include "emst_phase0_test.hpp"
 #include "prefixmap_test.hpp"
 #include "channel_test.hpp"
 
