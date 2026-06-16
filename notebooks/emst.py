@@ -56,13 +56,14 @@ def _(mo):
 
 
 @app.cell
-def _(excluded_shas, node_name, pl, sizes):
+def _(cs, excluded_shas, node_name, pl, sizes):
     baselines = (
         pl.read_ndjson("results/emst.json", infer_schema_length=None)
         .filter(pl.col("algorithm").str.contains("k+").not_())
         .filter(pl.col("dataset_sample_frac").is_null())
         .filter(pl.col("machine").struct.field("node_name") == node_name)
         .filter(pl.col("dataset_sha").is_in(excluded_shas).not_())
+        .filter(pl.col("version") == "0.3.2")
         .with_columns(
             pl.col("dataset").str.replace(
                 "-[0-9]+-(euclidean|angular|normalized)", ""
@@ -73,7 +74,8 @@ def _(excluded_shas, node_name, pl, sizes):
             normalized_runtime=pl.col("running_time_s")
             / (pl.col("n") * pl.col("d"))
         )
-        .select("dataset", "algorithm", "running_time_s", "normalized_runtime", "memory_kb")
+        .select("dataset", "algorithm", "running_time_s", "memory_kb", "emst_weight")
+        .with_columns(cs.numeric().round(2))
         .group_by("dataset", "algorithm")
         .agg(pl.col("*").mean())
         .sort("running_time_s")
@@ -81,6 +83,15 @@ def _(excluded_shas, node_name, pl, sizes):
     )
     baselines
     return (baselines,)
+
+
+@app.cell
+def _():
+    new = 55855880
+    correct = 55845500
+    relerr = abs(new-correct) / correct
+    relerr
+    return
 
 
 @app.cell(hide_code=True)
@@ -150,19 +161,11 @@ def _(algo_name, full_results, pl):
 @app.cell
 def _(all_results, pl):
     exact_full = (
-        all_results
-        .filter(pl.col("parameters").struct.field("epsilon") == 0.0)
+        all_results.filter(pl.col("parameters").struct.field("epsilon") == 0.0)
         .filter(pl.col("dataset_sample_frac").is_null())
-        .select("dataset", 
-                "algorithm", 
-                pl.col("parameters")
-                    .struct.field("repetitions").alias("repetitions"), 
-                pl.col("running_time_s")
-                    .round(2)
-        )
-        .sort("dataset", "algorithm", "repetitions")
+        .select("dataset", pl.col("running_time_s").round(2), "emst_weight")
     )
-    exact_full.style
+    exact_full
     return
 
 
@@ -347,7 +350,7 @@ def _(approximate_full, baselines, cs):
             .tab_spanner(label="Baselines time (s)", columns=cs.exclude(our_cols, "dataset"))
             .cols_label_with(fn=lambda c: "$epsilon=" + c + "$", columns=our_cols)
         )
-    
+
         with open("notebooks/emst-epsilon-table.tex", "w") as fp:
             print(to_latex(approximate_time_tbl), file=fp)
         return approximate_time_tbl
@@ -373,7 +376,7 @@ def _(approximate_full, baselines, cs):
             # .tab_spanner(label="Baselines time (s)", columns=cs.exclude(our_cols, "dataset"))
             .cols_label_with(fn=lambda c: "epsilon=" + c, columns=our_cols)
         )
-    
+
         with open("notebooks/emst-epsilon-table.tex", "w") as fp:
             print(approximate_time_tbl.as_latex().replace(r"epsilon=", r"$\epsilon=$"), file=fp)
         return approximate_time_tbl
