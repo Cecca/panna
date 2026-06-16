@@ -68,8 +68,11 @@ if (NOT SKBUILD)
   target_link_libraries(tests PRIVATE Catch2::Catch2WithMain)
 
   find_package(HighFive)
-  add_executable(emst test/emst_test.cpp)
+  add_executable(emst examples/emst.cpp)
   target_link_libraries(emst PRIVATE HighFive)
+
+  add_executable(emst-test test/emst_test.cpp)
+  target_link_libraries(emst-test PRIVATE HighFive)
 
   add_executable(recall test/recall_test.cpp)
   target_link_libraries(recall PRIVATE  HighFive)
