@@ -195,8 +195,9 @@ namespace panna {
             // elements than the dimensions
             expect( vec.size() >= inner.dimensions );
             inner.into_vec(vec);
+            const float norm = std::sqrt( sq_norm );
             for (size_t i=0; i<inner.dimensions; i++) {
-                vec.at(i) *= sq_norm;
+                vec.at(i) *= norm;
             }
         }
 
