@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <iterator>
 #include <limits>
 #include <numeric>
 #include <omp.h>
+#include <optional>
 #include <random>
 #include <vector>
 
@@ -240,6 +242,19 @@ namespace panna {
 
         static constexpr float FIT_SAMPLE_RATIO = 0.2f;
 
+        // If PANNA_LATTICE_SCALING_FACTOR is set to a positive value, fitting is
+        // skipped and this value is used as the scaling factor.
+        static std::optional<float> scaling_factor_override() {
+            if ( const char* env = std::getenv( "PANNA_LATTICE_SCALING_FACTOR" ); env != nullptr ) {
+                char* end = nullptr;
+                const float parsed = std::strtof( env, &end );
+                if ( end != env && *end == '\0' && parsed > 0.0f ) {
+                    return parsed;
+                }
+            }
+            return std::nullopt;
+        }
+
         static std::vector<uint32_t> sample_fit_indices( size_t n ) {
             expect( n > 0 );
             const size_t sample_size = std::max<size_t>( 1, static_cast<size_t>( std::ceil( n * FIT_SAMPLE_RATIO ) ) );
@@ -305,6 +320,12 @@ namespace panna {
             }
             if ( points.size() == 0 ) {
                 throw std::invalid_argument( "cannot fit hash builder on an empty dataset" );
+            }
+            if ( const auto override = scaling_factor_override() ) {
+                offset = mean_point( points );
+                scaling_factor = *override;
+                LOG_INFO( "scaling-factor", scaling_factor, "source", "env-override" );
+                return;
             }
             const size_t fit_n = points.size();
             const auto sampled_indices = sample_fit_indices( fit_n );
@@ -373,6 +394,13 @@ namespace panna {
             scaling_factor = 0.0;
             if ( points.size() == 0 ) {
                 throw std::invalid_argument( "cannot fit hash builder on an empty dataset" );
+            }
+            if ( const auto override = scaling_factor_override() ) {
+                offset = mean_point( points );
+                scaling_factor = *override;
+                LOG_INFO( "scaling-factor", scaling_factor, "source", "env-override" );
+                expect( scaling_factor > 0.0f );
+                return;
             }
             const size_t fit_n = points.size();
             const auto sampled_indices = sample_fit_indices( fit_n );
