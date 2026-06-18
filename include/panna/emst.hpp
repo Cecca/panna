@@ -23,6 +23,7 @@ namespace panna {
     // the underlying algorithm/implementation
     //
     // Changelog:
+    // 6: optimize the stopping condition
     // 5: remove the accumulation of the minimum edge between components,
     //    as it scales quadratically with the number of components
     // 4: hash ancestor data structure, moved the connected components filter
@@ -31,7 +32,7 @@ namespace panna {
     // 2: unrolled Euclidean distance computation
     // 1: collect additional metrics (memory index and execution profile)
     //    that are available through Python wrapper
-    const std::string EMST_VERSION = "5";
+    const std::string EMST_VERSION = "6";
 
     struct StoppingConditionInfo {
         const float total_weight;
@@ -972,8 +973,8 @@ namespace panna {
                         // clang-format on
 
                         if ( tree.size() == num_data - 1 ) {
-                            StoppingConditionInfo stop = stopping_condition(
-                                tree, prefix, completed_repetitions, core_distances );
+                            StoppingConditionInfo stop =
+                                stopping_condition( tree, prefix, completed_repetitions );
                             float weight_lower_bound =
                                 stop.confirmed_weight +
                                 stop.edges_to_confirm * stop.heaviest_confirmed_edge;
@@ -981,14 +982,14 @@ namespace panna {
                             bool should_stop =
                                 stop.total_weight <= ( 1 + epsilon ) * weight_lower_bound;
                             // clang-format off
-                        LOG_INFO( "logger", "collector",
-                                  "stop.total_weight", stop.total_weight,
-                                  "stop.confirmed_weight", stop.confirmed_weight,
-                                  "stop.heaviest_confirmed_edge", stop.heaviest_confirmed_edge,
-                                  "stop.edges_to_confirm", stop.edges_to_confirm,
-                                  "heaviest_edge", tree.at(num_data-2).weight,
-                                  "weight_lower_bound", weight_lower_bound,
-                                  "should_stop", should_stop );
+                            LOG_INFO( "logger", "collector",
+                                      "stop.total_weight", stop.total_weight,
+                                      "stop.confirmed_weight", stop.confirmed_weight,
+                                      "stop.heaviest_confirmed_edge", stop.heaviest_confirmed_edge,
+                                      "stop.edges_to_confirm", stop.edges_to_confirm,
+                                      "heaviest_edge", tree.at(num_data-2).weight,
+                                      "weight_lower_bound", weight_lower_bound,
+                                      "should_stop", should_stop );
                             // clang-format on
                             max_weight = core_distances.mutual_reachability_distance( tree.back() );
                             LOG_INFO( "logger", "collector", "max-weight", max_weight.load() );
@@ -1178,69 +1179,17 @@ namespace panna {
             // updates.erase(erase_from, updates.end());
         }
 
-        StoppingConditionInfo stopping_condition( std::vector<Edge> tree, size_t i, size_t j ) {
-            float prob = 0.0f;
-            float weight = 0.0f;
-            size_t idx = 0;
-            float min = std::numeric_limits<float>::infinity();
-            float max = 0.0;
-            while ( idx < tree.size() ) {
-                const float w = tree.at(idx).weight;
-                if (w > max) {max = w;}
-                if (w < min) {min= w;}
-                const float fp = table.fail_probability( w, i, j );
-                // LOG_INFO("logger", "stopping_condition", "w", w, "fp", fp, "cumulative-fp", prob + fp);
-
-                if ( prob + fp > delta ) {
-                    break;
-                }
-                prob += fp;
-                weight += w;
-                idx += 1;
-            }
-
-            size_t edges_to_confirm = tree.size() - idx;
-
-            float total_weight = weight;
-            for (size_t jj=idx; jj<tree.size(); jj++) {
-                float w =  tree.at(jj).weight ;
-                if (w > max) {max = w;}
-                if (w < min) {min= w;}
-                total_weight += w;
-            }
-            LOG_INFO("minimum-weight", min, "maximum-weight", max);
-
-            return StoppingConditionInfo{ .total_weight = total_weight,
-                                          .confirmed_weight = weight,
-                                          .heaviest_confirmed_edge =
-                                              ( idx > 0 ) ?  tree.at(idx - 1).weight  : 0.0f,
-                                          .edges_to_confirm = edges_to_confirm,
-                                          .confirmed_edges = idx };
-        }
-
-        StoppingConditionInfo stopping_condition( std::vector<Edge> tree,
-                              size_t i,
-                              size_t j,
-                              [[maybe_unused]] const CoreDistances& core_distances ) {
-            float prob = 0.0f;
+        StoppingConditionInfo
+        stopping_condition( const std::vector<Edge>& tree, size_t i, size_t j ) {
+            const float confirmed_distance =
+                table.distance_at_failure_probability( delta / ( num_data - 1 ), i, j );
             float weight = 0.0f;
             size_t idx = 0;
             while ( idx < tree.size() ) {
                 const float w = tree.at(idx).weight;
-                const float fp = table.fail_probability( w, i, j );
-                float cd_fp = 0.0;
-                // auto a_neighs = core_distances.neighbors_view( tree.at( idx ).a );
-                // for (auto it=a_neighs.first; it != a_neighs.second; it++) {
-                //     cd_fp += table.fail_probability(it->first, i, j);
-                // }
-                // auto b_neighs = core_distances.neighbors_view( tree.at( idx ).b );
-                // for (auto it=b_neighs.first; it != b_neighs.second; it++) {
-                //     cd_fp += table.fail_probability(it->first, i, j);
-                // }
-                if ( prob + fp + cd_fp > delta ) {
+                if ( w > confirmed_distance ) {
                     break;
                 }
-                prob += fp + cd_fp;
                 weight += w;
                 idx += 1;
             }
@@ -1260,6 +1209,7 @@ namespace panna {
                                           .edges_to_confirm = edges_to_confirm,
                                           .confirmed_edges = idx };
         }
+
         /// @brief Clear the data structures from previous runs
         void clear() {
             distances_computed = 0;

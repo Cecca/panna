@@ -601,7 +601,7 @@ namespace panna {
             // 1)).second << std::endl;
         } // End search couples
 
-        float fail_probability( float dist, size_t concat, size_t rep ) {
+        float fail_probability( float dist, size_t concat, size_t rep ) const {
             const float current_cycle_failure =
                 failure_probability( *hasher, dist, concat, rep, lsh_maps.size() );
 
@@ -620,6 +620,63 @@ namespace panna {
             }
 
             return current_cycle_failure * history_failure;
+        }
+
+        /// Returns the largest distance that attains the given failure probability
+        /// at the given concatenations and repetitions.
+        float distance_at_failure_probability( float delta, size_t concat, size_t rep ) const {
+            expect( hasher );
+
+            // The failure probability is monotonically non-decreasing in the distance:
+            // farther pairs have a smaller collision probability and are therefore more
+            // likely to be missed. We binary-search for the largest distance whose
+            // failure probability (combined across all rehash cycles, exactly as in
+            // fail_probability) does not exceed delta.
+            auto fp_at = [&]( float dist ) -> float {
+                return fail_probability(dist, concat, rep);
+            };
+
+            // A distance leaving the valid domain of the metric yields a non-finite
+            // failure probability; we treat such distances as unacceptable so the search
+            // stays within the bracket [0, valid).
+            auto acceptable = [&]( float dist ) -> bool {
+                const float fp = fp_at( dist );
+                return std::isfinite( fp ) && fp <= delta;
+            };
+
+            // Distance zero collides with probability one, so it never fails. If even
+            // that is not acceptable (e.g. delta < 0) there is nothing to return.
+            float lo = 0.0f;
+            if ( !acceptable( lo ) ) {
+                return lo;
+            }
+
+            // Grow an upper bound by doubling until its failure probability exceeds delta
+            // (or leaves the valid domain). The doubling cap keeps the loop finite.
+            float hi = 1.0f;
+            for ( size_t doublings = 0; doublings < 64 && acceptable( hi ); doublings++ ) {
+                lo = hi;
+                hi *= 2.0f;
+            }
+            if ( acceptable( hi ) ) {
+                // Even the largest probed distance stays below delta; return it as the
+                // best available lower bound.
+                return hi;
+            }
+
+            // Binary search maintaining the invariant: lo is acceptable, hi is not.
+            for ( size_t iter = 0; iter < 100; iter++ ) {
+                const float mid = 0.5f * ( lo + hi );
+                if ( mid <= lo || mid >= hi ) {
+                    break; // converged to the float resolution
+                }
+                if ( acceptable( mid ) ) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            return lo;
         }
 
         // FIXME: I don't think this belongs here, form an API standpoint

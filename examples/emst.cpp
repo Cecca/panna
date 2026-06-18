@@ -26,7 +26,7 @@ int main( int argc, char** argv ) {
 
     // Parameters for the LSH index used by the EMST construction
     const size_t rep = 1024;
-    using Dataset = NormedPoints;
+    using Dataset = EuclideanPoints;
     using Distance = EuclideanDistance;
     using Hasher = LatticeLSH<4, Dataset, Distance>;
 
@@ -36,9 +36,8 @@ int main( int argc, char** argv ) {
     std::cout << "loaded " << points.size() << " points from " << path << std::endl;
 
     const size_t dimensions = points[0].size();
-    EMST<Dataset, Hasher, Distance> tree( dimensions, rep, points, 0.01, epsilon );
-
     const auto start = std::chrono::steady_clock::now();
+    EMST<Dataset, Hasher, Distance> tree( dimensions, rep, points, 0.01, epsilon );
     const auto& [weight, emst] = tree.find_tree();
     const auto end = std::chrono::steady_clock::now();
     const double elapsed_s = std::chrono::duration<double>( end - start ).count();
