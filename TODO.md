@@ -27,22 +27,13 @@ completion edges in sorted order and merge instead of full re-sort; or maintain
 weight incrementally so the stopping check doesn't need a fully completed sorted
 tree.
 
-## 3. `expect()` never compiles out — guards O(n) checks in hot paths
-`include/panna/expect.hpp` is an unconditional `if + abort` (no `NDEBUG` gate).
-- `expect(std::is_sorted(...))` at the top of `kruskal_new_edges` and
-  `kruskal_merge` is a full O(n) scan on every batch callback / collected partial.
-- Per-edge `expect` calls in `update_tree` run in the inner loop.
-
-Gate `expect` behind `NDEBUG` (or a project debug flag) so release builds drop
-these. The `is_sorted` checks especially are pure overhead in production.
-
-## 4. `.at()` bounds-checking in inner loops
+## 3. `.at()` bounds-checking in inner loops
 The merge kernels (`kruskal_new_edges`, `kruskal_merge`) and
 `CoreDistances::do_update` / `core_distance` use `.at()` everywhere — the
 innermost loops over all candidate edges. Switch to `operator[]` / iterators
 (indices are already provably in range) to drop a branch per access.
 
-## 5. Heavy per-repetition deep copies
+## 4. Heavy per-repetition deep copies
 Each worker copies state out of the `Billboard` snapshot every repetition:
 - `worker_fun`: copies `local_tree`, `filter`, and a second DSU `dsu`.
 - `worker_fun_mutual_reachability`: copies the entire `CoreDistances`
@@ -52,7 +43,7 @@ Share the immutable snapshot read-only and only copy the mutable delta, or make
 `CoreDistances` cheap to snapshot (COW / `shared_ptr` to the neighbor array,
 since the read path doesn't mutate it).
 
-## 6. `update_tree` re-allocates and full-sorts from scratch
+## 5. `update_tree` re-allocates and full-sorts from scratch
 Builds a fresh `std::vector<MREdge> all`, pushes tree+updates, then `std::sort`s
 the whole thing and allocates a new DSU each call. Since `tree` is already
 (nearly) sorted, merging two sorted runs beats a full sort; the `all` buffer and
@@ -60,19 +51,12 @@ DSU could be reused across calls (thread-local scratch). The commented-out dead
 pruning block also suggests `updates` may accumulate duplicates over time (see
 the `OPTIMIZE` comment).
 
-## 7. `stopping_condition` by-value tree + repeated `fail_probability`
-Both overloads take `std::vector<Edge> tree` by value and recompute
-`table.fail_probability(w, i, j)` for the whole confirmed prefix on every call.
-Pass by `const&`, and consider memoizing / incrementalizing the cumulative
-fail-probability since edges are processed in sorted order.
-
 ---
 
-**Suggested order:** highest-leverage wins are #3 (trivial: gate `expect`),
-#2/#1 (restructure the serial collector so completion + sorting isn't redone per
-partial), and #5 (kill the `CoreDistances` copies in the MR path). Start by
+**Suggested order:** #2/#1 (restructure the serial collector so completion + sorting isn't redone per
+partial), and #4 (kill the `CoreDistances` copies in the MR path). Start by
 profiling a representative run to confirm the collector-vs-worker split before
-the larger #1/#6 refactors.
+the larger #1/#5 refactors.
 
 # Algorithmic changes
 

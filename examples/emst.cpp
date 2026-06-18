@@ -1,3 +1,5 @@
+#include "panna/emst.hpp"
+
 #include <highfive/H5Easy.hpp>
 
 #include <chrono>
@@ -6,7 +8,6 @@
 
 #include "panna/data.hpp"
 #include "panna/distance.hpp"
-#include "panna/emst.hpp"
 #include "panna/logging.hpp"
 #include "panna/lsh/lattice.hpp"
 #include "panna/rand.hpp"
@@ -15,8 +16,7 @@ using namespace panna;
 
 int main( int argc, char** argv ) {
     if ( argc < 2 ) {
-        std::cerr << "usage: " << argv[0] << " <dataset.hdf5> [epsilon]"
-                  << std::endl;
+        std::cerr << "usage: " << argv[0] << " <dataset.hdf5> [epsilon]" << std::endl;
         return 1;
     }
     const std::string path( argv[1] );
