@@ -20,6 +20,7 @@
 #include "panna/lsh/lattice_probabilities.hpp"
 #include "panna/prefixmap.hpp"
 #include "panna/rand.hpp"
+
 namespace panna {
 
     template <size_t LATTICE_DIMENSIONS>
@@ -155,11 +156,23 @@ namespace panna {
             random_dots( std::max( dimensions, repetitions * K * LATTICE_DIMENSIONS ) ),
             corrections(),
             projection_bias() {
-            for ( size_t vec_idx = 0; vec_idx < repetitions * K * LATTICE_DIMENSIONS; vec_idx++ ) {
-                std::vector<float> dir = sample_random_normal_vector( dimensions, rng );
-                rescale( dir, 1.0 / std::sqrt( LATTICE_DIMENSIONS ) );
-                float offset = sample_random_01(rng);
-                float correction = dot_product(dir, data_offset) / scaling_factor;
+
+            const size_t num_projections = repetitions * K * LATTICE_DIMENSIONS;
+            offsets.reserve( num_projections );
+            corrections.reserve( num_projections );
+            projection_bias.reserve( num_projections );
+
+            // Project the data offset through the very same random directions that
+            // `random_dots` applies at hash time.
+            std::vector<float> offset_projection = random_dots.allocate_scratch();
+            for ( size_t i = 0; i < dimensions && i < data_offset.size(); i++ ) {
+                offset_projection.at( i ) = data_offset.at( i );
+            }
+            random_dots.compute( offset_projection, 1.0 / std::sqrt( LATTICE_DIMENSIONS ) );
+
+            for ( size_t idx = 0; idx < num_projections; idx++ ) {
+                const float offset = sample_random_01( rng );
+                const float correction = offset_projection.at( idx ) / scaling_factor;
                 offsets.push_back( offset );
                 corrections.push_back( correction );
                 projection_bias.push_back( offset - correction );

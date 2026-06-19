@@ -77,7 +77,7 @@ namespace panna::lattice_lsh {{
     static const float PROBABILITIES[] = {{)", GIT_COMMIT_HASH, std::ctime(&timestamp), step, max_distance, samples) << std::endl;
 
     for (float p : probabilities) {
-        output << std::format("        {},", p) << std::endl;
+        output << std::format("        {:.9f},", p) << std::endl;
     }
 
     output << "    };" << std::endl
