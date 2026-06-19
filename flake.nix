@@ -26,14 +26,21 @@
       system: let
         pkgs = import nixpkgs {inherit system;};
         hl-bin = hl.packages.${system}.default;
-        # get a python build with optimizations enabled, following
-        # this suggestion: https://discourse.nixos.org/t/why-is-the-nix-compiled-python-slower/18717/9
-        python = pkgs.python312;
-        # .override {
-        #   enableOptimizations = true;
-        #   reproducibleBuild = false;
-        #   self = python;
-        # };
+        python = pkgs.python312.override {
+          # make the override recursive so `python.pkgs` / `python.withPackages`
+          # use the patched package set below.
+          self = python;
+          packageOverrides = pyfinal: pyprev: {
+            # Patched pynndescent that counts the number of metric distance
+            # evaluations performed during NNDescent graph construction and
+            # querying (this is the subroutine fast_hdbscan uses for
+            # non-euclidean / high-dimensional metrics). The patch exposes
+            # `pynndescent.distance_count()` and `pynndescent.reset_distance_count()`.
+            pynndescent = pyprev.pynndescent.overridePythonAttrs (old: {
+              patches = (old.patches or []) ++ [./pynndescent-count-distances.patch];
+            });
+          };
+        };
 
         libraryPath = with pkgs;
           lib.makeLibraryPath [

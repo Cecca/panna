@@ -1,0 +1,97 @@
+--- a/pynndescent/__init__.py
++++ b/pynndescent/__init__.py
+@@ -2,7 +2,12 @@
+ 
+ import numba
+ 
+-from .pynndescent_ import NNDescent, PyNNDescentTransformer
++from .pynndescent_ import (
++    NNDescent,
++    PyNNDescentTransformer,
++    distance_count,
++    reset_distance_count,
++)
+ 
+ if sys.version_info[:2] >= (3, 8):
+     import importlib.metadata as importlib_metadata
+--- a/pynndescent/pynndescent_.py
++++ b/pynndescent/pynndescent_.py
+@@ -23,6 +23,62 @@
+ import pynndescent.sparse_nndescent as sparse_nnd
+ import pynndescent.distances as pynnd_dist
+ 
++# ---------------------------------------------------------------------------
++# Distance-computation counting (local patch).
++#
++# Wraps the metric distance function so that every metric evaluation performed
++# by NNDescent (both graph construction and querying) is counted.  Counting is
++# thread-safe: each numba worker thread increments its own slot of a small
++# ctypes buffer, and the slots are summed when read.  Inspect the count via
++# ``pynndescent.distance_count()`` and clear it with
++# ``pynndescent.reset_distance_count()``.
++# ---------------------------------------------------------------------------
++import ctypes as _ctypes
++from numba import types as _nb_types
++from numba.extending import intrinsic as _intrinsic
++from numba.core import cgutils as _cgutils
++
++
++@_intrinsic
++def _address_as_void_pointer(typingctx, src):
++    """Reinterpret a raw integer address as a numba void pointer."""
++    sig = _nb_types.voidptr(src)
++
++    def codegen(cgctx, builder, sig, args):
++        return builder.inttoptr(args[0], _cgutils.voidptr_t)
++
++    return sig, codegen
++
++
++_DIST_COUNT_NTHREADS = numba.config.NUMBA_NUM_THREADS
++_dist_count_buffer = (_ctypes.c_int64 * _DIST_COUNT_NTHREADS)()
++_dist_count_addr = _ctypes.addressof(_dist_count_buffer)
++
++
++def reset_distance_count():
++    """Reset the global distance-computation counter to zero."""
++    for _i in range(_DIST_COUNT_NTHREADS):
++        _dist_count_buffer[_i] = 0
++
++
++def distance_count():
++    """Return the number of metric distance evaluations counted so far."""
++    return int(sum(_dist_count_buffer))
++
++
++def _wrap_distance_counting(distance_func):
++    """Wrap a 2-argument njit distance function so each call is counted."""
++    _addr = _dist_count_addr
++    _n = _DIST_COUNT_NTHREADS
++
++    @numba.njit()
++    def _counted_distance_func(x, y):
++        _slots = numba.carray(_address_as_void_pointer(_addr), _n, dtype=np.int64)
++        _slots[numba.get_thread_id()] += 1
++        return distance_func(x, y)
++
++    return _counted_distance_func
++
+ from pynndescent.utils import (
+     tau_rand_int,
+     tau_rand,
+@@ -969,7 +1025,14 @@
+             self._distance_func = _partial_dist_func
+         else:
+             self._distance_func = _distance_func
+-            
++
++        # Local patch: count every metric distance evaluation.  Bit-packed
++        # metrics (bit_hamming/bit_jaccard) operate on uint8 data through a
++        # specialized query path that this generic wrapper cannot represent,
++        # so they are left unwrapped (fast_hdbscan never uses them).
++        if self.metric not in ("bit_hamming", "bit_jaccard"):
++            self._distance_func = _wrap_distance_counting(self._distance_func)
++
+     def __getstate__(self):
+         if not hasattr(self, "_search_graph"):
+             self._init_search_graph()
