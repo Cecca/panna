@@ -1,0 +1,65 @@
+--- a/fast_hdbscan/hdbscan.py
++++ b/fast_hdbscan/hdbscan.py
+@@ -212,6 +212,7 @@
+     validate_cannot_link=True,
+     cannot_link_groups=None,
+     metric_kwds=None,
++    exact=False,
+ ):
+     """
+     Run the full HDBSCAN pipeline: MST construction, condensed tree
+@@ -280,6 +281,7 @@
+         validate_cannot_link=validate_cannot_link,
+         cannot_link_groups=cannot_link_groups,
+         metric_kwds=metric_kwds,
++        exact=exact,
+     )
+ 
+     return (
+@@ -313,6 +315,7 @@
+     validate_cannot_link=True,
+     cannot_link_groups=None,
+     metric_kwds=None,
++    exact=False,
+ ):
+     """
+     Compute the minimum spanning tree for HDBSCAN.
+@@ -361,6 +364,13 @@
+         ``cannot_link``.
+     metric_kwds : dict or None
+         Additional keyword arguments for the distance metric (pynndescent only).
++    exact : bool, default=False
++        If True, use the exact MST computation and never fall back to the
++        approximate pynndescent KNN-graph path.  This only affects
++        high-dimensional euclidean data (``data.shape[1] > 30``), which would
++        otherwise be routed through the approximate nndescent path for speed;
++        with ``exact=True`` it is computed exactly via the KD-tree.  Non-euclidean
++        metrics have no exact implementation and still require pynndescent.
+ 
+     Returns
+     -------
+@@ -410,7 +420,7 @@
+             return compute_mst_from_precomputed_sparse(data, min_samples)
+ 
+     if metric not in ("euclidean", "precomputed") or (
+-        data.shape[1] > 30 and sample_weights is None
++        not exact and data.shape[1] > 30 and sample_weights is None
+     ):
+         if sample_weights is not None:
+             raise NotImplementedError(
+@@ -628,6 +638,7 @@
+         validate_cannot_link=True,
+         cannot_link_groups=None,
+         metric_kwds=None,
++        exact=False,
+         # Removed **kwargs to comply with scikit-learn's API requirements
+     ):
+         self.min_cluster_size = min_cluster_size
+@@ -647,6 +658,7 @@
+         self.validate_cannot_link = validate_cannot_link
+         self.cannot_link_groups = cannot_link_groups
+         self.metric_kwds = metric_kwds
++        self.exact = exact
+ 
+     def fit(self, X, y=None, sample_weight=None, **fit_params):
+ 

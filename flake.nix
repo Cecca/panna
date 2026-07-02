@@ -64,6 +64,11 @@
             substituteInPlace pyproject.toml \
               --replace-fail 'license = "BSD-2-Clause"' 'license = {text = "BSD-2-Clause"}'
           '';
+          # Local patch: add an `exact` boolean parameter (default False) to
+          # `compute_minimum_spanning_tree`. When True it forces the exact
+          # KD-tree MST for high-dimensional euclidean data instead of the
+          # newer, approximate pynndescent (NNDescent) path.
+          patches = [./fast-hdbscan-exact-mst.patch];
           # do not run tests
           doCheck = false;
           # specific to buildPythonPackage, see its reference
