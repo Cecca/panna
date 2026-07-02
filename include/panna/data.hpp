@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <limits>
 #include <omp.h>
 #include <random>
 #include <stdexcept>
@@ -546,6 +547,77 @@ namespace panna {
         }
 
         return maxdist;
+    }
+
+    //! Gonzalez's greedy k-center algorithm (farthest-first traversal).
+    //! Returns a dataset holding the k centers along with the radius of
+    //! the clustering, i.e. the maximum distance of any point from its
+    //! closest center. The result is a 2-approximation to the optimal
+    //! k-center clustering when `Distance` is a metric. Runs in O(n*k)
+    //! distance computations, parallelized over the points of the input
+    //! dataset.
+    template <typename Distance, typename Dataset>
+    std::pair<Dataset, float> kcenter( const Dataset& dataset, size_t k ) {
+        const size_t n = dataset.size();
+        expect( n > 0 );
+        k = std::min( k, n );
+
+        std::vector<size_t> center_indices;
+        center_indices.reserve( k );
+
+        // distance of each point from its closest center so far
+        std::vector<float> min_dist( n, std::numeric_limits<float>::infinity() );
+
+        std::uniform_int_distribution<size_t> random_id( 0, n - 1 );
+        size_t next_center = random_id( get_global_rng() );
+        float radius = 0.0;
+
+        for ( size_t iter = 0; iter < k; iter++ ) {
+            const size_t c = next_center;
+            center_indices.push_back( c );
+            const auto center = dataset[c];
+            float* const dists = min_dist.data();
+
+            float maxdist = -1.0;
+            size_t maxdist_idx = c;
+
+#pragma omp parallel
+            {
+                float private_maxdist = -1.0;
+                size_t private_maxdist_idx = c;
+#pragma omp for schedule( static ) nowait
+                for ( size_t i = 0; i < n; i++ ) {
+                    const float d = Distance::compute( center, dataset[i] );
+                    if ( d < dists[i] ) {
+                        dists[i] = d;
+                    }
+                    if ( dists[i] > private_maxdist ) {
+                        private_maxdist = dists[i];
+                        private_maxdist_idx = i;
+                    }
+                }
+#pragma omp critical
+                {
+                    if ( private_maxdist > maxdist ) {
+                        maxdist = private_maxdist;
+                        maxdist_idx = private_maxdist_idx;
+                    }
+                }
+            }
+
+            next_center = maxdist_idx;
+            // after the last pass this is the distance of the farthest
+            // point from its closest center, i.e. the clustering radius
+            radius = maxdist;
+        }
+
+        Dataset centers( dataset.get_dimensions() );
+        std::vector<float> buffer( dataset.get_dimensions() );
+        for ( size_t idx : center_indices ) {
+            dataset[idx].into_vec( buffer );
+            centers.push_back( buffer.begin(), buffer.end() );
+        }
+        return { centers, radius };
     }
 
     template <typename Distance, typename Dataset>

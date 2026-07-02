@@ -899,6 +899,7 @@ namespace panna {
                                 eval = &state.completed;
                             }
 
+                            // FIXME: redundant, since we completed the tree arbitrarily
                             if ( eval->size() == num_data - 1 ) {
                                 StoppingConditionInfo stop =
                                     stopping_condition( *eval, prefix, completed_repetitions );

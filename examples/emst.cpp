@@ -1,4 +1,3 @@
-#define EXPECT_ACTIVE
 #include "panna/emst.hpp"
 
 #include <highfive/H5Easy.hpp>
