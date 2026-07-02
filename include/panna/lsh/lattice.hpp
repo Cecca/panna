@@ -347,8 +347,8 @@ namespace panna {
             const auto [centers, radius] =
                 kcenter<Distance>( points, clustering_size );
             const auto [weight, edges] = exact_emst<Dataset, Distance>(centers);
-            const float heaviest = edges.back().weight + 2*radius;
-            LOG_INFO("clustering-size", clustering_size, "heaviest-edge", edges.back().weight, "radius", radius, "upper-bound", heaviest);
+            const float clustering_upper_bound = std::max(edges.back().weight, radius);
+            LOG_INFO("clustering-size", clustering_size, "heaviest-edge", edges.back().weight, "radius", radius, "upper-bound", clustering_upper_bound);
 
             const auto rand_tree = random_emst<Dataset, Distance>( points );
             const float random_upper_bound = rand_tree.back().weight;
@@ -405,7 +405,7 @@ namespace panna {
                 return high;
             };
 
-            scaling_factor = std::min( find_scale( random_upper_bound ), find_scale( heaviest ) );
+            scaling_factor = std::min( find_scale( random_upper_bound ), find_scale( clustering_upper_bound ) );
 
             LOG_INFO("scaling-factor", scaling_factor);
             expect( scaling_factor > 0.0f );

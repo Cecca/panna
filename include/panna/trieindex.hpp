@@ -245,7 +245,7 @@ namespace panna {
             if ( !hasher.has_value() ) {
                 // FIXME: this initialization is not very flexible, find a way
                 // to have the delta value get till here
-                builder.fit( dataset, repetitions, 0.1 );
+                builder.fit( dataset, repetitions, 0.1/dataset.size() );
                 hasher = builder.build( repetitions );
             }
 
