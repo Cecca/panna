@@ -34,6 +34,29 @@ namespace panna {
         REQUIRE( decoded == expected );
     }
 
+    TEST_CASE( "Lattice fast decoding equivalence" ) {
+        panna::seed_global_rng( 1234 );
+        const size_t num_inputs = 100000;
+        for ( size_t i = 0; i < num_inputs; i++ ) {
+            // spread the inputs over a few scales to exercise both cosets
+            const float scale = std::pow( 10.0f, static_cast<float>( i % 4 ) - 1.0f );
+            auto v = sample_random_normal_vector( 8 );
+            std::array<float, 8> x;
+            for ( size_t dim = 0; dim < 8; dim++ ) {
+                x[dim] = v[dim] * scale;
+            }
+
+            auto reference_input = x;
+            auto decoded = decode_e8( reference_input );
+            const int64_t expected = to_int64( to_integer_coords( decoded ) );
+
+            REQUIRE( decode_e8_code( x.data() ) == expected );
+#ifdef __AVX2__
+            REQUIRE( decode_e8_code( _mm256_loadu_ps( x.data() ) ) == expected );
+#endif
+        }
+    }
+
     TEST_CASE( "LatticeLSH builder" ) {
         using HashFamily = LatticeLSH<1, EuclideanPoints, EuclideanDistance>;
 
@@ -46,7 +69,7 @@ namespace panna {
         }
 
         HashFamily::Builder builder(dimensions);
-        builder.fit(pts);
+        builder.fit(pts, 4, 0.1f);
         HashFamily lsh = builder.build(4);
     }
 

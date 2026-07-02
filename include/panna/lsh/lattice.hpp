@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdlib>
 #include <iterator>
@@ -10,6 +11,10 @@
 #include <optional>
 #include <random>
 #include <vector>
+
+#if defined( __AVX2__ ) || defined( __AVX__ )
+    #include <immintrin.h>
+#endif
 
 #include "panna/data.hpp"
 #include "panna/distance.hpp"
@@ -106,6 +111,136 @@ namespace panna {
         }
         return out;
     }
+
+    // Decode `x` (already translated by `offset`) to the nearest point of the
+    // corresponding coset of D8, producing the squared distance and the packed
+    // integer code directly. `coset_one` is 1 for the D8+1/2 coset (offset
+    // -0.5), where the decoded coordinates are r + 1/2, so the doubled integer
+    // coordinates are 2r + 1.
+    inline static void decode_d8_coset_scalar( const float* x,
+                                               float offset,
+                                               int32_t coset_one,
+                                               float& dist_out,
+                                               int64_t& code_out ) {
+        int32_t r[8];
+        float dist = 0.0f;
+        float max_diff = 0.0f;
+        float worst_diff = 0.0f;
+        size_t worst = 0;
+        int32_t rounded_sum = 0;
+        for ( size_t dim = 0; dim < 8; dim++ ) {
+            const float v = x[dim] + offset;
+            const float rf = std::rint( v );
+            const float diff = v - rf;
+            const float adiff = std::fabs( diff );
+            r[dim] = static_cast<int32_t>( rf );
+            rounded_sum += r[dim];
+            dist += diff * diff;
+            if ( adiff > max_diff ) {
+                max_diff = adiff;
+                worst_diff = diff;
+                worst = dim;
+            }
+        }
+        if ( rounded_sum & 1 ) {
+            // move the worst coordinate to its second-nearest integer: the
+            // error there goes from |diff| to 1 - |diff|
+            r[worst] += worst_diff >= 0.0f ? 1 : -1;
+            dist += 1.0f - 2.0f * max_diff;
+        }
+        int64_t code = 0;
+        for ( size_t dim = 0; dim < 8; dim++ ) {
+            const int32_t coord = 2 * r[dim] + coset_one;
+            code = ( code << 8 ) | ( coord & 0xFF );
+        }
+        dist_out = dist;
+        code_out = code;
+    }
+
+    // Decode `x` to the nearest point of the E8 lattice, returning the packed
+    // integer code (coordinates doubled so that D8+1/2 has integer
+    // coordinates, low 8 bits each, first coordinate in the most significant
+    // byte), equivalent to to_int64(to_integer_coords(decode_e8(x))).
+    inline static int64_t decode_e8_code( const float* x ) {
+        float d0, d1;
+        int64_t c0, c1;
+        decode_d8_coset_scalar( x, 0.0f, 0, d0, c0 );
+        decode_d8_coset_scalar( x, -0.5f, 1, d1, c1 );
+        return d0 < d1 ? c0 : c1;
+    }
+
+#ifdef __AVX2__
+    inline static void decode_d8_coset_avx2( __m256 v,
+                                             int32_t coset_one,
+                                             float& dist_out,
+                                             int64_t& code_out ) {
+        const __m256 r = _mm256_round_ps( v, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC );
+        const __m256 diff = _mm256_sub_ps( v, r );
+        const __m256 adiff = _mm256_andnot_ps( _mm256_set1_ps( -0.0f ), diff );
+
+        // squared distance to the rounded point
+        const __m256 sq = _mm256_mul_ps( diff, diff );
+        __m128 lo = _mm256_castps256_ps128( sq );
+        __m128 hi = _mm256_extractf128_ps( sq, 1 );
+        __m128 sum = _mm_add_ps( lo, hi );
+        sum = _mm_add_ps( sum, _mm_movehl_ps( sum, sum ) );
+        sum = _mm_add_ss( sum, _mm_shuffle_ps( sum, sum, 1 ) );
+        float dist = _mm_cvtss_f32( sum );
+
+        __m256i ri = _mm256_cvtps_epi32( r );
+
+        // parity of the sum of the rounded coordinates: xor of their low bits
+        const int lsb_mask =
+            _mm256_movemask_ps( _mm256_castsi256_ps( _mm256_slli_epi32( ri, 31 ) ) );
+        const int32_t odd = std::popcount( static_cast<unsigned>( lsb_mask ) ) & 1;
+
+        // lowest lane holding the maximum |diff|
+        __m256 m = adiff;
+        m = _mm256_max_ps( m, _mm256_permute2f128_ps( m, m, 1 ) );
+        m = _mm256_max_ps( m, _mm256_shuffle_ps( m, m, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
+        m = _mm256_max_ps( m, _mm256_shuffle_ps( m, m, _MM_SHUFFLE( 2, 3, 0, 1 ) ) );
+        const float max_diff = _mm_cvtss_f32( _mm256_castps256_ps128( m ) );
+        const int eq_mask = _mm256_movemask_ps( _mm256_cmp_ps( adiff, m, _CMP_EQ_OQ ) );
+        const int32_t worst = std::countr_zero( static_cast<unsigned>( eq_mask ) );
+
+        // when the parity is odd, move the worst coordinate to its
+        // second-nearest integer, i.e. by +-1 towards the actual value
+        const __m256i toward =
+            _mm256_add_epi32( _mm256_set1_epi32( 1 ),
+                              _mm256_slli_epi32(
+                                  _mm256_srai_epi32( _mm256_castps_si256( diff ), 31 ), 1 ) );
+        const __m256i lane_ids = _mm256_setr_epi32( 0, 1, 2, 3, 4, 5, 6, 7 );
+        const __m256i worst_mask = _mm256_cmpeq_epi32( lane_ids, _mm256_set1_epi32( worst ) );
+        const __m256i odd_mask = _mm256_set1_epi32( -odd );
+        ri = _mm256_add_epi32(
+            ri, _mm256_and_si256( _mm256_and_si256( toward, worst_mask ), odd_mask ) );
+        dist += static_cast<float>( odd ) * ( 1.0f - 2.0f * max_diff );
+
+        const __m256i coords =
+            _mm256_add_epi32( _mm256_slli_epi32( ri, 1 ), _mm256_set1_epi32( coset_one ) );
+        // pack the low byte of each 32-bit lane, first coordinate in the most
+        // significant byte of the resulting int64
+        const __m256i shuf = _mm256_setr_epi8(
+            /* 128-bit lane 0 (coords 0..3 -> bytes 4..7) */
+            -1, -1, -1, -1, 12, 8, 4, 0, -1, -1, -1, -1, -1, -1, -1, -1,
+            /* 128-bit lane 1 (coords 4..7 -> bytes 0..3) */
+            12, 8, 4, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 );
+        const __m256i packed = _mm256_shuffle_epi8( coords, shuf );
+        const int64_t low = _mm_cvtsi128_si64( _mm256_castsi256_si128( packed ) );
+        const int64_t high = _mm_cvtsi128_si64( _mm256_extracti128_si256( packed, 1 ) );
+
+        dist_out = dist;
+        code_out = low | high;
+    }
+
+    inline static int64_t decode_e8_code( __m256 x ) {
+        float d0, d1;
+        int64_t c0, c1;
+        decode_d8_coset_avx2( x, 0, d0, c0 );
+        decode_d8_coset_avx2( _mm256_add_ps( x, _mm256_set1_ps( -0.5f ) ), 1, d1, c1 );
+        return d0 < d1 ? c0 : c1;
+    }
+#endif
 
     template <uint8_t K, typename Dataset, typename Distance>
     class LatticeLSHBuilder;
@@ -214,22 +349,32 @@ namespace panna {
             // the hashing work
             random_dots.compute( scratch, 1.0 / std::sqrt( LATTICE_DIMENSIONS ) );
             const float inv_scaling_factor = 1.0f / scaling_factor;
+            const float* projections = scratch.data();
+            const float* bias = projection_bias.data();
+#ifdef __AVX2__
+            const __m256 inv_scale = _mm256_set1_ps( inv_scaling_factor );
+#endif
             // use the projections
             for ( size_t rep = 0; rep < repetitions; rep++ ) {
                 Value cur;
                 const size_t rep_base = rep * LATTICE_DIMENSIONS * K;
                 for ( size_t concat = 0; concat < K; concat++ ) {
-                    std::array<float, LATTICE_DIMENSIONS> prj;
                     const size_t concat_base = rep_base + concat * LATTICE_DIMENSIONS;
+#ifdef __AVX2__
+                    const __m256 prj =
+                        _mm256_fmadd_ps( _mm256_loadu_ps( projections + concat_base ),
+                                         inv_scale,
+                                         _mm256_loadu_ps( bias + concat_base ) );
+#else
+                    float prj[LATTICE_DIMENSIONS];
                     for ( size_t i = 0; i < LATTICE_DIMENSIONS; i++ ) {
                         const size_t idx = concat_base + i;
-                        prj.at(i) = scratch.at(idx) * inv_scaling_factor + projection_bias.at(idx);
+                        prj[i] = projections[idx] * inv_scaling_factor + bias[idx];
                     }
-                    auto decoded = decode_e8(prj);
-                    int64_t code = to_int64(to_integer_coords(decoded));
-                    cur.set( concat, code );
+#endif
+                    cur.set( concat, decode_e8_code( prj ) );
                 }
-                output.at(rep) = cur;
+                output[rep] = cur;
             }
         }
 

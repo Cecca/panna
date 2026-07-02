@@ -24,6 +24,7 @@ namespace panna {
     // the underlying algorithm/implementation
     //
     // Changelog:
+    // 9: optimize lattice LSH
     // 8: initialize the solution with a kcenter-based tree
     // 7: refactor parallelism
     // 6: optimize the stopping condition,
