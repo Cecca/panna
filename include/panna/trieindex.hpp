@@ -679,6 +679,23 @@ namespace panna {
             return lo;
         }
 
+        /// Gives the earliest iteration at which the given distance would
+        /// have a failure probability smaller than delta, without considering any union
+        /// bound with other pairs of points. Therefore, when used in other contexts like the
+        /// EMST, the actual confirmation iteration might be later.
+        std::optional<std::pair<size_t, size_t>> earliest_confirming_iteration(float distance, float delta) const {
+
+            for (size_t prefix=num_concatenations(); prefix>0; prefix--) {
+                for (size_t repetition=0; repetition<num_repetitions(); repetition++) {
+                    const float fp = failure_probability(*hasher, distance, prefix, repetition+1, lsh_maps.size());
+                    if (fp <= delta) {
+                        return std::optional(std::make_pair(prefix, repetition));
+                    }
+                }
+            }
+            return std::nullopt;
+        }
+
         // FIXME: I don't think this belongs here, form an API standpoint
         float get_distance( size_t a, size_t b ) const {
             PointHandle x = dataset[a];

@@ -26,6 +26,11 @@ namespace panna {
         return unif(rng);
     }
 
+    static size_t sample_int(size_t min, size_t max) {
+        static std::uniform_int_distribution<size_t> unif(min, max);
+        return unif(get_global_rng());
+    }
+
     static float sample_random_normal() {
         static std::normal_distribution<float> normal(0, 1);
         return normal(get_global_rng());

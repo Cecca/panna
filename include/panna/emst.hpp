@@ -11,6 +11,7 @@
 
 #include "panna/billboard.hpp"
 #include "panna/channel.hpp"
+#include "panna/data.hpp"
 #include "panna/dsu.hpp"
 #include "panna/logging.hpp"
 #include "panna/rand.hpp"
@@ -396,7 +397,9 @@ namespace panna {
         uint32_t dimensionality;
         size_t max_repetitions;
         uint32_t max_hashbits;
+        public:
         Index<Dataset, Hasher, Distance> table;
+        private:
         uint32_t num_data{ 0 };
         float delta{ 0.01 };
         const float epsilon{ 0.2 };
@@ -512,6 +515,28 @@ namespace panna {
 
         std::vector<ExecutionProfileElement> get_profile() const {
             return profile;
+        }
+
+        std::vector<Edge> random_emst() const {
+            std::vector<Edge> edges;
+            const size_t samples = num_data * std::ceil(std::log10(num_data));
+            edges.reserve(samples);
+            for (size_t i=0; i<samples; i++)  {
+                const size_t a = sample_int(0, num_data-1);
+                const size_t b = sample_int(0, num_data-1);
+                const float d = table.get_distance(a, b);
+                edges.emplace_back(d, a, b);
+            }
+            std::sort(edges.begin(), edges.end());
+            std::vector<Edge> res;
+            res.reserve(num_data-1);
+            DSU dsu(num_data);
+            kruskal(dsu, edges, res);
+            if (res.size() < num_data - 1) {
+                complete_arbitrarily(res, dsu);
+            }
+            expect(res.size() == num_data - 1);
+            return res;
         }
 
         /// Complete the given forest with arbitrary edges so that it becomes a connected tree
