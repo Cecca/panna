@@ -54,6 +54,13 @@ namespace panna {
             return x;
         }
 
+        /// Directly access the parent. If the data structure was compressed using
+        /// the `compress_all` method, this returns the root without
+        /// recursive calls
+        uint32_t get_parent( uint32_t x ) const {
+            return parent[x];
+        }
+
         /// force the compression of all paths
         void compress_all() {
             for (size_t i=0; i<parent.size(); i++) {

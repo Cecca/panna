@@ -659,7 +659,7 @@ namespace panna {
                 auto rr = running_result.read();
                 // Read the published snapshot through the shared_ptr (the collector is
                 // the sole mutator). local_tree is only consumed as old_edges by
-                // kruskal_new_edges, and filter is only probed via cfind, so neither
+                // kruskal_new_edges, and filter is only probed via get_parent, so neither
                 // needs a copy; the Kruskal scratch DSU is the only worker-local state.
                 const std::vector<Edge>& local_tree = rr->tree;
                 DSU dsu( rr->filter.size() );
@@ -671,7 +671,7 @@ namespace panna {
                     prefix,
                     10 * dsu.size(), // buffer size
                     max_weight,
-                    [&]( uint32_t x ) { return rr->filter.cfind( x ); },
+                    [&]( uint32_t x ) { return rr->filter.get_parent( x ); },
                     [&]( std::vector<Edge>& scratch ) {
                         LOG_DEBUG( "msg", "building tree on batch", "logger", "worker", "batch_size", scratch.size() );
                         for ( auto& e : scratch ) {
@@ -748,7 +748,7 @@ namespace panna {
                     prefix,
                     10 * rr->filter.size(), // buffer size
                     max_weight, // TODO: watch out this line
-                    [&]( uint32_t x ) { return rr->filter.cfind( x ); },
+                    [&]( uint32_t x ) { return rr->filter.get_parent( x ); },
                     [&]( std::vector<Edge>& updates ) {
                         // add to the possibly useful edges only if they would
                         // improve the local copy of the core distances
@@ -977,7 +977,7 @@ namespace panna {
                              "num-connected-components", rr->filter.num_connected_components(),
                              "distances-computed", count_distances.load(),
                              "num_collisions", count_collisions.load());
-                    table.rehash( [&]( uint32_t x ) { return rr->filter.cfind( x ); } );
+                    table.rehash( [&]( uint32_t x ) { return rr->filter.get_parent( x ); } );
                 }
             }
 
@@ -1138,7 +1138,7 @@ namespace panna {
                              "num-connected-components", rr->filter.num_connected_components(),
                              "distances-computed", count_distances.load(),
                              "num_collisions", count_collisions.load());
-                    table.rehash( [&]( uint32_t x ) { return rr->filter.cfind( x ); } );
+                    table.rehash( [&]( uint32_t x ) { return rr->filter.get_parent( x ); } );
                 }
             }
 
