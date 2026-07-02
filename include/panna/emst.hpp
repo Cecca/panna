@@ -24,6 +24,7 @@ namespace panna {
     // the underlying algorithm/implementation
     //
     // Changelog:
+    // 8: initialize the solution with a kcenter-based tree
     // 7: refactor parallelism
     // 6: optimize the stopping condition,
     // 5: remove the accumulation of the minimum edge between components,
@@ -526,6 +527,9 @@ namespace panna {
         size_t num_collisions = 0;
         size_t index_size_bytes = 0;
         std::vector<ExecutionProfileElement> profile;
+        /// spanning tree built with `clustering_emst` at construction time,
+        /// used to initialize the search in `find_tree`
+        std::vector<Edge> initial_tree;
 
         static size_t get_worker_count( size_t max_repetitions ) {
             const size_t hw = std::max<size_t>( 1, std::thread::hardware_concurrency() );
@@ -585,10 +589,17 @@ namespace panna {
             profile() {
             LOG_INFO("git-version", GIT_COMMIT_HASH);
 
+            delta = delta_in;
+
+            // initialize the table
+            const Dataset & dataset = table.get_dataset();
+            initial_tree = clustering_emst<Dataset, Distance>(dataset);
+            table.builder.fit(dataset, initial_tree.back().weight, repetitions, 0.1/dataset.size());
+            table.rebuild();
+
             // Get info on the index
             max_hashbits = table.num_concatenations();
             max_repetitions = table.num_repetitions();
-            delta = delta_in;
 
             // Measure the size of the index
             index_size_bytes = table.memory_usage();
@@ -613,7 +624,6 @@ namespace panna {
             for ( auto& point : data_in ) {
                 table.insert( point.begin(), point.end() );
             }
-            table.rebuild();
 
             return table;
         }
@@ -896,12 +906,19 @@ namespace panna {
             clear();
             const auto find_start_t = std::chrono::steady_clock::now();
 
+            // Start the search from the clustering-based spanning tree built at
+            // construction time rather than from an empty forest. The confirmed
+            // filter stays empty (no edge is confirmed yet), but the heaviest
+            // edge of the initial tree already bounds the weight of any MST edge
+            // (cycle property), so workers can prune distances right away.
             Billboard<RunningResult> running_result;
-            running_result.update( RunningResult( std::vector<Edge>(), DSU( num_data ) ) );
+            running_result.update(
+                RunningResult( std::vector<Edge>( initial_tree ), DSU( num_data ) ) );
 
             // Collector-owned working state, constructed once and kept in sync with
             // the published snapshot across prefixes and rehashes.
             ReducerState state( num_data );
+            state.tree = initial_tree;
 
             // The expensive completion + stopping check runs on a cadence rather
             // than on every partial. Larger values cut serial collector work but
@@ -909,7 +926,9 @@ namespace panna {
             // Gating only ever *delays* stopping, so the (1+epsilon) guarantee holds.
             constexpr size_t DECIDE_PERIOD = 16;
 
-            std::atomic<float> max_weight( std::numeric_limits<float>::infinity() );
+            std::atomic<float> max_weight( initial_tree.empty()
+                                               ? std::numeric_limits<float>::infinity()
+                                               : initial_tree.back().weight );
             float tree_weight = 0;
             std::atomic_size_t count_distances( 0 ), count_collisions( 0 );
             const size_t max_threads = get_worker_count( max_repetitions );

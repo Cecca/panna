@@ -328,6 +328,80 @@ namespace panna {
             ar( offset, scaling_factor, dimensions );
         }
 
+        void fit( const Dataset& points,
+                  const float distance_upper_bound,
+                  const size_t repetitions,
+                  const float delta ) {
+            if ( scaling_factor != 0.0 ) {
+                return;
+            }
+            if ( points.size() == 0 ) {
+                throw std::invalid_argument( "cannot fit hash builder on an empty dataset" );
+            }
+            if ( const auto override = scaling_factor_override() ) {
+                offset = mean_point( points );
+                scaling_factor = *override;
+                LOG_INFO( "scaling-factor", scaling_factor, "source", "env-override" );
+                return;
+            }
+            offset = mean_point( points );
+
+            auto find_scale = [delta, repetitions]( float distance ) -> float {
+                auto failure_probability = [repetitions]( float scaling_factor, float distance ) {
+                    auto collision_probability = [&]( float distance ) -> float {
+                        distance = Distance::to_euclidean(
+                            distance ); // This gives the chance of applying the square root
+                        distance = distance / scaling_factor;
+                        if ( distance > panna::lattice_lsh::MAX_DISTANCE ) {
+                            return 0.0;
+                        }
+                        size_t idx = std::floor( distance / panna::lattice_lsh::DISTANCE_STEP );
+                        if ( idx < panna::lattice_lsh::NUM_ESTIMATES ) {
+                            return panna::lattice_lsh::PROBABILITIES[idx];
+                        } else {
+                            return 0;
+                        }
+                    };
+
+                    float cp = collision_probability( distance );
+                    return std::pow( 1 - cp, repetitions );
+                };
+
+                // Find the smallest scaling factor for which the failure probability at the
+                // heaviest EMST edge is below delta. The failure probability decreases
+                // monotonically with the scaling factor, so first bracket the answer with an
+                // exponential search, then refine the bracket with a binary search.
+                const float min_scale = std::numeric_limits<float>::epsilon();
+                float high = std::max( Distance::to_euclidean( distance ), min_scale );
+                for ( size_t iter = 0; iter < 64 && failure_probability( high, distance ) >= delta;
+                      iter++ ) {
+                    high *= 2.0f;
+                }
+                float low = high / 2.0f;
+                while ( low > min_scale && failure_probability( low, distance ) < delta ) {
+                    high = low;
+                    low /= 2.0f;
+                }
+
+                // invariant: failure_probability(high) < delta <= failure_probability(low)
+                const size_t MAX_ITER = 64;
+                for ( size_t iter = 0; iter < MAX_ITER && high - low > 1e-3f * high; iter++ ) {
+                    const float mid = ( low + high ) / 2.0f;
+                    if ( failure_probability( mid, distance ) < delta ) {
+                        high = mid;
+                    } else {
+                        low = mid;
+                    }
+                }
+                LOG_INFO( "proposed-scaling-factor", high );
+                return high;
+            };
+
+            scaling_factor = find_scale( distance_upper_bound ) ;
+
+            LOG_INFO("scaling-factor", scaling_factor);
+            expect( scaling_factor > 0.0f );
+        }
         void fit( const Dataset& points, const size_t repetitions, const float delta ) {
             if ( scaling_factor != 0.0 ) {
                 return;

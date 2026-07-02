@@ -117,7 +117,9 @@ namespace panna {
         // different quantization widths in failure probability estimates.
         std::vector<Hasher> rehash_history_hashers;
         // How to build hash functions
+        public:
         typename Hasher::Builder builder;
+        private:
         // How to hash the points. Initialized upon the first call to "rebuild"
         std::optional<Hasher> hasher;
 
