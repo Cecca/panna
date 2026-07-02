@@ -344,11 +344,10 @@ namespace panna {
             offset = mean_point( points );
 
             const size_t clustering_size = std::ceil( std::sqrt( points.size() ) );
-            const auto [centers, radius] =
-                kcenter<Distance>( points, clustering_size );
-            const auto [weight, edges] = exact_emst<Dataset, Distance>(centers);
-            const float clustering_upper_bound = std::max(edges.back().weight, radius);
-            LOG_INFO("clustering-size", clustering_size, "heaviest-edge", edges.back().weight, "radius", radius, "upper-bound", clustering_upper_bound);
+            const auto clustering = kcenter<Distance>( points, clustering_size );
+            const auto [weight, edges] = exact_emst<Dataset, Distance>( clustering.centers );
+            const float clustering_upper_bound = std::max(edges.back().weight, clustering.radius);
+            LOG_INFO("clustering-size", clustering_size, "heaviest-edge", edges.back().weight, "radius", clustering.radius, "upper-bound", clustering_upper_bound);
 
             const auto rand_tree = random_emst<Dataset, Distance>( points );
             const float random_upper_bound = rand_tree.back().weight;

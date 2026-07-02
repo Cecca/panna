@@ -120,6 +120,49 @@ namespace panna {
         return { tree_weight, tree };
     }
 
+    /// Builds a spanning tree as follows. First the data points are clustered in
+    /// std::sqrt(data.size()) clusters with the kcenter algorithm. Then, we compute
+    /// the exact EMST of the cluster centers. Finally, we add, for each non-center
+    /// point, the edge between itself and its closest cluster center.
+    template <typename Dataset, typename Distance>
+    std::vector<Edge> clustering_emst( const Dataset& data ) {
+        Timer _t("clustering_emst");
+        const size_t num_data = data.size();
+        const size_t num_clusters = std::ceil( std::sqrt( num_data ) );
+        const auto clustering = kcenter<Distance>( data, num_clusters );
+
+        std::vector<Edge> res;
+        res.reserve( num_data - 1 );
+
+        // the exact EMST of the centers, with the edge endpoints remapped
+        // to the indices of the centers in the original dataset
+        const auto [centers_weight, centers_tree] =
+            exact_emst<Dataset, Distance>( clustering.centers );
+        for ( const auto& edge : centers_tree ) {
+            res.emplace_back( edge.weight,
+                              (uint32_t)clustering.center_indices.at( edge.a ),
+                              (uint32_t)clustering.center_indices.at( edge.b ) );
+        }
+
+        // connect each non-center point to its closest center
+        std::vector<bool> is_center( num_data, false );
+        for ( const size_t c : clustering.center_indices ) {
+            is_center.at( c ) = true;
+        }
+        for ( size_t i = 0; i < num_data; i++ ) {
+            if ( !is_center.at( i ) ) {
+                res.emplace_back(
+                    clustering.distances.at( i ),
+                    (uint32_t)i,
+                    (uint32_t)clustering.center_indices.at( clustering.assignment.at( i ) ) );
+            }
+        }
+
+        std::sort( res.begin(), res.end() );
+        expect( res.size() == num_data - 1 );
+        return res;
+    }
+
     /// A unit of work pulled by a persistent worker: one repetition at one prefix.
     /// The worker pool is spawned once per find_tree call and loops on a single
     /// channel of these across all prefixes and rehashes.

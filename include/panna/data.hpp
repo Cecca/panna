@@ -549,15 +549,31 @@ namespace panna {
         return maxdist;
     }
 
+    //! The result of a k-center clustering.
+    template <typename Dataset>
+    struct KCenterResult {
+        //! the cluster centers
+        Dataset centers;
+        //! the maximum distance of any point from its closest center
+        float radius;
+        //! index in the original dataset of each center
+        std::vector<size_t> center_indices;
+        //! for each point, the position in `centers` of its closest center
+        std::vector<uint32_t> assignment;
+        //! for each point, the distance to its closest center
+        std::vector<float> distances;
+    };
+
     //! Gonzalez's greedy k-center algorithm (farthest-first traversal).
-    //! Returns a dataset holding the k centers along with the radius of
-    //! the clustering, i.e. the maximum distance of any point from its
-    //! closest center. The result is a 2-approximation to the optimal
-    //! k-center clustering when `Distance` is a metric. Runs in O(n*k)
-    //! distance computations, parallelized over the points of the input
-    //! dataset.
+    //! Returns the k centers along with the radius of the clustering
+    //! (i.e. the maximum distance of any point from its closest center),
+    //! the assignment of each point to its closest center and the
+    //! corresponding distances. The result is a 2-approximation to the
+    //! optimal k-center clustering when `Distance` is a metric. Runs in
+    //! O(n*k) distance computations, parallelized over the points of the
+    //! input dataset.
     template <typename Distance, typename Dataset>
-    std::pair<Dataset, float> kcenter( const Dataset& dataset, size_t k ) {
+    KCenterResult<Dataset> kcenter( const Dataset& dataset, size_t k ) {
         const size_t n = dataset.size();
         expect( n > 0 );
         k = std::min( k, n );
@@ -567,6 +583,8 @@ namespace panna {
 
         // distance of each point from its closest center so far
         std::vector<float> min_dist( n, std::numeric_limits<float>::infinity() );
+        // for each point, the position in `center_indices` of its closest center
+        std::vector<uint32_t> assignment( n, 0 );
 
         std::uniform_int_distribution<size_t> random_id( 0, n - 1 );
         size_t next_center = random_id( get_global_rng() );
@@ -577,6 +595,7 @@ namespace panna {
             center_indices.push_back( c );
             const auto center = dataset[c];
             float* const dists = min_dist.data();
+            uint32_t* const assign = assignment.data();
 
             float maxdist = -1.0;
             size_t maxdist_idx = c;
@@ -590,6 +609,7 @@ namespace panna {
                     const float d = Distance::compute( center, dataset[i] );
                     if ( d < dists[i] ) {
                         dists[i] = d;
+                        assign[i] = iter;
                     }
                     if ( dists[i] > private_maxdist ) {
                         private_maxdist = dists[i];
@@ -617,7 +637,11 @@ namespace panna {
             dataset[idx].into_vec( buffer );
             centers.push_back( buffer.begin(), buffer.end() );
         }
-        return { centers, radius };
+        return { std::move( centers ),
+                 radius,
+                 std::move( center_indices ),
+                 std::move( assignment ),
+                 std::move( min_dist ) };
     }
 
     template <typename Distance, typename Dataset>
