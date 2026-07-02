@@ -33,6 +33,10 @@ int main( int argc, char** argv ) {
     H5Easy::File file( path, H5Easy::File::ReadOnly );
     std::vector<std::vector<float>> points =
         H5Easy::load<std::vector<std::vector<float>>>( file, "/train" );
+    if (points.size() > 100000) {
+        points.resize(100000);
+    }
+
     std::cout << "loaded " << points.size() << " points from " << path << std::endl;
 
     const size_t dimensions = points[0].size();

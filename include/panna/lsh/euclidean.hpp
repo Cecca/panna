@@ -162,7 +162,7 @@ namespace panna {
             ar( quantization_width, dimensions );
         }
 
-        void fit(Dataset& points) {
+        void fit(Dataset& points, size_t, float) {
             if (quantization_width != 0.0) {
                 return;
             }

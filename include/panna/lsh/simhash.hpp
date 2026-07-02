@@ -83,7 +83,7 @@ namespace panna {
         SimhashBuilder( size_t dimensions ): dimensions( dimensions ) {
         }
 
-        void fit( Dataset& ) {
+        void fit( Dataset&, size_t, float ) {
         }
 
         template <typename Archive>

@@ -235,7 +235,7 @@ namespace panna {
             ar(dimensions, estimation_repetitions, estimation_eps);
         }
 
-        void fit( Dataset& ) {
+        void fit( Dataset&, size_t, float ) {
         }
 
         Output build( size_t repetitions ) const {

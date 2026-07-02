@@ -40,7 +40,8 @@ namespace panna::baselines {
             dataset( dataset ),
             buckets( repetitions ) {
 
-            builder.fit( dataset );
+            // FIXME: double-check these parameters
+            builder.fit( dataset, repetitions, 0.1 );
             hasher = builder.build( repetitions );
 
             size_t n_threads = omp_get_max_threads();
@@ -160,7 +161,8 @@ namespace panna::baselines {
                               HasherBuilder builder ) {
 
         size_t n = points.size();
-        builder.fit( points );
+        // FIXME: check this
+        builder.fit( points, 1, 0.1 );
 
         DSU dsu( n );
         std::vector<std::tuple<float, uint32_t, uint32_t>> tree;

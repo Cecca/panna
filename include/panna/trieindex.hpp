@@ -243,7 +243,9 @@ namespace panna {
         void rebuild() {
             LOG_INFO("msg", "rebuilding index");
             if ( !hasher.has_value() ) {
-                builder.fit( dataset );
+                // FIXME: this initialization is not very flexible, find a way
+                // to have the delta value get till here
+                builder.fit( dataset, repetitions, 0.1 );
                 hasher = builder.build( repetitions );
             }
 

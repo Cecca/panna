@@ -13,6 +13,7 @@
 
 #include "panna/data.hpp"
 #include "panna/distance.hpp"
+#include "panna/emst.hpp"
 #include "panna/expect.hpp"
 #include "panna/linalg.hpp"
 #include "panna/logging.hpp"
@@ -327,7 +328,7 @@ namespace panna {
             ar( offset, scaling_factor, dimensions );
         }
 
-        void fit( Dataset& points ) {
+        void fit( const Dataset& points, const size_t repetitions, const float delta ) {
             if ( scaling_factor != 0.0 ) {
                 return;
             }
@@ -340,66 +341,74 @@ namespace panna {
                 LOG_INFO( "scaling-factor", scaling_factor, "source", "env-override" );
                 return;
             }
-            const size_t fit_n = points.size();
-            const auto sampled_indices = sample_fit_indices( fit_n );
-            const size_t sampled_n = sampled_indices.size();
-            offset = mean_point(points);
-            const float diameter = approximate_diameter<Distance>(points);
-            const size_t sample_repetitions = 4;
-            LOG_INFO("diameter", diameter);
-            LOG_INFO( "fit-n", fit_n, "sampled-fit-n", sampled_n );
+            offset = mean_point( points );
 
-            auto compute_avg_collisions = [&](float scale) -> float {
-                std::vector<PrefixMap<typename Output::Value>> pmaps(sample_repetitions);
-                Output hasher(offset, scale, dimensions, sample_repetitions);
-                populate_from_sample( pmaps, points, hasher, sampled_indices );
+            const size_t clustering_size = std::ceil( std::sqrt( points.size() ) );
+            const auto [centers, radius] =
+                kcenter<Distance>( points, clustering_size );
+            const auto [weight, edges] = exact_emst<Dataset, Distance>(centers);
+            const float heaviest = edges.back().weight + 2*radius;
+            LOG_INFO("clustering-size", clustering_size, "heaviest-edge", edges.back().weight, "radius", radius, "upper-bound", heaviest);
 
-                size_t collisions = 0;
-                for (auto& pmap : pmaps) {
-                    PairPrefixMapCursorNew<typename Output::Value> cursor =
-                        pmap.create_pair_cursor_new(hasher.get_concatenations(), std::nullopt);
-                    collisions += cursor.total_collisions();
+            const auto rand_tree = random_emst<Dataset, Distance>( points );
+            const float random_upper_bound = rand_tree.back().weight;
+            LOG_INFO( "random-upper-bound", random_upper_bound );
+
+            auto find_scale = [delta, repetitions]( float distance ) -> float {
+                auto failure_probability = [repetitions]( float scaling_factor, float distance ) {
+                    auto collision_probability = [&]( float distance ) -> float {
+                        distance = Distance::to_euclidean(
+                            distance ); // This gives the chance of applying the square root
+                        distance = distance / scaling_factor;
+                        if ( distance > panna::lattice_lsh::MAX_DISTANCE ) {
+                            return 0.0;
+                        }
+                        size_t idx = std::floor( distance / panna::lattice_lsh::DISTANCE_STEP );
+                        if ( idx < panna::lattice_lsh::NUM_ESTIMATES ) {
+                            return panna::lattice_lsh::PROBABILITIES[idx];
+                        } else {
+                            return 0;
+                        }
+                    };
+
+                    float cp = collision_probability( distance );
+                    return std::pow( 1 - cp, repetitions );
+                };
+
+                // Find the smallest scaling factor for which the failure probability at the
+                // heaviest EMST edge is below delta. The failure probability decreases
+                // monotonically with the scaling factor, so first bracket the answer with an
+                // exponential search, then refine the bracket with a binary search.
+                const float min_scale = std::numeric_limits<float>::epsilon();
+                float high = std::max( Distance::to_euclidean( distance ), min_scale );
+                for ( size_t iter = 0; iter < 64 && failure_probability( high, distance ) >= delta;
+                      iter++ ) {
+                    high *= 2.0f;
                 }
-                return static_cast<float>(collisions) / pmaps.size();
+                float low = high / 2.0f;
+                while ( low > min_scale && failure_probability( low, distance ) < delta ) {
+                    high = low;
+                    low /= 2.0f;
+                }
+
+                // invariant: failure_probability(high) < delta <= failure_probability(low)
+                const size_t MAX_ITER = 64;
+                for ( size_t iter = 0; iter < MAX_ITER && high - low > 1e-3f * high; iter++ ) {
+                    const float mid = ( low + high ) / 2.0f;
+                    if ( failure_probability( mid, distance ) < delta ) {
+                        high = mid;
+                    } else {
+                        low = mid;
+                    }
+                }
+                LOG_INFO( "proposed-scaling-factor", high );
+                return high;
             };
 
-            // TODO: make these configurable to handle different scenarios
-            const float threshold_low = sampled_n / 2.0;
-            const float threshold_high = sampled_n * 2.0;
-            LOG_INFO("threshold-low", threshold_low, "threshold_high", threshold_high);
+            scaling_factor = std::min( find_scale( random_upper_bound ), find_scale( heaviest ) );
 
-            float low = std::numeric_limits<float>::epsilon();
-            float high = std::max( diameter, low * 1.01f );
-            const size_t MAX_ITER = 40;
-            bool found = false;
-            float best_scale = low;
-            float best_error = std::numeric_limits<float>::infinity();
-            for(size_t iter=0; iter<MAX_ITER; iter++) {
-                float scale = (low+high) / 2.0;
-                float avg_collisions = compute_avg_collisions(scale);
-                LOG_INFO("scale", scale, "avg-collisions", avg_collisions);
-                const float error =
-                    ( avg_collisions < threshold_low )
-                        ? ( threshold_low - avg_collisions )
-                        : ( avg_collisions > threshold_high ? ( avg_collisions - threshold_high ) : 0.0f );
-                if ( error < best_error ) {
-                    best_error = error;
-                    best_scale = scale;
-                }
-                if (threshold_low <= avg_collisions && avg_collisions <= threshold_high) {
-                    scaling_factor = scale;
-                    found = true;
-                    break;
-                } else if (avg_collisions < threshold_low) {
-                    low = scale;
-                } else {
-                    high = scale;
-                }
-            }
-            if ( !found ) {
-                scaling_factor = std::max( best_scale, std::numeric_limits<float>::epsilon() );
-            }
             LOG_INFO("scaling-factor", scaling_factor);
+            expect( scaling_factor > 0.0f );
         }
 
         void fit( Dataset& points, std::function<uint32_t( uint32_t )> group_fun ) {
