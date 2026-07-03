@@ -28,77 +28,6 @@ namespace panna {
         using PointHandle = typename Dataset::PointHandle;
         using THashValue = typename Hasher::Value;
 
-        // Stores per-point bucket ids using the minimum fixed-width integer
-        // required by a specific rehash cycle.
-        struct CompactBucketIds {
-            uint8_t bytes_per_id = 0;
-            std::vector<uint8_t> raw;
-
-            template <typename Archive>
-            void serialize( Archive& ar ) {
-                ar( bytes_per_id, raw );
-            }
-
-            size_t size() const {
-                if ( bytes_per_id == 0 ) {
-                    return 0;
-                }
-                return raw.size() / bytes_per_id;
-            }
-
-            uint32_t at( uint32_t idx ) const {
-                expect( bytes_per_id == 1 || bytes_per_id == 2 || bytes_per_id == 4 );
-                const size_t offset = static_cast<size_t>( idx ) * bytes_per_id;
-                expect( offset + bytes_per_id <= raw.size() );
-                if ( bytes_per_id == 1 ) {
-                    return raw.at( offset );
-                }
-                if ( bytes_per_id == 2 ) {
-                    uint16_t value;
-                    std::memcpy( &value, raw.data() + offset, sizeof( value ) );
-                    return value;
-                }
-                uint32_t value;
-                std::memcpy( &value, raw.data() + offset, sizeof( value ) );
-                return value;
-            }
-
-            static CompactBucketIds from_dense( const std::vector<uint32_t>& dense ) {
-                CompactBucketIds compact;
-                if ( dense.empty() ) {
-                    return compact;
-                }
-
-                const uint32_t max_bucket = *std::max_element( dense.begin(), dense.end() );
-                if ( max_bucket <= std::numeric_limits<uint8_t>::max() ) {
-                    compact.bytes_per_id = 1;
-                } else if ( max_bucket <= std::numeric_limits<uint16_t>::max() ) {
-                    compact.bytes_per_id = 2;
-                } else {
-                    compact.bytes_per_id = 4;
-                }
-
-                compact.raw.resize( dense.size() * compact.bytes_per_id );
-                for ( size_t i = 0; i < dense.size(); i++ ) {
-                    const size_t offset = i * compact.bytes_per_id;
-                    if ( compact.bytes_per_id == 1 ) {
-                        compact.raw.at( offset ) = static_cast<uint8_t>( dense.at( i ) );
-                    } else if ( compact.bytes_per_id == 2 ) {
-                        const uint16_t value = static_cast<uint16_t>( dense.at( i ) );
-                        std::memcpy( compact.raw.data() + offset, &value, sizeof( value ) );
-                    } else {
-                        const uint32_t value = dense.at( i );
-                        std::memcpy( compact.raw.data() + offset, &value, sizeof( value ) );
-                    }
-                }
-                return compact;
-            }
-
-            friend bool operator==( const CompactBucketIds& a, const CompactBucketIds& b ) {
-                return a.bytes_per_id == b.bytes_per_id && a.raw == b.raw;
-            }
-        };
-
         size_t repetitions;
         // The actual data points
         Dataset dataset;
@@ -109,13 +38,6 @@ namespace panna {
         Dataset current_query;
         // Hash tables used by LSH.
         std::vector<PrefixMap<THashValue>> lsh_maps;
-        // Stores prefix-1 bucket ids from previous rehashes in cycle-major order:
-        // index = cycle * num_repetitions + repetition.
-        std::vector<CompactBucketIds> rehash_prefix_buckets;
-        size_t rehash_cycles = 0;
-        // Hashers used in completed rehash cycles, needed to account for
-        // different quantization widths in failure probability estimates.
-        std::vector<Hasher> rehash_history_hashers;
         // How to build hash functions
         public:
         typename Hasher::Builder builder;
@@ -139,8 +61,6 @@ namespace panna {
 
             static_assert( std::is_same<Hasher, typename Hasher::Builder::Output>::value );
             lsh_maps.resize( repetitions );
-            rehash_prefix_buckets.clear();
-            rehash_prefix_buckets.reserve( repetitions );
         }
 
         template <typename Archive>
@@ -149,9 +69,6 @@ namespace panna {
                 dataset,
                 current_query,
                 lsh_maps,
-                rehash_prefix_buckets,
-                rehash_cycles,
-                rehash_history_hashers,
                 builder,
                 hasher,
                 hashed_points );
@@ -192,9 +109,6 @@ namespace panna {
                                 const Index<Dataset, Hasher, Distance>& b ) {
             return a.dataset == b.dataset && a.current_query == b.current_query &&
                  a.lsh_maps == b.lsh_maps &&
-                 a.rehash_prefix_buckets == b.rehash_prefix_buckets &&
-                 a.rehash_cycles == b.rehash_cycles &&
-                 a.rehash_history_hashers == b.rehash_history_hashers &&
                  a.hasher == b.hasher &&
                    a.hashed_points == b.hashed_points;
         }
@@ -270,57 +184,7 @@ namespace panna {
             hashed_points = dataset.size();
         }
 
-    private:
-        void record_current_prefix_buckets() {
-            if ( lsh_maps.empty() ) {
-                return;
-            }
-            expect( hasher.has_value() );
-            rehash_history_hashers.push_back( *hasher );
-            const size_t reps = lsh_maps.size();
-            rehash_prefix_buckets.reserve( rehash_prefix_buckets.size() + reps );
-            for ( size_t rep = 0; rep < lsh_maps.size(); rep++ ) {
-                std::vector<uint32_t> buckets;
-                buckets.reserve( dataset.size() );
-                lsh_maps.at(rep).fill_prefix_bucket_ids( 1, buckets );
-                rehash_prefix_buckets.push_back( CompactBucketIds::from_dense( buckets ) );
-            }
-            rehash_cycles++;
-        }
-
-        bool seen_in_previous_rehashes( size_t repetition, uint32_t a_idx, uint32_t b_idx ) const {
-            const size_t reps = lsh_maps.size();
-            if ( repetition >= reps ) {
-                return false;
-            }
-            for ( size_t cycle = 0; cycle < rehash_cycles; cycle++ ) {
-                const auto& buckets =
-                    rehash_prefix_buckets.at( cycle * reps + repetition );
-                if ( a_idx < buckets.size() && b_idx < buckets.size() &&
-                     buckets.at(a_idx) == buckets.at(b_idx) ) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
     public:
-
-        /// Rehash the index so that at the longest prefix there is a reasonable number of
-        /// collisions of points from different groups.
-        void rehash( std::function<uint32_t( uint32_t )> group_fun ) {
-            Timer timer("reshashing");
-            if ( hasher.has_value() ) {
-                record_current_prefix_buckets();
-            }
-            builder.fit(dataset, group_fun);
-            hasher = builder.build( repetitions );
-            for (auto & map : lsh_maps) {
-                map.clear();
-            }
-            hashed_points = 0;
-            rebuild();
-        }
 
         template <typename Iter>
         void search_brute_force( Iter begin,
@@ -467,10 +331,6 @@ namespace panna {
                         a_idx = tmp;
                     }
 
-                    if ( seen_in_previous_rehashes( repetition, a_idx, b_idx ) ) {
-                        continue;
-                    }
-
                     PointHandle a = dataset[a_idx];
                     PointHandle b = dataset[b_idx];
                     collision_cnt++;
@@ -533,10 +393,6 @@ namespace panna {
                         uint32_t tmp = b_idx;
                         b_idx = a_idx;
                         a_idx = tmp;
-                    }
-
-                    if ( seen_in_previous_rehashes( repetition, a_idx, b_idx ) ) {
-                        continue;
                     }
 
                     PointHandle a = dataset[std::get<0>( scratch.at(i) )];
@@ -606,24 +462,7 @@ namespace panna {
         } // End search couples
 
         float fail_probability( float dist, size_t concat, size_t rep ) const {
-            const float current_cycle_failure =
-                failure_probability( *hasher, dist, concat, rep, lsh_maps.size() );
-
-            // Each completed rehash cycle fully exhausts prefix=1 for all repetitions,
-            // but with its own quantization width (different hasher fit). We therefore
-            // multiply residual failures using the exact historical hasher of each cycle.
-            float history_failure = 1.0f;
-            for ( const auto& historical_hasher : rehash_history_hashers ) {
-                const size_t historical_reps = historical_hasher.get_repetitions();
-                history_failure *= failure_probability(
-                    historical_hasher,
-                    dist,
-                    1,
-                    historical_reps,
-                    historical_reps );
-            }
-
-            return current_cycle_failure * history_failure;
+            return failure_probability( *hasher, dist, concat, rep, lsh_maps.size() );
         }
 
         /// Returns the largest distance that attains the given failure probability
@@ -634,8 +473,7 @@ namespace panna {
             // The failure probability is monotonically non-decreasing in the distance:
             // farther pairs have a smaller collision probability and are therefore more
             // likely to be missed. We binary-search for the largest distance whose
-            // failure probability (combined across all rehash cycles, exactly as in
-            // fail_probability) does not exceed delta.
+            // failure probability does not exceed delta.
             auto fp_at = [&]( float dist ) -> float {
                 return fail_probability(dist, concat, rep);
             };
