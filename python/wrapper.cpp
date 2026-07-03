@@ -4,6 +4,7 @@
 #include <nanobind/stl/string.h>
 #include <sstream>
 #include <stdexcept>
+#include <variant>
 #include <vector>
 
 #include "panna/data.hpp"
