@@ -473,6 +473,10 @@ namespace panna {
             ar( offset, scaling_factor, dimensions );
         }
 
+        void reset() {
+            scaling_factor = 0.0;
+        }
+
         void fit( const Dataset& points,
                   const float distance_upper_bound,
                   const size_t repetitions,

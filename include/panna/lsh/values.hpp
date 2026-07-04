@@ -199,6 +199,12 @@ namespace panna {
             return true;
         }
 
+        void overwrite(const SymbolLshValue<Symbol, K> &other, uint8_t pos_from, uint8_t pos_to) {
+            assert( pos_from <= K );
+            assert( pos_to <= K );
+            hashes[pos_to] = other.hashes[pos_from];
+        }
+
         inline constexpr bool prefix_less( const SymbolLshValue<Symbol, K>& other,
                                            uint8_t prefix ) const {
             assert( prefix <= K );

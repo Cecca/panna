@@ -159,8 +159,8 @@ namespace panna {
         void rebuild() {
             LOG_INFO("msg", "rebuilding index");
             if ( !hasher.has_value() ) {
-                // FIXME: this initialization is not very flexible, find a way
-                // to have the delta value get till here
+                // TODO: move the fitting call outside of here. The caller of
+                // rebuild should fit the builder before calling.
                 builder.fit( dataset, repetitions, 0.1/dataset.size() );
                 hasher = builder.build( repetitions );
             }
@@ -179,6 +179,37 @@ namespace panna {
 #pragma omp parallel for
             for ( size_t rep = 0; rep < lsh_maps.size(); rep++ ) {
                 lsh_maps.at(rep).rebuild();
+            }
+
+            hashed_points = dataset.size();
+        }
+
+        void rehash() {
+            Timer _t("rehashing");
+            LOG_INFO("msg", "rehashing the index");
+            std::vector<std::vector<typename Hasher::Value>> old_hashes(repetitions);
+            for (size_t rep=0; rep<repetitions; rep++) {
+                old_hashes[rep] = lsh_maps[rep].hash_by_id();
+                lsh_maps[rep].clear();
+            }
+
+            hasher = builder.build( repetitions );
+
+            const size_t K = num_concatenations();
+            std::vector<THashValue> hashes;
+
+#pragma omp parallel for private( hashes )
+            for ( size_t i = 0; i < dataset.size(); i++ ) {
+                auto tid = omp_get_thread_num();
+                hasher->hash( dataset[i], hashes );
+                for ( size_t rep = 0; rep < lsh_maps.size(); rep++ ) {
+                    lsh_maps.at(rep).insert( tid, i, hashes.at(rep) );
+                }
+            }
+
+#pragma omp parallel for
+            for ( size_t rep = 0; rep < lsh_maps.size(); rep++ ) {
+                lsh_maps.at( rep ).overwrite_rebuild( old_hashes.at( rep ), 0, K - 1 );
             }
 
             hashed_points = dataset.size();
@@ -411,55 +442,6 @@ namespace panna {
             }
             return {distance_cnt, collision_cnt};
         }
-
-        // Function to return all colliding couples in a given repetition and concatenation
-        void search_pairs( size_t repetition,
-                           size_t concatenations,
-                           std::vector<std::tuple<float, std::pair<uint32_t, uint32_t>>>& output ) {
-            expect( hasher );
-            // Setup
-            std::vector<std::pair<const uint32_t*, const uint32_t*>> scratch( 262144 ); // 65536);
-            // TO DO: Find a way to create the cursors once and for all, maybe you also have to
-            // store them
-            PairPrefixMapCursor<typename Hasher::Value> cursor =
-                lsh_maps.at(repetition).create_pair_cursor();
-            bool keep_going = true;
-            if ( concatenations != hasher->get_concatenations() ) {
-                cursor.shorten_prefix( concatenations );
-            }
-            while ( keep_going ) {
-                size_t cursor_collisions = 0;
-                std::tie( cursor_collisions, keep_going ) = cursor.next( scratch );
-                size_t current_size = output.size();
-
-                // Fill the output vector and then parallel compute the distances
-                for ( size_t num = 0; num < cursor_collisions; num++ ) {
-                    output.emplace_back(
-                        std::numeric_limits<float>::infinity(),
-                        std::make_pair( *scratch.at(num).first,
-                                        *scratch.at(num).second ) ); // We put a mock value?
-                }
-
-#pragma omp parallel for
-                for ( size_t num = 0; num < cursor_collisions; num++ ) {
-                    uint32_t x_p, y_p;
-                    std::tie( x_p, y_p ) = std::get<1>( output.at(current_size + num) );
-                    PointHandle x = dataset[x_p];
-                    PointHandle y = dataset[y_p];
-                    float dist = Distance::compute( y, x );
-                    // If the pairs are already in the list we just have to access them so no race
-                    // conditions
-                    std::get<float>( output.at(current_size + num) ) = dist;
-                }
-            }
-
-            std::sort( output.begin(), output.end() );
-            // std::cout << std::get<float>(*output.begin()) << " " <<
-            // std::get<float>(*(output.end()-1)) << " "; std::cout <<
-            // std::get<1>(*output.begin()).first <<" "<< std::get<1>(*output.begin()).second << " "
-            // << std::get<1>(*(output.end() - 1)).first << " " << std::get<1>(*(output.end() -
-            // 1)).second << std::endl;
-        } // End search couples
 
         float fail_probability( float dist, size_t concat, size_t rep ) const {
             return failure_probability( *hasher, dist, concat, rep, lsh_maps.size() );

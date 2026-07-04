@@ -1,3 +1,4 @@
+#define EXPECT_ACTIVE
 #include "panna/emst.hpp"
 
 #include <highfive/H5Easy.hpp>
@@ -40,39 +41,18 @@ int main( int argc, char** argv ) {
     std::cout << "loaded " << points.size() << " points from " << path << std::endl;
 
     const size_t dimensions = points[0].size();
-    const size_t n = points.size();
     const auto start = std::chrono::steady_clock::now();
     const float delta = 0.1;
     EMST<Dataset, Hasher, Distance> tree( dimensions, rep, points, delta, epsilon );
-
-    const auto random = tree.random_emst();
-    float random_weight = 0.0;
-    for (const auto &e: random) {
-        random_weight += e.weight;
-    }
-    const auto [rand_prefix, rand_rep] = *tree.table.earliest_confirming_iteration(random.back().weight, delta/n);
-    LOG_INFO(
-      "msg", "tree info",
-      "maximum-random-weight", random.back().weight,
-      "total-random-weight", random_weight,
-      "earliest-confirm-prefix", rand_prefix,
-      "earliest-confirm-repetition", rand_rep
-    );
 
     const auto& [weight, emst] = tree.find_tree();
     const auto end = std::chrono::steady_clock::now();
     const double elapsed_s = std::chrono::duration<double>( end - start ).count();
 
-    const auto [opt_prefix_min, opt_rep_min] = *tree.table.earliest_confirming_iteration(emst.front().weight, delta/n);
-    const auto [opt_prefix, opt_rep] = *tree.table.earliest_confirming_iteration(emst.back().weight, delta/n);
     LOG_INFO(
       "msg", "tree info",
       "maximum-opt-weight", emst.back().weight,
       "total-opt-weight", weight,
-      "earliest-confirm-prefix-min", opt_prefix_min,
-      "earliest-confirm-repetition-min", opt_rep_min,
-      "earliest-confirm-prefix", opt_prefix,
-      "earliest-confirm-repetition", opt_rep,
       "running-time", elapsed_s
     );
 

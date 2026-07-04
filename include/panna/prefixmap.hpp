@@ -871,31 +871,58 @@ namespace panna {
             }
         }
 
-        void fill_prefix_bucket_ids( uint8_t prefix, std::vector<uint32_t>& out ) const {
-            if ( hashes.empty() ) {
-                return;
-            }
-            if ( indices.size() != hashes.size() ) {
-                throw std::runtime_error( "prefix map indices/hash size mismatch" );
-            }
-            uint32_t max_idx = *std::max_element( indices.begin(), indices.end() );
-            if ( out.size() <= max_idx ) {
-                out.resize( static_cast<size_t>( max_idx ) + 1 );
+        /// Overwrites the part of the hash strings specified by concat_idx
+        /// with the values found in to_write, which must be sorted by index.
+        void overwrite_rebuild(std::vector<THashValue> &to_write, uint8_t from, uint8_t to) {
+            size_t rebuilding_data_size = 0;
+            for ( auto& rd : parallel_rebuilding_data ) {
+                rebuilding_data_size += rd.size();
             }
 
-            uint32_t bucket_id = 0;
-            size_t start = 0;
-            while ( start < hashes.size() ) {
-                size_t end = start + 1;
-                while ( end < hashes.size() && hashes.at(start).prefix_eq( hashes.at(end), prefix ) ) {
-                    end++;
+            std::vector<std::pair<THashValue, uint32_t>> tmp;
+            tmp.reserve( hashes.size() + rebuilding_data_size );
+
+            if ( hashes.size() != 0 ) {
+                // Move data to temporary vector for sorting.
+                for ( size_t i = 0; i < hashes.size(); i++ ) {
+                    tmp.emplace_back( hashes.at(i), indices.at(i) );
                 }
-                for ( size_t i = start; i < end; i++ ) {
-                    out.at( indices.at(i) ) = bucket_id;
-                }
-                bucket_id++;
-                start = end;
             }
+            for ( auto& rebuilding_data : parallel_rebuilding_data ) {
+                for ( const auto& pair : rebuilding_data ) {
+                    THashValue h = pair.second;
+                    uint32_t id = pair.first;
+                    h.overwrite( to_write[id], from, to );
+                    tmp.emplace_back( h, id );
+                }
+            }
+
+            std::sort( tmp.begin(), tmp.end() );
+
+            indices.clear();
+            indices.reserve( tmp.size() );
+            hashes.clear();
+            hashes.reserve( tmp.size() );
+
+            for ( size_t i = 0; i < tmp.size(); i++ ) {
+                hashes.push_back( tmp.at(i).first );
+                indices.push_back( tmp.at(i).second );
+            }
+            assert( std::is_sorted( hashes.begin(), hashes.end() ) );
+
+            for ( auto& rd : parallel_rebuilding_data ) {
+                rd.clear();
+            }
+        }
+
+        /// Returns all the hashes by increasing vector ID
+        std::vector<THashValue> hash_by_id() const {
+            const size_t n = hashes.size();
+            std::vector<THashValue> out(n);
+            for (size_t i=0; i<n; i++) {
+                out[indices[i]] = hashes[i];
+            }
+            return out;
         }
 
         PrefixMapCursor<THashValue> create_cursor( THashValue hash ) const {

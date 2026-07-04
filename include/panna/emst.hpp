@@ -25,6 +25,7 @@ namespace panna {
     // the underlying algorithm/implementation
     //
     // Changelog:
+    // 11: reintroduce rehashing, done differently
     // 10: remove rehashing
     // 9: optimize lattice LSH
     // 8: initialize the solution with a kcenter-based tree
@@ -38,7 +39,7 @@ namespace panna {
     // 2: unrolled Euclidean distance computation
     // 1: collect additional metrics (memory index and execution profile)
     //    that are available through Python wrapper
-    const std::string EMST_VERSION = "10";
+    const std::string EMST_VERSION = "11";
 
     struct StoppingConditionInfo {
         const float total_weight;
@@ -165,6 +166,21 @@ namespace panna {
         std::sort( res.begin(), res.end() );
         expect( res.size() == num_data - 1 );
         return res;
+    }
+
+    static std::vector<float> find_breaks( const std::vector<Edge>& tree, float step ) {
+        std::vector<float> breaks;
+        breaks.push_back( tree.back().weight );
+        LOG_INFO( "weight-break-point", breaks.back() );
+        for ( int32_t i = tree.size() - 1; i >= 0; i-- ) {
+            const float w = tree[i].weight;
+            if ( w < breaks.back() / step ) {
+                LOG_INFO( "weight-break-point", w );
+                breaks.push_back( w );
+            }
+        }
+        std::reverse(breaks.begin(), breaks.end());
+        return breaks;
     }
 
     /// A unit of work pulled by a persistent worker: one repetition at one prefix.
@@ -597,8 +613,6 @@ namespace panna {
             // initialize the table
             const Dataset & dataset = table.get_dataset();
             initial_tree = clustering_emst<Dataset, Distance>(dataset);
-            table.builder.fit(dataset, initial_tree.back().weight, repetitions, 0.1/dataset.size());
-            table.rebuild();
 
             // Get info on the index
             max_hashbits = table.num_concatenations();
@@ -909,6 +923,8 @@ namespace panna {
             clear();
             const auto find_start_t = std::chrono::steady_clock::now();
 
+            const std::vector<float> breaks = find_breaks( initial_tree, 10.0 );
+
             // Start the search from the clustering-based spanning tree built at
             // construction time rather than from an empty forest. The confirmed
             // filter stays empty (no edge is confirmed yet), but the heaviest
@@ -935,9 +951,12 @@ namespace panna {
             float tree_weight = 0;
             std::atomic_size_t count_distances( 0 ), count_collisions( 0 );
             const size_t max_threads = get_worker_count( max_repetitions );
-            LOG_INFO( "msg", "parallelism config",
-                      "worker_threads", max_threads,
-                      "max_repetitions", max_repetitions );
+            LOG_INFO( "msg",
+                      "parallelism config",
+                      "worker_threads",
+                      max_threads,
+                      "max_repetitions",
+                      max_repetitions );
 
             std::atomic_bool found( false );
 
@@ -961,95 +980,118 @@ namespace panna {
                                       std::ref( partials ) );
             }
 
-            for ( size_t prefix = max_hashbits; prefix > 0 && !found; prefix-- ) {
-                // Enqueue this prefix's repetitions for the persistent pool.
-                for ( size_t repetition = 0; repetition < max_repetitions; repetition++ ) {
-                    work.send( WorkItem{ .prefix = prefix, .repetition = repetition } );
+            bool first_build = true;
+            for ( const float distance_break : breaks ) {
+                if (found.load()) {
+                    break;
                 }
+                LOG_INFO( "distance-break", distance_break );
+                table.builder.reset();
+                table.builder.fit( table.get_dataset(),
+                                   distance_break,
+                                   table.num_repetitions(),
+                                   delta / ( num_data - 1 ) );
 
-                // Drain exactly one partial per enqueued item. We always drain the
-                // whole prefix (even after `found`) so that no work item is left in
-                // the channel and every worker returns to waiting on `work.receive`
-                // -- this is what guarantees index quiescence.
-                size_t completed_repetitions = 0;
-                while ( completed_repetitions < max_repetitions ) {
-                    std::optional<std::vector<Edge>> local_tree = partials.receive();
-                    expect( local_tree.has_value() );
-                    completed_repetitions++;
-                    if ( found ) {
-                        // discard late partials; keep draining to balance the channel
-                        continue;
+                size_t initial_prefix = max_hashbits;
+                if (first_build) {
+                    // In this case the last hash value holds the smallest hash value of
+                    // the previous repetition
+                    table.rebuild();
+                    first_build = false;
+                } else {
+                    table.rehash();
+                    initial_prefix--;
+                }
+                for ( size_t prefix = initial_prefix; prefix > 0 && !found; prefix-- ) {
+                    // Enqueue this prefix's repetitions for the persistent pool.
+                    for ( size_t repetition = 0; repetition < max_repetitions; repetition++ ) {
+                        work.send( WorkItem{ .prefix = prefix, .repetition = repetition } );
                     }
-                    std::vector<Edge> update = std::move( *local_tree );
-                    // clang-format off
+
+                    // Drain exactly one partial per enqueued item. We always drain the
+                    // whole prefix (even after `found`) so that no work item is left in
+                    // the channel and every worker returns to waiting on `work.receive`
+                    // -- this is what guarantees index quiescence.
+                    size_t completed_repetitions = 0;
+                    while ( completed_repetitions < max_repetitions ) {
+                        std::optional<std::vector<Edge>> local_tree = partials.receive();
+                        expect( local_tree.has_value() );
+                        completed_repetitions++;
+                        if ( found ) {
+                            // discard late partials; keep draining to balance the channel
+                            continue;
+                        }
+                        std::vector<Edge> update = std::move( *local_tree );
+                        // clang-format off
                         LOG_INFO( "logger", "collector",
                                   "msg", "received update",
                                   "update-size", update.size() );
-                    // clang-format on
+                        // clang-format on
 
-                    // Merge the incoming partial into the owned tree using the
-                    // reused scratch buffer, then swap. kruskal_merge resets the
-                    // persistent union_find internally.
-                    state.merge_scratch.clear();
-                    kruskal_merge( state.tree, update, state.union_find, state.merge_scratch );
-                    std::swap( state.tree, state.merge_scratch );
-                    update.clear();
-                    // clang-format off
+                        // Merge the incoming partial into the owned tree using the
+                        // reused scratch buffer, then swap. kruskal_merge resets the
+                        // persistent union_find internally.
+                        state.merge_scratch.clear();
+                        kruskal_merge( state.tree, update, state.union_find, state.merge_scratch );
+                        std::swap( state.tree, state.merge_scratch );
+                        update.clear();
+                        // clang-format off
                         LOG_INFO( "logger", "collector",
                                   "tree-size", state.tree.size(),
                                   "prefix", prefix,
                                   "completed-repetitions", completed_repetitions );
-                    // clang-format on
+                        // clang-format on
 
-                    // state.tree is the clean found forest; a forest with k edges
-                    // over n nodes has n-k components, so this is O(1).
-                    const size_t num_components = num_data - state.tree.size();
-                    // Run the expensive completion + stopping check on a cadence:
-                    // whenever the forest is already spanning (cheap, no
-                    // completion), periodically as a fallback, and always on the
-                    // last partial of a prefix so we never waste it.
-                    const bool do_decide = ( num_components == 1 ) ||
-                                           ( completed_repetitions % DECIDE_PERIOD == 0 ) ||
-                                           ( completed_repetitions >= max_repetitions );
+                        // state.tree is the clean found forest; a forest with k edges
+                        // over n nodes has n-k components, so this is O(1).
+                        const size_t num_components = num_data - state.tree.size();
+                        // Run the expensive completion + stopping check on a cadence:
+                        // whenever the forest is already spanning (cheap, no
+                        // completion), periodically as a fallback, and always on the
+                        // last partial of a prefix so we never waste it.
+                        const bool do_decide = ( num_components == 1 ) ||
+                                               ( completed_repetitions % DECIDE_PERIOD == 0 ) ||
+                                               ( completed_repetitions >= max_repetitions );
 
-                    bool publish_completed = false;
-                    if ( do_decide ) {
-                        // Evaluate the stopping condition on a spanning tree. When the
-                        // found forest is already spanning use it directly (no sort);
-                        // otherwise complete it into a scratch buffer, leaving
-                        // state.tree clean for the next merge / component count.
-                        const std::vector<Edge>* eval = &state.tree;
-                        if ( num_components > 1 ) {
-                            const auto start = std::chrono::steady_clock::now();
-                            state.completed = state.tree;
-                            state.completion_filter = state.union_find;
-                            const size_t added_edges =
-                                complete_arbitrarily( state.completed, state.completion_filter );
-                            const auto end = std::chrono::steady_clock::now();
-                            const double elapsed_ms =
-                                std::chrono::duration_cast<std::chrono::milliseconds>( end - start )
-                                    .count();
-                            if ( added_edges > 0 ) {
-                                // clang-format off
+                        bool publish_completed = false;
+                        if ( do_decide ) {
+                            // Evaluate the stopping condition on a spanning tree. When the
+                            // found forest is already spanning use it directly (no sort);
+                            // otherwise complete it into a scratch buffer, leaving
+                            // state.tree clean for the next merge / component count.
+                            const std::vector<Edge>* eval = &state.tree;
+                            if ( num_components > 1 ) {
+                                const auto start = std::chrono::steady_clock::now();
+                                state.completed = state.tree;
+                                state.completion_filter = state.union_find;
+                                const size_t added_edges = complete_arbitrarily(
+                                    state.completed, state.completion_filter );
+                                const auto end = std::chrono::steady_clock::now();
+                                const double elapsed_ms =
+                                    std::chrono::duration_cast<std::chrono::milliseconds>( end -
+                                                                                           start )
+                                        .count();
+                                if ( added_edges > 0 ) {
+                                    // clang-format off
                                     LOG_INFO( "msg", "completed tree with arbitrary edges",
                                               "elapsed_ms", elapsed_ms,
                                               "added_edges", added_edges );
-                                // clang-format on
+                                    // clang-format on
+                                }
+                                eval = &state.completed;
                             }
-                            eval = &state.completed;
-                        }
 
-                        // FIXME: redundant, since we completed the tree arbitrarily
-                        if ( eval->size() == num_data - 1 ) {
-                            StoppingConditionInfo stop =
-                                stopping_condition( *eval, prefix, completed_repetitions );
-                            float weight_lower_bound =
-                                stop.confirmed_weight +
-                                stop.edges_to_confirm * stop.heaviest_confirmed_edge;
-                            LOG_INFO( "weight-lower-bound", weight_lower_bound );
-                            bool should_stop =
-                                stop.total_weight <= ( 1 + epsilon ) * weight_lower_bound;
-                            // clang-format off
+                            // FIXME: redundant, since we completed the tree arbitrarily
+                            if ( eval->size() == num_data - 1 ) {
+                                StoppingConditionInfo stop =
+                                    stopping_condition( *eval, prefix, completed_repetitions );
+                                float weight_lower_bound =
+                                    stop.confirmed_weight +
+                                    stop.edges_to_confirm * stop.heaviest_confirmed_edge;
+                                LOG_INFO( "weight-lower-bound", weight_lower_bound );
+                                bool should_stop =
+                                    stop.total_weight <= ( 1 + epsilon ) * weight_lower_bound;
+                                // clang-format off
                                 LOG_INFO( "logger", "collector",
                                           "stop.total_weight", stop.total_weight,
                                           "stop.confirmed_weight", stop.confirmed_weight,
@@ -1058,63 +1100,66 @@ namespace panna {
                                           "heaviest_edge", eval->at(num_data-2).weight,
                                           "weight_lower_bound", weight_lower_bound,
                                           "should_stop", should_stop );
-                            // clang-format on
-                            max_weight = eval->back().weight;
-                            float mean_weight = 0.0;
-                            for ( auto& e : *eval ) {
-                                mean_weight += e.weight;
-                            }
-                            mean_weight /= eval->size();
-                            LOG_INFO( "logger",
-                                      "collector",
-                                      "max-weight",
-                                      max_weight.load(),
-                                      "mean-weight",
-                                      mean_weight );
-                            profile.push_back( ExecutionProfileElement{
-                                .elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                  std::chrono::steady_clock::now() - find_start_t )
-                                                  .count(),
-                                .prefix = prefix,
-                                .repetition = completed_repetitions,
-                                .emst_confirmed_weight = stop.confirmed_weight,
-                                .emst_weight_lower_bound = weight_lower_bound,
-                                .emst_max_weight = max_weight,
-                                .emst_max_confirmed_weight = stop.heaviest_confirmed_edge,
-                                .emst_total_weight = stop.total_weight,
-                                .emst_num_confirmed = num_data - 1 - stop.edges_to_confirm } );
+                                // clang-format on
+                                max_weight = eval->back().weight;
+                                float mean_weight = 0.0;
+                                for ( auto& e : *eval ) {
+                                    mean_weight += e.weight;
+                                }
+                                mean_weight /= eval->size();
+                                LOG_INFO( "logger",
+                                          "collector",
+                                          "max-weight",
+                                          max_weight.load(),
+                                          "mean-weight",
+                                          mean_weight );
+                                profile.push_back( ExecutionProfileElement{
+                                    .elapsed_ms =
+                                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            std::chrono::steady_clock::now() - find_start_t )
+                                            .count(),
+                                    .prefix = prefix,
+                                    .repetition = completed_repetitions,
+                                    .emst_confirmed_weight = stop.confirmed_weight,
+                                    .emst_weight_lower_bound = weight_lower_bound,
+                                    .emst_max_weight = max_weight,
+                                    .emst_max_confirmed_weight = stop.heaviest_confirmed_edge,
+                                    .emst_total_weight = stop.total_weight,
+                                    .emst_num_confirmed = num_data - 1 - stop.edges_to_confirm } );
 
-                            // stop if we are done
-                            if ( should_stop ) {
-                                LOG_INFO( "msg", "tree found, signalling stop" );
-                                found = true;
-                                tree_weight = stop.total_weight;
-                                // if completion was needed, the spanning result lives
-                                // in state.completed; publish that as the final tree.
-                                publish_completed = ( num_components > 1 );
+                                // stop if we are done
+                                if ( should_stop ) {
+                                    LOG_INFO( "msg", "tree found, signalling stop" );
+                                    found = true;
+                                    tree_weight = stop.total_weight;
+                                    // if completion was needed, the spanning result lives
+                                    // in state.completed; publish that as the final tree.
+                                    publish_completed = ( num_components > 1 );
+                                }
+                                // Refresh the confirmed-edge filter from the evaluated tree.
+                                state.confirmed_filter.reset();
+                                for ( size_t idx = 0; idx < stop.confirmed_edges; idx++ ) {
+                                    auto edge = eval->at( idx );
+                                    state.confirmed_filter.union_sets( edge.a, edge.b );
+                                }
+                                state.confirmed_filter.compress_all();
                             }
-                            // Refresh the confirmed-edge filter from the evaluated tree.
-                            state.confirmed_filter.reset();
-                            for ( size_t idx = 0; idx < stop.confirmed_edges; idx++ ) {
-                                auto edge = eval->at( idx );
-                                state.confirmed_filter.union_sets( edge.a, edge.b );
-                            }
-                            state.confirmed_filter.compress_all();
                         }
+                        // publish the new running result: copy the owned state into the
+                        // billboard (the one unavoidable copy, read by the workers). On
+                        // non-decide partials we publish the clean found forest and the
+                        // carried-forward confirmed filter (a valid, monotone subset).
+                        const std::vector<Edge>& pub =
+                            publish_completed ? state.completed : state.tree;
+                        running_result.update( RunningResult( std::vector<Edge>( pub ),
+                                                              DSU( state.confirmed_filter ) ) );
                     }
-                    // publish the new running result: copy the owned state into the
-                    // billboard (the one unavoidable copy, read by the workers). On
-                    // non-decide partials we publish the clean found forest and the
-                    // carried-forward confirmed filter (a valid, monotone subset).
-                    const std::vector<Edge>& pub = publish_completed ? state.completed : state.tree;
-                    running_result.update(
-                        RunningResult( std::vector<Edge>( pub ), DSU( state.confirmed_filter ) ) );
+                    LOG_INFO( "msg", "completed prefix", "prefix", prefix );
                 }
-                LOG_INFO( "msg", "completed prefix", "prefix", prefix );
             }
 
-            if( !found.load() ) {
-                throw std::runtime_error("Minimum spanning tree not found");
+            if ( !found.load() ) {
+                throw std::runtime_error( "Minimum spanning tree not found" );
             }
 
             // Shut down the persistent pool: close the work channel so idle workers
@@ -1124,17 +1169,24 @@ namespace panna {
                 worker.join();
             }
 
-            std::vector<Edge> tree(running_result.read()->tree);
+            std::vector<Edge> tree( running_result.read()->tree );
             tree_weight = 0;
-            for (auto e : tree) {
+            for ( auto e : tree ) {
                 tree_weight += e.weight;
             }
             distances_computed = count_distances;
             num_collisions = count_collisions;
 
             // This is just a sanity check to see if dsu works as intended
-            expect(is_connected( tree ));
-            LOG_INFO( "msg", "EMST finished", "distances_computed", distances_computed, "num_collisions", num_collisions, "num_total_pairs", ((size_t)num_data -1) *(size_t) num_data/ 2 );
+            expect( is_connected( tree ) );
+            LOG_INFO( "msg",
+                      "EMST finished",
+                      "distances_computed",
+                      distances_computed,
+                      "num_collisions",
+                      num_collisions,
+                      "num_total_pairs",
+                      ( (size_t)num_data - 1 ) * (size_t)num_data / 2 );
             return { tree_weight, tree };
         }
 
