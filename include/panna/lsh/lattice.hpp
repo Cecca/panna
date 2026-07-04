@@ -551,6 +551,7 @@ namespace panna {
             LOG_INFO("scaling-factor", scaling_factor);
             expect( scaling_factor > 0.0f );
         }
+
         void fit( const Dataset& points, const size_t repetitions, const float delta ) {
             if ( scaling_factor != 0.0 ) {
                 return;
@@ -630,88 +631,6 @@ namespace panna {
             scaling_factor = std::min( find_scale( random_upper_bound ), find_scale( clustering_upper_bound ) );
 
             LOG_INFO("scaling-factor", scaling_factor);
-            expect( scaling_factor > 0.0f );
-        }
-
-        void fit( Dataset& points, std::function<uint32_t( uint32_t )> group_fun ) {
-            const float old_scaling_factor = scaling_factor;
-            scaling_factor = 0.0;
-            if ( points.size() == 0 ) {
-                throw std::invalid_argument( "cannot fit hash builder on an empty dataset" );
-            }
-            if ( const auto override = scaling_factor_override() ) {
-                offset = mean_point( points );
-                scaling_factor = *override;
-                LOG_INFO( "scaling-factor", scaling_factor, "source", "env-override" );
-                expect( scaling_factor > 0.0f );
-                return;
-            }
-            const size_t fit_n = points.size();
-            const auto sampled_indices = sample_fit_indices( fit_n );
-            const size_t sampled_n = sampled_indices.size();
-            offset = mean_point( points );
-            const float diameter = approximate_diameter<Distance>( points );
-            const size_t sample_repetitions = 4;
-            LOG_INFO( "diameter", diameter );
-            LOG_INFO( "fit-n", fit_n, "sampled-fit-n", sampled_n );
-
-            auto compute_avg_collisions = [&]( float scale ) -> float {
-                std::vector<PrefixMap<typename Output::Value>> pmaps( sample_repetitions );
-                Output hasher( offset, scale, dimensions, sample_repetitions );
-                populate_from_sample( pmaps, points, hasher, sampled_indices );
-
-                size_t collisions = 0;
-                for ( auto& pmap : pmaps ) {
-                    auto cursor = pmap.create_pair_cursor_grouped(
-                        hasher.get_concatenations(),
-                        std::nullopt,
-                        [&]( uint32_t x ) { return group_fun(x); } );
-                    collisions += cursor.total_collisions();
-                }
-                return static_cast<float>( collisions ) / pmaps.size();
-            };
-
-            // TODO: make these configurable to handle different scenarios
-            const float threshold_low = std::sqrt( sampled_n ) / 2.0;
-            const float threshold_high = sampled_n * 2.0;
-            LOG_INFO( "threshold-low", threshold_low, "threshold_high", threshold_high );
-
-            float low = 2 * old_scaling_factor;
-            if ( low <= 0.0f ) {
-                low = std::max( diameter / 16.0f, std::numeric_limits<float>::epsilon() );
-            }
-            float high = std::max( diameter, low * 1.01f );
-            expect( low <= high );
-            const size_t MAX_ITER = 40;
-            bool found = false;
-            float best_scale = low;
-            float best_error = std::numeric_limits<float>::infinity();
-            for ( size_t iter = 0; iter < MAX_ITER; iter++ ) {
-                float scale = ( low + high ) / 2.0;
-                float avg_collisions = compute_avg_collisions( scale );
-                LOG_INFO( "scale", scale, "avg-collisions", avg_collisions );
-                const float error =
-                    ( avg_collisions < threshold_low )
-                        ? ( threshold_low - avg_collisions )
-                        : ( avg_collisions > threshold_high ? ( avg_collisions - threshold_high ) : 0.0f );
-                if ( error < best_error ) {
-                    best_error = error;
-                    best_scale = scale;
-                }
-                if ( threshold_low <= avg_collisions && avg_collisions <= threshold_high ) {
-                    scaling_factor = scale;
-                    found = true;
-                    break;
-                } else if ( avg_collisions < threshold_low ) {
-                    low = scale;
-                } else {
-                    high = scale;
-                }
-            }
-            if (!found) {
-                scaling_factor = std::max( best_scale, std::numeric_limits<float>::epsilon() );
-            }
-            LOG_INFO( "scaling-factor", scaling_factor );
             expect( scaling_factor > 0.0f );
         }
 

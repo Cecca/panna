@@ -663,28 +663,6 @@ namespace panna {
             return profile;
         }
 
-        std::vector<Edge> random_emst() const {
-            std::vector<Edge> edges;
-            const size_t samples = num_data * std::ceil(std::log10(num_data));
-            edges.reserve(samples);
-            for (size_t i=0; i<samples; i++)  {
-                const size_t a = sample_int(0, num_data-1);
-                const size_t b = sample_int(0, num_data-1);
-                const float d = table.get_distance(a, b);
-                edges.emplace_back(d, a, b);
-            }
-            std::sort(edges.begin(), edges.end());
-            std::vector<Edge> res;
-            res.reserve(num_data-1);
-            DSU dsu(num_data);
-            kruskal(dsu, edges, res);
-            if (res.size() < num_data - 1) {
-                complete_arbitrarily(res, dsu);
-            }
-            expect(res.size() == num_data - 1);
-            return res;
-        }
-
         /// Complete the given forest with arbitrary edges so that it becomes a connected tree
         size_t complete_arbitrarily(std::vector<Edge> & forest, DSU& dsu) const {
             // now connect the tree containing `0` with all the other trees
@@ -712,36 +690,8 @@ namespace panna {
         /// @brief Computes the exact MST with Kruskal's algorithm in a naive way
         /// @return weight of the exact MST
         std::pair<float, std::vector<Edge>> exact_tree() {
-            // Clear from any previous runs
-            clear();
-            // Compute all the distances
-            //  We can pre-allocate all the memory, and avoid the critical region
-            std::vector<Edge> all_edges( ( num_data - 1 ) * num_data / 2 );
-#pragma omp parallel for collapse (2)
-            for ( size_t i = 0; i < num_data; i++ ) {
-                for ( size_t j = i + 1; j < num_data; j++ ) {
-                    float dist = table.get_distance( i, j );
-                    all_edges.at(i * ( num_data - 1 ) - ( i * ( i + 1 ) / 2 ) + j - 1) =
-                        Edge{ .weight = dist, .a = (uint32_t)i, .b = (uint32_t)j };
-                }
-            }
-            // Sort the edges
-            std::sort( all_edges.begin(), all_edges.end() );
-            // Create the DSU
-            DSU dsu( num_data );
-            float tree_weight = 0;
-            std::cout << "Creating the MST" << std::endl;
-            std::vector<Edge> tree;
-            kruskal( dsu, all_edges, tree );
-            expect(tree.size() > 0);
-            LOG_INFO( "msg", "MST created",
-                      "heaviest_edge",  tree.back().weight );
-            for ( const auto& edge : tree ) {
-                tree_weight += edge.weight ;
-            }
-            return {tree_weight, tree};
+            return exact_emst<Dataset, Distance>(table.get_dataset());
         }
-
 
         std::pair<float, std::vector<Edge>> exact_mutual_reachability_distance_tree( const size_t num_neighbors ) {
             // Clear from any previous runs
