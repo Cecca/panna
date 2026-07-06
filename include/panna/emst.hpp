@@ -25,6 +25,7 @@ namespace panna {
     // the underlying algorithm/implementation
     //
     // Changelog:
+    // 13: avoid 0-breakpoints
     // 12: bring the mutual-reachability path on par with find_tree
     //     (seeding, rehash schedule, max-weight pruning)
     // 11: reintroduce rehashing, done differently
@@ -41,7 +42,7 @@ namespace panna {
     // 2: unrolled Euclidean distance computation
     // 1: collect additional metrics (memory index and execution profile)
     //    that are available through Python wrapper
-    const std::string EMST_VERSION = "12";
+    const std::string EMST_VERSION = "13";
 
     struct StoppingConditionInfo {
         const float total_weight;
@@ -146,9 +147,12 @@ namespace panna {
         const auto [centers_weight, centers_tree] =
             exact_emst<Dataset, Distance>( clustering.centers );
         for ( const auto& edge : centers_tree ) {
-            res.emplace_back( edge.weight,
-                              (uint32_t)clustering.center_indices.at( edge.a ),
-                              (uint32_t)clustering.center_indices.at( edge.b ) );
+            const uint32_t ida = (uint32_t)clustering.center_indices.at( edge.a );
+            const uint32_t idb = (uint32_t)clustering.center_indices.at( edge.b );
+            if(ida == idb) {
+                throw std::runtime_error( "invalid edge!" );
+            }
+            res.emplace_back( edge.weight, ida, idb );
         }
 
         // connect each non-center point to its closest center
@@ -177,6 +181,9 @@ namespace panna {
         LOG_INFO( "weight-break-point", breaks.back() );
         for ( int32_t i = weights.size() - 1; i >= 0; i-- ) {
             const float w = weights[i];
+            if (w == 0.0) {
+                break;
+            }
             if ( w < breaks.back() / step ) {
                 LOG_INFO( "weight-break-point", w );
                 breaks.push_back( w );
@@ -963,6 +970,9 @@ namespace panna {
 
             bool first_build = true;
             for ( const float distance_break : breaks ) {
+                if (distance_break == 0.0) {
+                    throw std::runtime_error("invalid distance break 0.0");
+                }
                 if (found.load()) {
                     break;
                 }
