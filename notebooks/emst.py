@@ -13,7 +13,7 @@
 
 import marimo
 
-__generated_with = "0.23.9"
+__generated_with = "0.23.13"
 app = marimo.App(width="medium")
 
 
@@ -105,9 +105,9 @@ def _(mo):
 @app.cell
 def _(mo):
     sel_algo_version = mo.ui.dropdown(
-            ["0", "0.2.2", "1", "2", "3", "4", "5"],
+            ["0", "0.2.2", "1", "2", "3", "4", "5", "13"],
             label="algorithm version",
-            value="5",
+            value="13",
         )
     sel_algo_version
     return (sel_algo_version,)
@@ -475,16 +475,38 @@ def _(mo):
 
 
 @app.cell
-def _(pl):
-    (
+def _(mo, pl):
+    hist_data = (
         pl.read_ndjson("results/emst.json", infer_schema_length=None)
-        .filter(pl.col("dataset") == "pamap2")
+        # .filter(pl.col("dataset") == "sift")
         .filter(pl.col("dataset_sample_frac").is_null())
         .filter(pl.col("parameters").struct.field("epsilon") == 0)
         .filter(pl.col("algorithm") == "k+")
+    )
+    hist_dataset = mo.ui.dropdown(hist_data["dataset"].unique().to_list())
+    hist_dataset
+    return hist_data, hist_dataset
+
+
+@app.cell
+def _(hist_data, hist_dataset, pl):
+    (
+        hist_data
+        .filter(pl.col("dataset") == hist_dataset.value)
         .sort("timestamp")
         .select("timestamp", "version", "git_version", "running_time_s", "dataset_sha")
     )
+    return
+
+
+@app.cell
+def _(hist_data, hist_dataset, pl):
+    (
+        hist_data
+        .filter(pl.col("dataset") == hist_dataset.value)
+        .sort("timestamp")
+        .select("timestamp", "version", "git_version", "running_time_s", "dataset_sha")
+    ).plot.line(x="timestamp", y="running_time_s")
     return
 
 

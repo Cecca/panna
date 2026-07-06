@@ -3,6 +3,8 @@
 This script runs all the experiments regarding the EMST, including the baselines
 """
 
+from pandas.core.frame import infer_dtype_from_object
+
 import panna
 import dataclasses
 import polars as pl
@@ -543,33 +545,14 @@ def run_experiments(
 
 
 def merge_results(other_file: Path):
-    import tempfile
-    def append(input_fn: Path, output_fn: Path):
-        with open(input_fn) as ifp:
-            with open(output_fn, "a") as ofp:
-                ofp.write(ifp.read())
-
-    with FileLock(LOCKFILE):
-        tmp = Path(tempfile.mkstemp()[1])
-        append(DATABASE_FILE, tmp)
-        append(other_file, tmp)
-
-        df = pl.read_ndjson(tmp, infer_schema_length=None)
-        # From Entry.primary_key()
-        primary_keys = [
-            "version",
-            "algorithm",
-            "parameters",
-            "machine",
-            "dataset",
-            "dataset_sample_frac",
-            "dataset_sample_seed",
-            "dataset_sha",
-        ]
-        df_unique = df.unique(subset=primary_keys, keep="first")
-
-        df_unique.write_ndjson(DATABASE_FILE)
-
+    with open(DATABASE_FILE) as fp:
+        current = set(fp.readlines())
+    with open(other_file) as fp:
+        new = [line for line in fp.readlines() if line not in current]
+    print("Adding", len(new), "entries to the database")
+    with open(DATABASE_FILE, "a") as fp:
+        for line in new:
+            fp.write(line)
 
 
 def convert_results(path: Path):
