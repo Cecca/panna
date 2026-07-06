@@ -184,6 +184,7 @@
               polars
               pyarrow
               h5py
+              tqdm
               panna-python
               fast-hdbscan
               icecream

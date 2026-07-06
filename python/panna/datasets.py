@@ -22,13 +22,22 @@ DATASETS_DIR = Path(os.environ.get("PANNA_DATA_DIR", "datasets"))
 def _download(url, destination: Path):
     import certifi
     import ssl
+    from tqdm import tqdm
     if not destination.is_file():
         logging.info(f"downloading {url} to {destination}")
         context = ssl.create_default_context(cafile=certifi.where())
         with urllib.request.urlopen(url, context=context) as response:
-            with open(destination, "wb") as out_file:
-                out_file.write(response.read())
-        # urllib.request.urlretrieve(url, destination, context=context)
+            total = int(response.headers.get("Content-Length", 0))
+            with open(destination, "wb") as out_file, tqdm(
+                total=total or None,
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                desc=destination.name,
+            ) as progress:
+                while chunk := response.read(1024 * 1024):
+                    out_file.write(chunk)
+                    progress.update(len(chunk))
 
 
 def _load_hdf5(path: Path):
@@ -246,10 +255,14 @@ def load(
         if test is not None:
             test = _safe_l2_normalize_rows(test, "test")
 
+    # Remove duplicate rows that may have been (re)introduced by the transforms
+    # above (e.g. PCA collapsing points, or normalization mapping collinear
+    # vectors onto each other), regardless of the return path.
+    train = np.unique(train, axis=0)
+
     if load_queries:
         return distance, train, test, distances
     else:
-        train = np.unique(train, axis=0)
         return distance, train
 
 
