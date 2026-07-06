@@ -182,6 +182,8 @@ nb::tuple tree_to_pytuple(std::vector<panna::Edge> & tree) {
 enum EuclideanHashFamily {
     Lattice,
     E2LSH,
+    CrossPolytope,
+    Simhash,
 
 };
 
@@ -190,17 +192,31 @@ EuclideanHashFamily string_to_family(std::string s) {
         return EuclideanHashFamily::Lattice;
     } else if (s == "e2lsh") {
         return EuclideanHashFamily::E2LSH;
+    } else if (s == "crosspolytope") {
+        return EuclideanHashFamily::CrossPolytope;
+    } else if (s == "simhash") {
+        return EuclideanHashFamily::Simhash;
     } else {
-        throw std::invalid_argument("only `lattice` and `e2lsh` are supported");
+        throw std::invalid_argument(
+            "only `lattice`, `e2lsh`, `crosspolytope` and `simhash` are supported");
     }
 }
 
 struct EMST_exposed {
     using LatticeHasher = panna::LatticeLSH<4, panna::EuclideanPoints, panna::EuclideanDistance>;
     using E2LSHHasher = panna::E2LSH<12, panna::EuclideanPoints, panna::EuclideanDistance>;
+    using CrossPolytopeHasher =
+        panna::CrossPolytope<4, panna::UnitNormPoints, panna::CosineDistance>;
+    using CrossPolytopeEMST =
+        panna::EMST<panna::UnitNormPoints, CrossPolytopeHasher, panna::CosineDistance>;
+    using SimhashHasher = panna::Simhash<24, panna::UnitNormPoints, panna::CosineDistance>;
+    using SimhashEMST =
+        panna::EMST<panna::UnitNormPoints, SimhashHasher, panna::CosineDistance>;
     using Variants = std::variant<
         panna::EMST<panna::EuclideanPoints, LatticeHasher, panna::EuclideanDistance>,
-        panna::EMST<panna::EuclideanPoints, E2LSHHasher, panna::EuclideanDistance>
+        panna::EMST<panna::EuclideanPoints, E2LSHHasher, panna::EuclideanDistance>,
+        CrossPolytopeEMST,
+        SimhashEMST
     >;
 
     Variants inner;
@@ -249,7 +265,33 @@ struct EMST_exposed {
                 .emplace<panna::EMST<panna::EuclideanPoints, E2LSHHasher, panna::EuclideanDistance>>(
                     dimensions, repetitions, data_cpp, delta, epsilon );
             break;
+        case CrossPolytope:
+            inner.emplace<CrossPolytopeEMST>(
+                dimensions, repetitions, data_cpp, delta, epsilon );
+            break;
+        case Simhash:
+            inner.emplace<SimhashEMST>(
+                dimensions, repetitions, data_cpp, delta, epsilon );
+            break;
         }
+    }
+
+    /// The cosine-based families (crosspolytope, simhash) search the tree
+    /// under the cosine distance on unit-normalized points; report the tree
+    /// edges with their Euclidean distance instead.
+    void reweight_with_euclidean( std::vector<panna::Edge>& tree ) {
+        std::visit(
+            [&tree]( auto& index ) {
+                const auto& dataset = index.table.get_dataset();
+                using Dataset = std::decay_t<decltype( dataset )>;
+                if constexpr ( std::is_same_v<Dataset, panna::UnitNormPoints> ) {
+                    for ( auto& e : tree ) {
+                        e.weight =
+                            panna::EuclideanDistance::compute( dataset[e.a], dataset[e.b] );
+                    }
+                }
+            },
+            inner );
     }
 
     nb::dict stats() {
@@ -281,11 +323,13 @@ struct EMST_exposed {
 
     nb::tuple find_mst() {
         auto tree = std::visit( []( auto& index ) { return index.find_tree().second; }, inner );
+        reweight_with_euclidean( tree );
         return tree_to_pytuple( tree );
     }
 
     nb::tuple find_mst_exact() {
         auto tree = std::visit( []( auto& index ) { return index.exact_tree().second; }, inner );
+        reweight_with_euclidean( tree );
         return tree_to_pytuple( tree );
     }
 

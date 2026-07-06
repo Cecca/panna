@@ -457,6 +457,9 @@ namespace panna {
     public:
         using Output = LatticeLSH<K, Dataset, Distance>;
 
+        //! `fit` rescales the hash function to a target distance
+        static constexpr bool fits_to_distance = true;
+
         LatticeLSHBuilder() {
         }
 

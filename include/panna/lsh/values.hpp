@@ -107,6 +107,17 @@ namespace panna {
             return ( this->bits & mask ) == ( other.bits & mask );
         }
 
+        //! Copy the bit at concatenation index `pos_from` of `other` into
+        //! concatenation index `pos_to` of `this`. Concatenation index `i`
+        //! is stored at bit `K - 1 - i`, consistently with `prefix_eq`.
+        void overwrite( const BitwiseLshValue<K>& other, uint8_t pos_from, uint8_t pos_to ) {
+            assert( pos_from < K );
+            assert( pos_to < K );
+            const uint32_t bit = ( other.bits >> ( K - 1 - pos_from ) ) & 1;
+            const uint32_t mask = uint32_t( 1 ) << ( K - 1 - pos_to );
+            bits = ( bits & ~mask ) | ( bit << ( K - 1 - pos_to ) );
+        }
+
         //! Check if the prefix of `this` is `<` than the prefix of `other`.
         //! with the understanding that the higher order 32-BITS bits are not
         //! used, hence the prefix starts from that position.

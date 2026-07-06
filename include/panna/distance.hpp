@@ -33,6 +33,13 @@ namespace panna {
             float dot = 1 - distance;
             return dot;
         }
+
+        static constexpr float to_euclidean( float distance ) {
+            float dot = 1 - distance;
+            // Here we assume that the vectors we
+            // are computing the distance on are unit norm
+            return std::sqrt( 2 - 2 * dot );
+        }
     };
 
     struct AngularDistance {

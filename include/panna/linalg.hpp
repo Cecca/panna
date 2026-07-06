@@ -395,6 +395,13 @@ namespace panna {
         return std::sqrt( a.squared_norm() + b.squared_norm() - 2 * dot );
     }
 
+    //! Both points have unit norm, so their squared norms are 1
+    template <>
+    float euclidean( const UnitNormPointHandle& a, const UnitNormPointHandle& b ) {
+        float dot = dot_product( a, b );
+        return std::sqrt( std::max( 0.0f, 2.0f - 2.0f * dot ) );
+    }
+
     template <>
     float euclidean( const EuclideanPointHandle& a, const EuclideanPointHandle& b ) {
 #ifdef __AVX2__

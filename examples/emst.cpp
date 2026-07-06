@@ -1,3 +1,4 @@
+#include "panna/lsh/crosspolytope.hpp"
 #define EXPECT_ACTIVE
 #include "panna/emst.hpp"
 
@@ -27,15 +28,16 @@ int main( int argc, char** argv ) {
 
     // Parameters for the LSH index used by the EMST construction
     const size_t rep = 512;
-    using Dataset = EuclideanPoints;
-    using Distance = EuclideanDistance;
-    using Hasher = LatticeLSH<4, Dataset, Distance>;
+    using Dataset = UnitNormPoints;
+    using Distance = CosineDistance;
+    // using Hasher = LatticeLSH<4, Dataset, Distance>;
+    using Hasher = CrossPolytope<4, Dataset, Distance>;
 
     H5Easy::File file( path, H5Easy::File::ReadOnly );
     std::vector<std::vector<float>> points =
         H5Easy::load<std::vector<std::vector<float>>>( file, "/train" );
-    if (points.size() > 300000) {
-        points.resize(300000);
+    if (points.size() > 100000) {
+        points.resize(100000);
     }
 
     std::cout << "loaded " << points.size() << " points from " << path << std::endl;

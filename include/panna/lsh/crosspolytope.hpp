@@ -103,8 +103,16 @@ namespace panna {
         }
 
         float get_collision_probability( float dotp ) const {
-            size_t idx = std::floor( ( 1.0 + dotp ) / eps );
-            return probabilities.at(idx);
+            // Callers may probe distances outside the valid domain of the
+            // metric (e.g. the binary search in distance_at_failure_probability),
+            // so clamp to the boundary segments instead of indexing out of range.
+            const float raw_idx = std::floor( ( 1.0 + dotp ) / eps );
+            const size_t max_idx = probabilities.size() - 1;
+            if ( raw_idx < 0.0 ) {
+                return probabilities.at( 0 );
+            }
+            const size_t idx = std::min( static_cast<size_t>( raw_idx ), max_idx );
+            return probabilities.at( idx );
         }
     };
 
@@ -219,6 +227,10 @@ namespace panna {
     public:
         using Output = CrossPolytope<K, Dataset, Distance>;
 
+        //! The hash function does not rescale with a target distance:
+        //! all the `fit` methods are no-ops.
+        static constexpr bool fits_to_distance = false;
+
         CrossPolytopeBuilder() {
         }
 
@@ -235,7 +247,13 @@ namespace panna {
             ar(dimensions, estimation_repetitions, estimation_eps);
         }
 
+        void reset() {
+        }
+
         void fit( Dataset&, size_t, float ) {
+        }
+
+        void fit( const Dataset&, float, size_t, float ) {
         }
 
         Output build( size_t repetitions ) const {

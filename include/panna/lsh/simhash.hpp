@@ -78,12 +78,22 @@ namespace panna {
     public:
         using Output = Simhash<K, Dataset, Distance>;
 
+        //! The hash function does not rescale with a target distance:
+        //! all the `fit` methods are no-ops.
+        static constexpr bool fits_to_distance = false;
+
         SimhashBuilder() {}
 
         SimhashBuilder( size_t dimensions ): dimensions( dimensions ) {
         }
 
+        void reset() {
+        }
+
         void fit( Dataset&, size_t, float ) {
+        }
+
+        void fit( const Dataset&, float, size_t, float ) {
         }
 
         template <typename Archive>

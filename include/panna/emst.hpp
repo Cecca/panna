@@ -44,6 +44,9 @@ namespace panna {
     //    that are available through Python wrapper
     const std::string EMST_VERSION = "13";
 
+    // All weights are euclidean distances, even when the Distance
+    // template argument is something else. Conversion is via the
+    // to_euclidean method
     struct StoppingConditionInfo {
         const float total_weight;
         const float confirmed_weight;
@@ -911,7 +914,14 @@ namespace panna {
             clear();
             const auto find_start_t = std::chrono::steady_clock::now();
 
-            const std::vector<float> breaks = find_breaks( initial_tree, 10.0 );
+            std::vector<float> breaks;
+            if constexpr ( Hasher::Builder::fits_to_distance ) {
+                breaks = find_breaks( initial_tree, 10.0 );
+            } else {
+                // the builder ignores the fitting distance,
+                // so a single arbitrary break suffices
+                breaks = { initial_tree.back().weight };
+            }
 
             // Start the search from the clustering-based spanning tree built at
             // construction time rather than from an empty forest. The confirmed
@@ -1542,7 +1552,7 @@ namespace panna {
                 if ( w > confirmed_distance ) {
                     break;
                 }
-                weight += w;
+                weight += Distance::to_euclidean(w);
                 idx += 1;
             }
 
@@ -1551,13 +1561,16 @@ namespace panna {
             float total_weight = weight;
             for (size_t jj=idx; jj<tree.size(); jj++) {
                 float w =  tree.at(jj).weight ;
-                total_weight += w;
+                total_weight += Distance::to_euclidean(w);
             }
 
+            float heaviest = ( idx > 0 ) ? Distance::to_euclidean(tree.at( idx - 1 ).weight) : 0.0f;
+
+            // All distances reported here are euclidean, so that
+            // the epsilon for the approximation is applied correctly
             return StoppingConditionInfo{ .total_weight = total_weight,
                                           .confirmed_weight = weight,
-                                          .heaviest_confirmed_edge =
-                                              ( idx > 0 ) ?  tree.at(idx - 1).weight  : 0.0f,
+                                          .heaviest_confirmed_edge = heaviest,
                                           .edges_to_confirm = edges_to_confirm,
                                           .confirmed_edges = idx };
         }
