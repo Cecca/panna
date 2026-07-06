@@ -311,12 +311,50 @@ def _run_ours(data, params, cluster: bool = False, cluster_k: int = 5):
     return tree, None, detail
 
 
+def _complete_tree(data, tree):
+    """Replace edges with infinite weight by arbitrary edges connecting
+    different components, so that the result is a spanning tree with an
+    actual (finite) weight. Returns the fixed tree and the number of
+    replaced edges."""
+    infinite_mask = ~np.isfinite(tree[:, 2])
+    if not infinite_mask.any():
+        return tree, 0
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    n = data.shape[0]
+    finite = tree[~infinite_mask]
+    rows = finite[:, 0].astype(np.int64)
+    cols = finite[:, 1].astype(np.int64)
+    graph = coo_matrix((np.ones(len(finite)), (rows, cols)), shape=(n, n))
+    n_components, labels = connected_components(graph, directed=False)
+    # pick an arbitrary representative for each component and connect
+    # all of them to the representative of the first component
+    _, representatives = np.unique(labels, return_index=True)
+    anchor = representatives[0]
+    others = representatives[1:]
+    new_edges = np.column_stack(
+        [
+            np.full(len(others), anchor, dtype=np.float64),
+            others.astype(np.float64),
+            np.linalg.norm(data[others] - data[anchor], axis=1),
+        ]
+    )
+    num_replaced = int(infinite_mask.sum())
+    print(
+        f"replacing {num_replaced} infinite-weight edges with "
+        f"{len(others)} arbitrary edges connecting the components"
+    )
+    return np.vstack([finite, new_edges]), num_replaced
+
+
 def _run_tutte(data, params):
     print("warmup")
     res = fast_hdbscan.hdbscan.compute_minimum_spanning_tree(data[:10], **params)
     print("run tutte institute algorithm")
     res = fast_hdbscan.hdbscan.compute_minimum_spanning_tree(data, **params)
-    return res[0].astype(np.int64), None, dict()
+    tree, num_replaced = _complete_tree(data, res[0])
+    return tree.astype(np.int64), None, dict(replaced_infinite_edges=num_replaced)
 
 
 def _run_pyhdbscan(data, params):

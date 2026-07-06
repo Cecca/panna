@@ -1,11 +1,14 @@
 # /// script
 # dependencies = [
 #     "altair==6.0.0",
+#     "fast-hdbscan==0.3.2",
 #     "great-tables==0.21.0",
+#     "h5py==3.16.0",
 #     "marimo",
-#     "numpy==2.4.4",
+#     "numpy==2.4.6",
 #     "polars==1.40.1",
 #     "pyarrow==24.0.0",
+#     "pynndescent==0.6.0",
 #     "seaborn==0.13.2",
 # ]
 # requires-python = ">=3.13"
@@ -29,7 +32,7 @@ def _():
     import seaborn as sns
     import matplotlib.pyplot as plt
 
-    return cs, mo, pl, sns
+    return cs, mo, np, pl, plt, sns
 
 
 @app.cell
@@ -359,7 +362,7 @@ def _(approximate_full, baselines, cs):
     return
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(approximate_full, baselines, cs):
     def approximate_normalized_time():
         our_cols = cs.matches(r"\d")
@@ -427,34 +430,6 @@ def _(approximate_full, cs):
     with open("notebooks/emst-epsilon.tex", "w") as fp:
         print(approximate_full_tbl.as_latex(), file=fp)
     approximate_full_tbl
-    return
-
-
-@app.cell
-def _(all_results, mo):
-    sel_dataset = mo.ui.dropdown(all_results["dataset"].unique().to_list(), label="dataset", value="glove")
-    sel_epsilon = mo.ui.dropdown(all_results["parameters"].struct.field("epsilon").unique().to_list(), label="epsilon", value=0.0)
-    mo.vstack([
-        sel_dataset,
-        sel_epsilon
-    ])
-    return sel_dataset, sel_epsilon
-
-
-@app.cell(disabled=True)
-def _(all_results, pl, sel_dataset, sel_epsilon):
-    profile_path = all_results.filter(
-        pl.col("dataset") == sel_dataset.value,
-        pl.col("parameters").struct.field("epsilon") == sel_epsilon.value,
-        pl.col("dataset_sample_frac").is_null()
-    ).select("profile_path").to_dicts()[0]["profile_path"]
-    profile = pl.read_parquet(profile_path).with_columns(elapsed_s = pl.col("elapsed_ms") / 1000)
-    (
-        profile.select("elapsed_s", "emst_confirmed_weight", "emst_weight_lower_bound", "emst_total_weight")
-            .unpivot(index="elapsed_s", variable_name="type", value_name="weight")
-            .plot
-            .line(x="elapsed_s", y="weight", color="type")
-    )
     return
 
 
@@ -554,8 +529,58 @@ def to_latex(table):
     return latex
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    # Appendix: data investigations
+    """)
+    return
+
+
 @app.cell
-def _():
+def _(mo):
+    mo.persistent_cache
+    def compute_emst(data):
+        import fast_hdbscan
+        res = fast_hdbscan.hdbscan.compute_minimum_spanning_tree(data, min_samples=1)[0]
+        return res[:,:2], res[:,2]
+
+    return (compute_emst,)
+
+
+@app.cell
+def _(compute_emst, mo, np, plt, sns):
+    @mo.cache
+    def edge_distribution(path):
+        import h5py
+        import pynndescent
+        with h5py.File(path) as hfp:
+            data = hfp["/train"][:]
+            data = data[~np.all(data == 0, axis=1)]
+            data = np.unique(data, axis=0)
+            edges, weights = compute_emst(data)
+        ax = sns.histplot(weights, bins=100)
+        plt.show()
+        return weights, ax
+
+    return (edge_distribution,)
+
+
+@app.cell
+def _(edge_distribution):
+    edge_distribution("datasets/glove-100-angular.hdf5")
+    return
+
+
+@app.cell
+def _(edge_distribution):
+    edge_distribution("datasets/nytimes-256-angular-dedup.hdf5")
+    return
+
+
+@app.cell
+def _(edge_distribution):
+    edge_distribution("datasets/simplewiki-openai-3072-normalized.hdf5")
     return
 
 
