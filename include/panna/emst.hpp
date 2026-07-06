@@ -25,6 +25,8 @@ namespace panna {
     // the underlying algorithm/implementation
     //
     // Changelog:
+    // 12: bring the mutual-reachability path on par with find_tree
+    //     (seeding, rehash schedule, max-weight pruning)
     // 11: reintroduce rehashing, done differently
     // 10: remove rehashing
     // 9: optimize lattice LSH
@@ -39,7 +41,7 @@ namespace panna {
     // 2: unrolled Euclidean distance computation
     // 1: collect additional metrics (memory index and execution profile)
     //    that are available through Python wrapper
-    const std::string EMST_VERSION = "11";
+    const std::string EMST_VERSION = "12";
 
     struct StoppingConditionInfo {
         const float total_weight;
@@ -168,12 +170,13 @@ namespace panna {
         return res;
     }
 
-    static std::vector<float> find_breaks( const std::vector<Edge>& tree, float step ) {
+    /// `weights` must be sorted in ascending order
+    static std::vector<float> find_breaks( const std::vector<float>& weights, float step ) {
         std::vector<float> breaks;
-        breaks.push_back( tree.back().weight );
+        breaks.push_back( weights.back() );
         LOG_INFO( "weight-break-point", breaks.back() );
-        for ( int32_t i = tree.size() - 1; i >= 0; i-- ) {
-            const float w = tree[i].weight;
+        for ( int32_t i = weights.size() - 1; i >= 0; i-- ) {
+            const float w = weights[i];
             if ( w < breaks.back() / step ) {
                 LOG_INFO( "weight-break-point", w );
                 breaks.push_back( w );
@@ -181,6 +184,15 @@ namespace panna {
         }
         std::reverse(breaks.begin(), breaks.end());
         return breaks;
+    }
+
+    static std::vector<float> find_breaks( const std::vector<Edge>& tree, float step ) {
+        std::vector<float> weights;
+        weights.reserve( tree.size() );
+        for ( const auto& e : tree ) {
+            weights.push_back( e.weight );
+        }
+        return find_breaks( weights, step );
     }
 
     /// A unit of work pulled by a persistent worker: one repetition at one prefix.
@@ -819,6 +831,7 @@ namespace panna {
                   oitem = work.receive() ) {
                 const size_t prefix = oitem->prefix;
                 const size_t repetition = oitem->repetition;
+                Timer _timer("worker-repetition");
                 if ( found ) {
                     // Tree already found: skip the work but still send a (empty) partial
                     // so the driver's per-prefix drain count stays balanced.
@@ -827,6 +840,8 @@ namespace panna {
                     partials.send( std::vector<Edge>() );
                     continue;
                 }
+                float sum_distances = 0.0, min_distance = std::numeric_limits<float>::infinity(), max_distance = 0.0;
+                float avg_denom = 0.0;
                 std::vector<Edge> possibly_useful_edges;
                 auto rr = running_result.read();
                 // local_tree is rebuilt in place by update_tree, so it stays a
@@ -850,15 +865,31 @@ namespace panna {
                         // add to the possibly useful edges only if they would
                         // improve the local copy of the core distances
                         for (auto & e : updates) {
+                            sum_distances += e.weight;
+                            if (e.weight < min_distance) {
+                                min_distance = e.weight;
+                            }
+                            if (e.weight > max_distance) {
+                                max_distance = e.weight;
+                            }
                             if (neighborhoods.can_improve(e)) {
                                 possibly_useful_edges.push_back(e);
                             }
                         }
+                        avg_denom += updates.size();
                         update_tree( local_tree, updates, neighborhoods );
                         expect( local_tree.size() > 0 );
                         // early stop if the solution has been found in the meantime
                         return found.load();
                     } );
+                float avg_distance = sum_distances / avg_denom;
+                // clang-format off
+                LOG_INFO("logger", "worker", "tid", tid, "repetition", repetition, "prefix", prefix,
+                          "cnt_distances", cnt_dist, "cnt_collisions", cnt_collisions,
+                          "average_distance", avg_distance,
+                          "min_distance", min_distance,
+                          "max_distance", max_distance);
+                // clang-format on
                 count_distances += cnt_dist;
                 count_collisions += cnt_collisions;
                 possibly_useful_edges.insert( possibly_useful_edges.end(),
@@ -1108,15 +1139,15 @@ namespace panna {
                 }
             }
 
-            if ( !found.load() ) {
-                throw std::runtime_error( "Minimum spanning tree not found" );
-            }
-
             // Shut down the persistent pool: close the work channel so idle workers
             // wake and exit, then join them.
             work.close();
             for ( auto&& worker : workers ) {
                 worker.join();
+            }
+
+            if ( !found.load() ) {
+                throw std::runtime_error( "Minimum spanning tree not found" );
             }
 
             std::vector<Edge> tree( running_result.read()->tree );
@@ -1128,7 +1159,9 @@ namespace panna {
             num_collisions = count_collisions;
 
             // This is just a sanity check to see if dsu works as intended
-            expect( is_connected( tree ) );
+            if ( !is_connected( tree ) ) {
+                throw std::runtime_error( "the returned tree is not connected" );
+            }
             LOG_INFO( "msg",
                       "EMST finished",
                       "distances_computed",
@@ -1143,18 +1176,50 @@ namespace panna {
         std::pair<std::vector<Edge>, CoreDistances>
         find_tree_mutual_reachability_distance( size_t num_neighbors ) {
             clear();
+            const auto find_start_t = std::chrono::steady_clock::now();
 
             // Collector-owned working state, constructed once and kept in sync with
             // the published snapshot across prefixes.
             MRReducerState state( num_data );
             state.core_distances =
                 CoreDistances::random<Dataset, Distance>( table.get_dataset(), num_neighbors );
+            // Sharpen the core-distance estimates with the clustering tree edges,
+            // whose distances have already been computed.
+            for ( const auto& edge : initial_tree ) {
+                state.core_distances.update( edge.a, edge.b, edge.weight );
+            }
+
+            // Start the search from the clustering-based spanning tree built at
+            // construction time rather than from an empty forest. The confirmed
+            // filter stays empty (no edge is confirmed yet), but the heaviest
+            // mutual-reachability weight of the seeded tree already bounds the
+            // weight of any MST edge (cycle property), so workers can prune
+            // distances right away.
+            {
+                std::vector<Edge> seed( initial_tree );
+                update_tree( state.tree, seed, state.core_distances );
+            }
+            expect( state.tree.size() == num_data - 1 );
+
             Billboard<MRRunningResult> running_result;
             running_result.update( MRRunningResult( std::vector<Edge>( state.tree ),
                                                     DSU( state.filter ),
                                                     CoreDistances( state.core_distances ) ) );
 
-           std::atomic<float> max_weight( std::numeric_limits<float>::infinity() );
+            // The rehash schedule is computed on the mutual-reachability weights
+            // of the seeded tree, since that is the scale `max_weight` prunes at.
+            // The tree is sorted by mutual-reachability weight (update_tree's
+            // output order), even though the stored .weight is the raw lower bound.
+            std::vector<float> mr_weights;
+            mr_weights.reserve( state.tree.size() );
+            for ( const auto& e : state.tree ) {
+                mr_weights.push_back( state.core_distances.mutual_reachability_distance( e ) );
+            }
+            const std::vector<float> breaks = find_breaks( mr_weights, 10.0 );
+
+            // Pruning raw distances against a mutual-reachability bound is safe
+            // because the mutual-reachability distance dominates the raw distance.
+            std::atomic<float> max_weight( mr_weights.back() );
             std::atomic_size_t count_distances( 0 ), count_collisions( 0 );
             const size_t max_threads = get_worker_count( max_repetitions );
             LOG_INFO( "msg", "parallelism config",
@@ -1181,40 +1246,62 @@ namespace panna {
                                       std::ref( partials ) );
             }
 
-            for ( size_t prefix = max_hashbits; prefix > 0 && !found; prefix-- ) {
-                // Enqueue this prefix's repetitions for the persistent pool.
-                for ( size_t repetition = 0; repetition < max_repetitions; repetition++ ) {
-                    work.send( WorkItem{ .prefix = prefix, .repetition = repetition } );
+            bool first_build = true;
+            for ( const float distance_break : breaks ) {
+                if ( found.load() ) {
+                    break;
                 }
+                LOG_INFO( "distance-break", distance_break );
+                table.builder.reset();
+                table.builder.fit( table.get_dataset(),
+                                   distance_break,
+                                   table.num_repetitions(),
+                                   delta / ( num_data - 1 ) );
 
-                // Drain exactly one partial per enqueued item (even after `found`)
-                // so no item is left in the channel and all workers return to
-                // waiting -- this guarantees index quiescence.
-                size_t completed_repetitions = 0;
-                while ( completed_repetitions < max_repetitions ) {
-                    std::optional<std::vector<Edge>> local_tree = partials.receive();
-                    expect( local_tree.has_value() );
-                    completed_repetitions++;
-                    if ( found ) {
-                        continue;
+                size_t initial_prefix = max_hashbits;
+                if ( first_build ) {
+                    // In this case the last hash value holds the smallest hash value of
+                    // the previous repetition
+                    table.rebuild();
+                    first_build = false;
+                } else {
+                    table.rehash();
+                    initial_prefix--;
+                }
+                for ( size_t prefix = initial_prefix; prefix > 0 && !found; prefix-- ) {
+                    // Enqueue this prefix's repetitions for the persistent pool.
+                    for ( size_t repetition = 0; repetition < max_repetitions; repetition++ ) {
+                        work.send( WorkItem{ .prefix = prefix, .repetition = repetition } );
                     }
-                    std::vector<Edge> update = std::move( *local_tree );
-                    // clang-format off
-                    LOG_DEBUG( "logger", "collector", "msg", "received update", "update-size", update.size());
-                    // clang-format: on
 
+                    // Drain exactly one partial per enqueued item (even after `found`)
+                    // so no item is left in the channel and all workers return to
+                    // waiting -- this guarantees index quiescence.
+                    size_t completed_repetitions = 0;
+                    while ( completed_repetitions < max_repetitions ) {
+                        std::optional<std::vector<Edge>> local_tree = partials.receive();
+                        expect( local_tree.has_value() );
+                        completed_repetitions++;
+                        if ( found ) {
+                            // discard late partials; keep draining to balance the channel
+                            continue;
+                        }
+                        std::vector<Edge> update = std::move( *local_tree );
+                        // clang-format off
+                        LOG_DEBUG( "logger", "collector", "msg", "received update", "update-size", update.size());
+                        // clang-format on
 
-                    // Update the owned core distances with the incoming partial, then
-                    // merge into the owned tree in place.
-                    for (auto & edge : update) {
-                        state.core_distances.update(edge);
-                    }
-                    update_tree(state.tree, update, state.core_distances);
-                    // clang-format off
-                    LOG_INFO( "logger", "collector",
-                              "tree-size", state.tree.size(),
-                              "prefix", prefix,
-                              "completed-repetitions", completed_repetitions );
+                        // Update the owned core distances with the incoming partial, then
+                        // merge into the owned tree in place.
+                        for (auto & edge : update) {
+                            state.core_distances.update(edge);
+                        }
+                        update_tree(state.tree, update, state.core_distances);
+                        // clang-format off
+                        LOG_INFO( "logger", "collector",
+                                  "tree-size", state.tree.size(),
+                                  "prefix", prefix,
+                                  "completed-repetitions", completed_repetitions );
                         // clang-format on
 
                         if ( state.tree.size() == num_data - 1 ) {
@@ -1239,6 +1326,19 @@ namespace panna {
                             max_weight =
                                 state.core_distances.mutual_reachability_distance( state.tree.back() );
                             LOG_INFO( "logger", "collector", "max-weight", max_weight.load() );
+                            profile.push_back( ExecutionProfileElement{
+                                .elapsed_ms =
+                                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now() - find_start_t )
+                                        .count(),
+                                .prefix = prefix,
+                                .repetition = completed_repetitions,
+                                .emst_confirmed_weight = stop.confirmed_weight,
+                                .emst_weight_lower_bound = weight_lower_bound,
+                                .emst_max_weight = max_weight,
+                                .emst_max_confirmed_weight = stop.heaviest_confirmed_edge,
+                                .emst_total_weight = stop.total_weight,
+                                .emst_num_confirmed = num_data - 1 - stop.edges_to_confirm } );
 
                             // stop if we are done
                             if ( should_stop ) {
@@ -1262,6 +1362,7 @@ namespace panna {
                                                                 CoreDistances( state.core_distances ) ) );
                     }
                     LOG_INFO( "msg", "completed prefix", "prefix", prefix );
+                }
             }
 
             // Shut down the persistent pool: close the work channel so idle workers
@@ -1271,6 +1372,10 @@ namespace panna {
                 worker.join();
             }
 
+            if ( !found.load() ) {
+                throw std::runtime_error( "Minimum spanning tree not found" );
+            }
+
             auto rr = running_result.read();
             std::vector<Edge> tree( rr->tree );
             CoreDistances core_distances( rr->neighborhoods);
@@ -1278,7 +1383,9 @@ namespace panna {
             distances_computed = count_distances;
             num_collisions = count_collisions;
             // This is just a sanity check to see if dsu works as intended
-            expect( is_connected( tree ) );
+            if ( !is_connected( tree ) ) {
+                throw std::runtime_error( "the returned tree is not connected" );
+            }
             LOG_INFO( "msg",
                       "EMST finished",
                       "distances_computed",
