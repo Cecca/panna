@@ -122,6 +122,16 @@ _DATASETS_INFO = {
         _load_hdf5,
         "euclidean",
     ),
+    "agnews-mxbai-1024-euclidean": (
+        "https://huggingface.co/datasets/vector-index-bench/vibe/resolve/main/agnews-mxbai-1024-euclidean.hdf5",
+        _load_hdf5,
+        "euclidean",
+    ),
+    "celeba-resnet-2048-cosine": (
+        "https://huggingface.co/datasets/vector-index-bench/vibe/resolve/main/celeba-resnet-2048-cosine.hdf5",
+        _load_hdf5,
+        "cosine",
+    ),
     "simplewiki-openai-3072-normalized": (
         "https://huggingface.co/datasets/vector-index-bench/vibe/resolve/main/simplewiki-openai-3072-normalized.hdf5?download=true",
         _load_hdf5,
