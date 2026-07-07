@@ -45,7 +45,7 @@ def _():
 def _():
     excluded_shas = [
         # the unnormalized glove-100 dataset
-        "cfc5b3597505fbebf090fbeee98ec44efe4c1113c87b9d5919f89617167447c1d6b1d580fe5bd551f1a000bd278f8882d88ec560aa06b600f565db3277c8f9f3"
+     "cfc5b3597505fbebf090fbeee98ec44efe4c1113c87b9d5919f89617167447c1d6b1d580fe5bd551f1a000bd278f8882d88ec560aa06b600f565db3277c8f9f3"
     ]
     return (excluded_shas,)
 
@@ -59,7 +59,128 @@ def _(mo):
 
 
 @app.cell
-def _(cs, excluded_shas, node_name, pl, sizes):
+def _(experiments, mo):
+    dataset_sel = mo.ui.dropdown(experiments["dataset"].unique().to_list())
+    dataset_sel
+    return (dataset_sel,)
+
+
+@app.cell
+def _(dataset_sel, experiments, pl):
+    (
+        experiments
+        .filter(pl.col("dataset") == dataset_sel.value)
+        .select("dataset", "display algorithm", "running_time_s", "relative_error", "algorithm")
+        .sort("dataset", "running_time_s")
+    )
+    return
+
+
+@app.cell
+def _(dataset_sel, experiments, pl, plt, sns):
+    sns.scatterplot(
+        data=(
+            experiments.filter(pl.col("dataset") == dataset_sel.value)
+            .select(
+                "dataset",
+                "display algorithm",
+                "running_time_s",
+                "relative_error",
+                "algorithm",
+                pl.col("parameters").struct.field("family").fill_null("tutte"),
+            )
+            .sort("dataset", "running_time_s")
+        ),
+        x="relative_error",
+        y="running_time_s",
+        hue="family",
+        style="family"
+    )
+    plt.yscale("log")
+    plt.show()
+    return
+
+
+@app.cell
+def _(excluded_shas, ground_truth, node_name, pl):
+    experiments = (
+        pl.read_ndjson("results/emst.json", infer_schema_length=None)
+        .filter(pl.col("dataset_sample_frac").is_null())
+        .filter(pl.col("machine").struct.field("node_name") == node_name)
+        .filter(pl.col("dataset_sha").is_in(excluded_shas).not_())
+        .filter(pl.col("version").is_in(["0.3.2", "13"]))
+        .with_columns(
+            pl.col("dataset").str.replace(
+                "-[0-9]+-(euclidean|angular|normalized)", ""
+            ),
+            pl.when(pl.col("parameters").struct.field("exact"))
+            .then(pl.col("algorithm") + "-exact")
+            .otherwise("algorithm")
+            .alias("display algorithm")
+        )
+        .with_columns(
+            pl.when(pl.col("algorithm") == "k+")
+            .then(
+                pl.lit("k+ (")
+                + pl.col("parameters").struct.field("family").fill_null("?")
+                + ", "
+                + pl.col("parameters").struct.field("epsilon").fill_null("?")
+                + pl.lit(")")
+            )
+            .otherwise(pl.col("algorithm"))
+            .alias("display algorithm")
+        )
+        .join(ground_truth, on="dataset", how="left")
+        .with_columns(
+            relative_error=(
+                pl.col("emst_weight") - pl.col("ground_weight")
+            ).abs()
+            / pl.col("ground_weight")
+        )
+        .select(pl.exclude("ground_weight"))
+    )
+    return (experiments,)
+
+
+@app.cell
+def _(excluded_shas, pl):
+    # Exact EMST weight per dataset, computed by the `k+` algorithm with
+    # epsilon == 0. Used as the reference to compute the relative error of
+    # the baselines.
+    ground_truth = (
+        pl.read_ndjson("results/emst.json", infer_schema_length=None)
+        .filter(pl.col("algorithm").str.contains("k+"))
+        .filter(pl.col("parameters").struct.field("epsilon") == 0.0)
+        .filter(pl.col("dataset_sample_frac").is_null())
+        .filter(pl.col("dataset_sha").is_in(excluded_shas).not_())
+        .filter( # keep most recent run
+            pl.col("timestamp")
+            == pl.col("timestamp")
+            .max()
+            .over(
+                [
+                    "algorithm",
+                    "parameters",
+                    "machine",
+                    "dataset",
+                    "dataset_sample_frac",
+                    "dataset_sample_seed",
+                ]
+            )
+        )
+        .with_columns(
+            pl.col("dataset").str.replace(
+                "-[0-9]+-(euclidean|angular|normalized)", ""
+            )
+        )
+        .group_by("dataset")
+        .agg(ground_weight=pl.col("emst_weight").min())
+    )
+    return (ground_truth,)
+
+
+@app.cell
+def _(cs, excluded_shas, ground_truth, node_name, pl, sizes):
     baselines = (
         pl.read_ndjson("results/emst.json", infer_schema_length=None)
         .filter(pl.col("algorithm").str.contains("k+").not_())
@@ -70,7 +191,9 @@ def _(cs, excluded_shas, node_name, pl, sizes):
         .with_columns(
             pl.col("dataset").str.replace(
                 "-[0-9]+-(euclidean|angular|normalized)", ""
-            )
+            ),
+            pl.when(pl.col("parameters").struct.field("exact")).then(pl.col("algorithm") + "-exact").otherwise("algorithm").alias("algorithm")
+            # pl.when(pl.col("algorithm") == pl.lit("tutte")).then(pl.lit("tutte-") + pl.col("parameters").struct.field("exact")).otherwise("algorithm").alias("algoritm")
         )
         .join(sizes, on="dataset", how="inner")
         .with_columns(
@@ -81,6 +204,14 @@ def _(cs, excluded_shas, node_name, pl, sizes):
         .with_columns(cs.numeric().round(2))
         .group_by("dataset", "algorithm")
         .agg(pl.col("*").mean())
+        .join(ground_truth, on="dataset", how="left")
+        .with_columns(
+            relative_error=(
+                pl.col("emst_weight") - pl.col("ground_weight")
+            ).abs()
+            / pl.col("ground_weight")
+        )
+        .select(pl.exclude("ground_weight"))
         .sort("running_time_s")
 
     )
@@ -142,15 +273,53 @@ def _(excluded_shas, mo, pl, sel_algo_version):
                 "-[0-9]+-(euclidean|angular|normalized)", ""
             )
         )
+        .with_columns(
+            # Split the `k+` algorithm into one algorithm per LSH family,
+            # e.g. `k+ (lattice)`, `k+ (crosspolytope)`, `k+ (simhash)`.
+            pl.when(pl.col("algorithm") == "k+")
+            .then(
+                pl.lit("k+ (")
+                + pl.col("parameters").struct.field("family").fill_null("?")
+                + pl.lit(")")
+            )
+            .otherwise(pl.col("algorithm"))
+            .alias("algorithm")
+        )
     )
-    algo_name = mo.ui.dropdown.from_series(full_results["algorithm"], value="k+")
+    _default_algo = next(
+        (a for a in full_results["algorithm"].unique().sort() if a.startswith("k+")),
+        None,
+    )
+    algo_name = mo.ui.dropdown.from_series(full_results["algorithm"], value=_default_algo)
     algo_name
     return algo_name, full_results
 
 
 @app.cell
-def _(full_results, pl):
-    emst_results = full_results.filter(pl.col("algorithm") == "k+")
+def _(full_results, mo, pl):
+    _families = (
+        full_results.filter(pl.col("algorithm").str.starts_with("k+"))
+        .select(pl.col("parameters").struct.field("family"))
+        .to_series()
+        .drop_nulls()
+        .unique()
+        .sort()
+        .to_list()
+    )
+    sel_family = mo.ui.dropdown(
+        _families,
+        value=_families[0] if _families else None,
+        label="k+ LSH family",
+    )
+    sel_family
+    return (sel_family,)
+
+
+@app.cell
+def _(full_results, pl, sel_family):
+    emst_results = full_results.filter(
+        pl.col("algorithm") == f"k+ ({sel_family.value})"
+    )
     return (emst_results,)
 
 
@@ -280,7 +449,7 @@ def _(mo):
 
 
 @app.cell
-def _(dataset_list, dataset_stats, emst_results, node_name, pl):
+def _(dataset_list, dataset_stats, emst_results, node_name, pl, sel_family):
     approximate_full = (
         emst_results
         .filter(pl.col("machine").struct.field("node_name") == node_name)
@@ -315,7 +484,7 @@ def _(dataset_list, dataset_stats, emst_results, node_name, pl):
                 pl.col("normalized_runtime")
         )
         .sort("dataset", "algorithm", "repetitions", "epsilon")
-        .filter(pl.col("algorithm") == "k+")
+        .filter(pl.col("algorithm") == f"k+ ({sel_family.value})")
         .select("dataset", "epsilon", "running_time_s", "relative_error", "distcomps_frac", "normalized_runtime")
         .sort(
             pl.col("dataset").cast(pl.Enum(dataset_list))
@@ -362,32 +531,6 @@ def _(approximate_full, baselines, cs):
     return
 
 
-@app.cell(disabled=True)
-def _(approximate_full, baselines, cs):
-    def approximate_normalized_time():
-        our_cols = cs.matches(r"\d")
-        base = baselines.pivot(index="dataset", on="algorithm", values="normalized_runtime")
-        approximate_time_tbl = (
-            approximate_full
-            .pivot(index=["dataset"], on="epsilon", values=["normalized_runtime"], aggregate_function="mean")
-            .join(base, on="dataset", how="left")
-            .select("dataset", cs.exclude(our_cols, "dataset"), our_cols)
-            .style
-            # .fmt_number(columns=cs.numeric())
-            .fmt_scientific(columns=cs.numeric())
-            .tab_spanner(label="Our time (s)", columns=our_cols)
-            # .tab_spanner(label="Baselines time (s)", columns=cs.exclude(our_cols, "dataset"))
-            .cols_label_with(fn=lambda c: "epsilon=" + c, columns=our_cols)
-        )
-
-        with open("notebooks/emst-epsilon-table.tex", "w") as fp:
-            print(approximate_time_tbl.as_latex().replace(r"epsilon=", r"$\epsilon=$"), file=fp)
-        return approximate_time_tbl
-
-    approximate_normalized_time()
-    return
-
-
 @app.cell
 def _(approximate_full, cs):
     def approximate_auxiliary():
@@ -410,29 +553,6 @@ def _(approximate_full, cs):
     return
 
 
-@app.cell
-def _(approximate_full, cs):
-    approximate_full_tbl = (
-        approximate_full
-        .pivot(index=["dataset"], on="epsilon", values=["running_time_s", "relative_error", "distcomps_frac"], aggregate_function="mean")
-        .style
-        .fmt_number(columns=cs.starts_with("running_time"))
-        .fmt_percent(columns=cs.starts_with("relative_error"))
-        .fmt_percent(columns=cs.starts_with("distcomps"))
-        .tab_spanner(label="Time (n)", columns=cs.starts_with("running_time"))
-        .tab_spanner(label="Relative error", columns=cs.starts_with("relative_error"))
-        .tab_spanner(label="Distance computations", columns=cs.starts_with("distcomps"))
-        .cols_label_with(fn=lambda c: c.split("_")[-1], columns=cs.starts_with("running_time_s"))
-        .cols_label_with(fn=lambda c: c.split("_")[-1], columns=cs.starts_with("relative_error"))
-        .cols_label_with(fn=lambda c: c.split("_")[-1], columns=cs.starts_with("distcomps"))
-    )
-
-    with open("notebooks/emst-epsilon.tex", "w") as fp:
-        print(approximate_full_tbl.as_latex(), file=fp)
-    approximate_full_tbl
-    return
-
-
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
@@ -450,13 +570,14 @@ def _(mo):
 
 
 @app.cell
-def _(mo, pl):
+def _(mo, pl, sel_family):
     hist_data = (
         pl.read_ndjson("results/emst.json", infer_schema_length=None)
         # .filter(pl.col("dataset") == "sift")
         .filter(pl.col("dataset_sample_frac").is_null())
         .filter(pl.col("parameters").struct.field("epsilon") == 0)
         .filter(pl.col("algorithm") == "k+")
+        .filter(pl.col("parameters").struct.field("family") == sel_family.value)
     )
     hist_dataset = mo.ui.dropdown(hist_data["dataset"].unique().to_list())
     hist_dataset
@@ -563,24 +684,6 @@ def _(compute_emst, mo, np, plt, sns):
         plt.show()
         return weights, ax
 
-    return (edge_distribution,)
-
-
-@app.cell
-def _(edge_distribution):
-    edge_distribution("datasets/glove-100-angular.hdf5")
-    return
-
-
-@app.cell
-def _(edge_distribution):
-    edge_distribution("datasets/nytimes-256-angular-dedup.hdf5")
-    return
-
-
-@app.cell
-def _(edge_distribution):
-    edge_distribution("datasets/simplewiki-openai-3072-normalized.hdf5")
     return
 
 
