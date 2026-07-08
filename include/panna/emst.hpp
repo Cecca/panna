@@ -14,6 +14,7 @@
 #include "panna/channel.hpp"
 #include "panna/data.hpp"
 #include "panna/dsu.hpp"
+#include "panna/hll.hpp"
 #include "panna/logging.hpp"
 #include "panna/rand.hpp"
 #include "panna/timer.hpp"
@@ -566,6 +567,7 @@ namespace panna {
         const float epsilon{ 0.2 };
         size_t distances_computed = 0;
         size_t num_collisions = 0;
+        size_t unique_pairs_estimate = 0;
         size_t index_size_bytes = 0;
         std::vector<ExecutionProfileElement> profile;
         /// spanning tree built with `clustering_emst` at construction time,
@@ -677,6 +679,12 @@ namespace panna {
             return num_collisions;
         }
 
+        /// @brief HyperLogLog estimate of the number of distinct pairs whose
+        /// distance was actually computed during the last run
+        size_t get_unique_pairs_estimate() const {
+            return unique_pairs_estimate;
+        }
+
         size_t get_index_size_bytes() const {
             return index_size_bytes;
         }
@@ -758,6 +766,7 @@ namespace panna {
                                 std::atomic<float> &max_weight,
                                 std::atomic_size_t &count_distances,
                                 std::atomic_size_t &count_collisions,
+                                HyperLogLog &unique_pairs,
                                 Channel<WorkItem> &work,
                                 Channel<std::vector<Edge>> &partials ) {
             for ( std::optional<WorkItem> oitem = work.receive(); oitem.has_value();
@@ -790,6 +799,7 @@ namespace panna {
                     prefix,
                     10 * dsu.size(), // buffer size
                     max_weight,
+                    unique_pairs,
                     [&]( uint32_t x ) { return rr->filter.get_parent( x ); },
                     [&]( std::vector<Edge>& scratch ) {
                         LOG_DEBUG( "msg", "building tree on batch", "logger", "worker", "batch_size", scratch.size() );
@@ -835,6 +845,7 @@ namespace panna {
                                                     std::atomic<float>& max_weight,
                                                     std::atomic_size_t& count_distances,
                                                     std::atomic_size_t& count_collisions,
+                                                    HyperLogLog& unique_pairs,
                                                     Channel<WorkItem>& work,
                                                     Channel<std::vector<Edge>>& partials ) {
             for ( std::optional<WorkItem> oitem = work.receive(); oitem.has_value();
@@ -870,6 +881,7 @@ namespace panna {
                     prefix,
                     10 * rr->filter.size(), // buffer size
                     max_weight, // TODO: watch out this line
+                    unique_pairs,
                     [&]( uint32_t x ) { return rr->filter.get_parent( x ); },
                     [&]( std::vector<Edge>& updates ) {
                         // add to the possibly useful edges only if they would
@@ -965,6 +977,13 @@ namespace panna {
             Channel<WorkItem> work( max_repetitions );
             Channel<std::vector<Edge>> partials( max_repetitions );
             std::vector<std::thread> workers;
+            // One HLL per worker; no synchronization on the hot path. Merged
+            // element-wise after the workers join.
+            std::vector<HyperLogLog> worker_hlls;
+            worker_hlls.reserve( max_threads );
+            for ( size_t tid = 0; tid < max_threads; tid++ ) {
+                worker_hlls.emplace_back( 14 );
+            }
             for ( size_t tid = 0; tid < max_threads; tid++ ) {
                 workers.emplace_back( EMST::worker_fun,
                                       tid,
@@ -974,6 +993,7 @@ namespace panna {
                                       std::ref( max_weight ),
                                       std::ref( count_distances ),
                                       std::ref( count_collisions ),
+                                      std::ref( worker_hlls[tid] ),
                                       std::ref( work ),
                                       std::ref( partials ) );
             }
@@ -1177,6 +1197,11 @@ namespace panna {
             }
             distances_computed = count_distances;
             num_collisions = count_collisions;
+            HyperLogLog merged_hll( 14 );
+            for ( auto& h : worker_hlls ) {
+                merged_hll.merge( h );
+            }
+            unique_pairs_estimate = static_cast<size_t>( merged_hll.estimate() );
 
             // This is just a sanity check to see if dsu works as intended
             if ( !is_connected( tree ) ) {
@@ -1186,6 +1211,8 @@ namespace panna {
                       "EMST finished",
                       "distances_computed",
                       distances_computed,
+                      "unique_pairs_estimate",
+                      unique_pairs_estimate,
                       "num_collisions",
                       num_collisions,
                       "num_total_pairs",
@@ -1253,6 +1280,12 @@ namespace panna {
             Channel<WorkItem> work( max_repetitions );
             Channel<std::vector<Edge>> partials( max_repetitions );
             std::vector<std::thread> workers;
+            // One HLL per worker; merged element-wise after join.
+            std::vector<HyperLogLog> worker_hlls;
+            worker_hlls.reserve( max_threads );
+            for ( size_t tid = 0; tid < max_threads; tid++ ) {
+                worker_hlls.emplace_back( 14 );
+            }
             for ( size_t tid = 0; tid < max_threads; tid++ ) {
                 workers.emplace_back( EMST::worker_fun_mutual_reachability,
                                       tid,
@@ -1262,6 +1295,7 @@ namespace panna {
                                       std::ref( max_weight ),
                                       std::ref( count_distances ),
                                       std::ref( count_collisions ),
+                                      std::ref( worker_hlls[tid] ),
                                       std::ref( work ),
                                       std::ref( partials ) );
             }
@@ -1402,6 +1436,11 @@ namespace panna {
 
             distances_computed = count_distances;
             num_collisions = count_collisions;
+            HyperLogLog merged_hll( 14 );
+            for ( auto& h : worker_hlls ) {
+                merged_hll.merge( h );
+            }
+            unique_pairs_estimate = static_cast<size_t>( merged_hll.estimate() );
             // This is just a sanity check to see if dsu works as intended
             if ( !is_connected( tree ) ) {
                 throw std::runtime_error( "the returned tree is not connected" );
@@ -1410,6 +1449,8 @@ namespace panna {
                       "EMST finished",
                       "distances_computed",
                       distances_computed,
+                      "unique_pairs_estimate",
+                      unique_pairs_estimate,
                       "num_collisions",
                       num_collisions,
                       "num_total_pairs",
@@ -1579,6 +1620,7 @@ namespace panna {
         void clear() {
             distances_computed = 0;
             num_collisions = 0;
+            unique_pairs_estimate = 0;
             profile.clear();
         }
     }; // closes class

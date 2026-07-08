@@ -314,6 +314,7 @@ struct EMST_exposed {
                 }
                 ret["distance_count"] = index.get_distance_count();
                 ret["collisions_count"] = index.get_collisions_count();
+                ret["unique_pairs_estimate"] = index.get_unique_pairs_estimate();
                 ret["index_size_bytes"] = index.get_index_size_bytes();
                 ret["profile"] = profile;
             },

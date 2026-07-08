@@ -15,6 +15,7 @@
 
 #include "cereal/archives/binary.hpp"
 #include "panna/expect.hpp"
+#include "panna/hll.hpp"
 #include "panna/logging.hpp"
 #include "panna/lsh/predicates.hpp"
 #include "panna/prefixmap.hpp"
@@ -324,6 +325,7 @@ namespace panna {
             size_t concatenations,
             size_t buffer_size,
             float weight_filter,
+            HyperLogLog& unique_pairs,
             std::function<uint32_t( uint32_t )> group_fun,
             std::function<bool( std::vector<Edge>& )> batch_output ) const {
             expect( hasher );
@@ -367,6 +369,7 @@ namespace panna {
                     collision_cnt++;
                     float distance = Distance::compute( a, b );
                     distance_cnt++;
+                    unique_pairs.add( hash_u64( pair_key( a_idx, b_idx ) ) );
                     if ( distance <= weight_filter ) {
                         scratch.at(write_head++) = {
                             .weight = distance,
