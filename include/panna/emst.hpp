@@ -477,6 +477,38 @@ namespace panna {
             update( edge.a, edge.b, edge.weight );
         }
 
+        void diff(const CoreDistances & other, std::vector<Edge> & out) const {
+            for (size_t i=0; i<num_points; i++) {
+                if (this->core_distance(i) < other.core_distance(i)) {
+                    // there was an improvement in the core distance for point
+                    // `i`: collect the neighbor edges that are present in
+                    // `other` but no longer in `this`.
+                    auto [this_begin, this_end] = this->neighbors_view(i);
+                    auto [other_begin, other_end] = other.neighbors_view(i);
+                    for (auto o = other_begin; o != other_end; ++o) {
+                        const uint32_t nbr = o->second;
+                        // skip empty/sentinel neighbor slots
+                        if (nbr == std::numeric_limits<uint32_t>::max()) {
+                            continue;
+                        }
+                        bool in_this = false;
+                        for (auto t = this_begin; t != this_end; ++t) {
+                            if (t->second == nbr) {
+                                in_this = true;
+                                break;
+                            }
+                        }
+                        if (!in_this) {
+                            out.push_back(
+                                Edge{ .weight = o->first,
+                                      .a = static_cast<uint32_t>(i),
+                                      .b = nbr } );
+                        }
+                    }
+                }
+            }
+        }
+
         bool can_improve(const Edge & edge) const {
             return edge.weight <= core_distance( edge.a ) || edge.weight <= core_distance( edge.b );
         }
@@ -852,14 +884,13 @@ namespace panna {
                 }
                 float sum_distances = 0.0, min_distance = std::numeric_limits<float>::infinity(), max_distance = 0.0;
                 float avg_denom = 0.0;
-                std::vector<Edge> possibly_useful_edges;
                 auto rr = running_result.read();
                 // local_tree is rebuilt in place by update_tree, so it stays a
-                // worker-local copy. The core distances are only read (can_improve /
-                // update_tree take them by const ref), so read them through the shared
-                // snapshot instead of deep-copying the whole neighbor array.
+                // worker-local copy.
+                // The core distances are a worker-local copy as well, since to reduce the
+                // memory usage we have to update them.
                 std::vector<Edge> local_tree( rr->tree );
-                const CoreDistances& neighborhoods = rr->neighborhoods;
+                CoreDistances neighborhoods(rr->neighborhoods);
                 LOG_INFO(
                     "tid", tid, "repetition", repetition, "prefix", prefix, "logger", "worker" );
                 // The edges we have to keep even if they are not part of the tree,
@@ -873,7 +904,8 @@ namespace panna {
                     [&]( uint32_t x ) { return rr->filter.get_parent( x ); },
                     [&]( std::vector<Edge>& updates ) {
                         // add to the possibly useful edges only if they would
-                        // improve the local copy of the core distances
+                        // improve the local copy of the core distances. The alternative
+                        // is to just accumulate all possibly improving edges.
                         for (auto & e : updates) {
                             sum_distances += e.weight;
                             if (e.weight < min_distance) {
@@ -882,9 +914,7 @@ namespace panna {
                             if (e.weight > max_distance) {
                                 max_distance = e.weight;
                             }
-                            if (neighborhoods.can_improve(e)) {
-                                possibly_useful_edges.push_back(e);
-                            }
+                            neighborhoods.update(e);
                         }
                         avg_denom += updates.size();
                         update_tree( local_tree, updates, neighborhoods );
@@ -902,9 +932,11 @@ namespace panna {
                 // clang-format on
                 count_distances += cnt_dist;
                 count_collisions += cnt_collisions;
+                std::vector<Edge> possibly_useful_edges;
                 possibly_useful_edges.insert( possibly_useful_edges.end(),
                                               std::make_move_iterator( local_tree.begin() ),
                                               std::make_move_iterator( local_tree.end() ) );
+                neighborhoods.diff(rr->neighborhoods, possibly_useful_edges);
                 partials.send( std::move( possibly_useful_edges ) );
             }
         }
