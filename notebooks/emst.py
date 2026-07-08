@@ -32,7 +32,7 @@ def _():
     import seaborn as sns
     import matplotlib.pyplot as plt
 
-    return cs, mo, np, pl, plt, sns
+    return GT, cs, mo, np, pl, plt, sns
 
 
 @app.cell
@@ -66,13 +66,13 @@ def _(experiments, mo):
 
 
 @app.cell
-def _(dataset_sel, experiments, pl):
-    (
+def _(GT, dataset_sel, experiments, pl):
+    GT(
         experiments
         .filter(pl.col("dataset") == dataset_sel.value)
-        .select("dataset", "display algorithm", "running_time_s", "relative_error", "algorithm")
+        .select("dataset", "display algorithm", "running_time_s", "relative_error")
         .sort("dataset", "running_time_s")
-    )
+    ).fmt_number(columns="running_time_s").fmt_number(columns="relative_error", decimals=5)
     return
 
 
@@ -127,6 +127,8 @@ def _(excluded_shas, ground_truth, node_name, pl):
                 + pl.col("parameters").struct.field("epsilon").fill_null("?")
                 + pl.lit(")")
             )
+            .when(pl.col("parameters").struct.field("exact"))
+            .then(pl.col("algorithm") + "-exact")
             .otherwise(pl.col("algorithm"))
             .alias("display algorithm")
         )

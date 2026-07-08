@@ -185,6 +185,7 @@
               pyarrow
               h5py
               tqdm
+              requests
               panna-python
               fast-hdbscan
               icecream

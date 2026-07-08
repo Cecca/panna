@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 import os
 from pathlib import Path
-import urllib.request
 from urllib.parse import urlparse
 import logging
 import h5py
@@ -20,13 +19,12 @@ DATASETS_DIR = Path(os.environ.get("PANNA_DATA_DIR", "datasets"))
 
 
 def _download(url, destination: Path):
-    import certifi
-    import ssl
+    import requests
     from tqdm import tqdm
     if not destination.is_file():
         logging.info(f"downloading {url} to {destination}")
-        context = ssl.create_default_context(cafile=certifi.where())
-        with urllib.request.urlopen(url, context=context) as response:
+        with requests.get(url, stream=True) as response:
+            response.raise_for_status()
             total = int(response.headers.get("Content-Length", 0))
             with open(destination, "wb") as out_file, tqdm(
                 total=total or None,
@@ -35,7 +33,7 @@ def _download(url, destination: Path):
                 unit_divisor=1024,
                 desc=destination.name,
             ) as progress:
-                while chunk := response.read(1024 * 1024):
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
                     out_file.write(chunk)
                     progress.update(len(chunk))
 
@@ -141,6 +139,11 @@ _DATASETS_INFO = {
         "http://ann-benchmarks.com/deep-image-96-angular.hdf5",
         _load_hdf5,
         "angular",
+    ),
+    "mnist-784-euclidean": (
+        "http://ann-benchmarks.com/mnist-784-euclidean.hdf5",
+        _load_hdf5,
+        "euclidean",
     ),
     "fashion-mnist-784-euclidean": (
         "http://ann-benchmarks.com/fashion-mnist-784-euclidean.hdf5",
