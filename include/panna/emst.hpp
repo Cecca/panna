@@ -1299,6 +1299,7 @@ namespace panna {
             }
 
             bool first_build = true;
+            bool seeded = false;
             for ( const float distance_break : breaks ) {
                 if ( found.load() ) {
                     break;
@@ -1320,6 +1321,30 @@ namespace panna {
                     table.rehash();
                     initial_prefix--;
                 }
+
+                // Once the index is first built, seed the core distances from its
+                // finest-prefix neighbors before any work item is dispatched. This
+                // tightens the pruning bound the workers read, so the very first
+                // repetition already discards edges that cannot improve the core
+                // distances instead of hoarding them.
+                if ( !seeded ) {
+                    seed_core_distances( state.core_distances );
+                    // Re-normalize the tree under the tightened core distances
+                    // (no updates to merge, just a re-sort by the new
+                    // mutual-reachability weights) and republish the snapshot so
+                    // workers prune against the seeded estimates from item one.
+                    std::vector<Edge> no_updates;
+                    update_tree( state.tree, no_updates, state.core_distances );
+                    max_weight =
+                        state.core_distances.mutual_reachability_distance( state.tree.back() );
+                    state.filter.compress_all();
+                    running_result.update(
+                        MRRunningResult( std::vector<Edge>( state.tree ),
+                                         DSU( state.filter ),
+                                         CoreDistances( state.core_distances ) ) );
+                    seeded = true;
+                }
+
                 for ( size_t prefix = initial_prefix; prefix > 0 && !found; prefix-- ) {
                     // Enqueue this prefix's repetitions for the persistent pool.
                     for ( size_t repetition = 0; repetition < max_repetitions; repetition++ ) {
@@ -1451,6 +1476,47 @@ namespace panna {
 
         //*** Private methods */
     private:
+
+        /// Seed the core-distance estimates with genuine near neighbors read from
+        /// the LSH index at its finest prefix, where buckets are smallest and thus
+        /// hold the closest points. Every pair colliding at the finest prefix is
+        /// fed to `CoreDistances::update`, which keeps only the `num_neighbors`
+        /// smallest distances seen per point.
+        ///
+        /// This is always safe: `update` inserts real points at their real
+        /// distances, so a point's stored k-th-neighbor distance can only move
+        /// *down* toward its true value, never below it. The core distance stays a
+        /// valid upper bound; seeding merely tightens it. The payoff is that the
+        /// workers' `can_improve` filter starts rejecting the flood of colliding
+        /// pairs immediately, instead of after each point slowly accumulates k good
+        /// neighbors -- on dense datasets that flood is what exhausts memory in
+        /// `possibly_useful_edges`.
+        ///
+        /// Requires the index to be fitted and (re)built beforehand.
+        void seed_core_distances( CoreDistances& core_distances ) {
+            Timer _t( "seed core distances" );
+            const size_t finest_prefix = table.num_concatenations();
+            const float accept_all = std::numeric_limits<float>::infinity();
+            size_t seeded_pairs = 0;
+            for ( size_t repetition = 0; repetition < 4; repetition++ ) {
+                table.search_pairs_different_groups(
+                    repetition,
+                    finest_prefix,
+                    1 << 16, // buffer size
+                    accept_all,
+                    // Every point is its own group, so no colliding pair is filtered
+                    // out: we want all finest-prefix neighbors.
+                    []( uint32_t x ) { return x; },
+                    [&]( std::vector<Edge>& batch ) {
+                        for ( const auto& e : batch ) {
+                            core_distances.update( e.a, e.b, e.weight );
+                        }
+                        seeded_pairs += batch.size();
+                        return false; // never early-stop: scan the whole prefix
+                    } );
+            }
+            LOG_INFO( "msg", "seeded core distances", "pairs", seeded_pairs );
+        }
 
         /// @brief Checks wheter a tree is connected
         /// @param tree the tree that we want to check
