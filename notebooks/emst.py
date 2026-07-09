@@ -45,7 +45,13 @@ def _():
 def _():
     excluded_shas = [
         # the unnormalized glove-100 dataset
-     "cfc5b3597505fbebf090fbeee98ec44efe4c1113c87b9d5919f89617167447c1d6b1d580fe5bd551f1a000bd278f8882d88ec560aa06b600f565db3277c8f9f3"
+     "cfc5b3597505fbebf090fbeee98ec44efe4c1113c87b9d5919f89617167447c1d6b1d580fe5bd551f1a000bd278f8882d88ec560aa06b600f565db3277c8f9f3",
+        # HT
+        "24158ef4c3bfbfb1d9f396591fdfca9211d84b15a4e182233096c23d665270b8436154aed0412688fd665fdf4d1d51da0dd1dab952aa311479a3c16ca2c414e5",
+        # chem
+        "276e488084569d335e232b50f5dc79abb62002b9f2882935b9a4ce20926ff3df9f9282863085ed378d7b559e48e046e2e62233ad028565e60a06bf5ec9db9710",
+        # pamap2
+        "c237bb7ffcd74ea885b10b8fc3b9f5309571f873d25359c11d7c598d9dde91022dfe9b69b324cdb6f88d35db8719aedc4d9ee752d1298cd59df3edd9855a4585"
     ]
     return (excluded_shas,)
 
@@ -53,7 +59,7 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    # Baselines
+    # Clustering
     """)
     return
 
@@ -109,6 +115,7 @@ def _(excluded_shas, ground_truth, node_name, pl):
         .filter(pl.col("machine").struct.field("node_name") == node_name)
         .filter(pl.col("dataset_sha").is_in(excluded_shas).not_())
         .filter(pl.col("version").is_in(["0.3.2", "13"]))
+        .filter(pl.col("parameters").struct.field("cluster_k").is_null())
         .with_columns(
             pl.col("dataset").str.replace(
                 "-[0-9]+-(euclidean|angular|normalized)", ""
@@ -155,6 +162,7 @@ def _(excluded_shas, pl):
         .filter(pl.col("parameters").struct.field("epsilon") == 0.0)
         .filter(pl.col("dataset_sample_frac").is_null())
         .filter(pl.col("dataset_sha").is_in(excluded_shas).not_())
+        .filter(pl.col("parameters").struct.field("cluster_k").is_null())
         .filter( # keep most recent run
             pl.col("timestamp")
             == pl.col("timestamp")
@@ -566,20 +574,83 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
+    # Clustering
+    """)
+    return
+
+
+@app.cell
+def _(excluded_shas, node_name, pl):
+    experiments_clustering = (
+        pl.read_ndjson("results/emst.json", infer_schema_length=None)
+        .filter(pl.col("dataset_sample_frac").is_null())
+        .filter(pl.col("machine").struct.field("node_name") == node_name)
+        .filter(pl.col("dataset_sha").is_in(excluded_shas).not_())
+        .filter(pl.col("version").is_in(["0.3.2", "13"]))
+        .filter(pl.col("parameters").struct.field("cluster_k").is_null().not_().or_(pl.col("parameters").struct.field("min_samples") > 1))
+        .with_columns(
+            pl.col("dataset").str.replace(
+                "-[0-9]+-(euclidean|angular|normalized)", ""
+            ),
+            pl.when(pl.col("parameters").struct.field("exact"))
+            .then(pl.col("algorithm") + "-exact")
+            .otherwise("algorithm")
+            .alias("display algorithm"),
+            pl.col("parameters").struct.field("min_samples").fill_null(pl.col("parameters").struct.field("cluster_k")).alias("core_k")
+        )
+        .with_columns(
+            pl.when(pl.col("algorithm") == "k+")
+            .then(
+                pl.lit("k+ (")
+                + pl.col("parameters").struct.field("family").fill_null("?")
+                + ", "
+                + pl.col("parameters").struct.field("epsilon").fill_null("?")
+                + pl.lit(")")
+            )
+            .when(pl.col("parameters").struct.field("exact"))
+            .then(pl.col("algorithm") + "-exact")
+            .otherwise(pl.col("algorithm"))
+            .alias("display algorithm")
+        )
+    )
+    return (experiments_clustering,)
+
+
+@app.cell
+def _(GT, cs, experiments_clustering, pl):
+    (
+        GT(
+            experiments_clustering.sort(
+                "dataset", "core_k", "running_time_s"
+            ).select(
+                pl.format("{} ({})", "dataset", "core_k").alias("group"),
+                "display algorithm",
+                "running_time_s",
+                "emst_weight",
+            ),
+            groupname_col="group",
+        ).tab_options(row_group_as_column=True)
+        .fmt_number(columns=cs.numeric())
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
     # Appendix: performance history
     """)
     return
 
 
 @app.cell
-def _(mo, pl, sel_family):
+def _(mo, pl):
     hist_data = (
         pl.read_ndjson("results/emst.json", infer_schema_length=None)
         # .filter(pl.col("dataset") == "sift")
         .filter(pl.col("dataset_sample_frac").is_null())
         .filter(pl.col("parameters").struct.field("epsilon") == 0)
         .filter(pl.col("algorithm") == "k+")
-        .filter(pl.col("parameters").struct.field("family") == sel_family.value)
     )
     hist_dataset = mo.ui.dropdown(hist_data["dataset"].unique().to_list())
     hist_dataset
