@@ -778,6 +778,19 @@ namespace panna {
                       "heaviest_edge",  tree.back().weight ,
                       "tree-weight", tree_weight
             );
+            // Reweight the output edges with the mutual reachability
+            // distance (which was already used in update_tree).
+            // Furthermore, switch to the Euclidean distance, if
+            // the metric used was something different
+            for ( size_t i = 0; i < tree.size(); i++ ) {
+                const float w = Distance::to_euclidean( tree[i].weight );
+                const float ca =
+                    Distance::to_euclidean( cd.core_distance( tree[i].a ) );
+                const float cb =
+                    Distance::to_euclidean( cd.core_distance( tree[i].b ) );
+                tree[i].weight = std::max( { w, ca, cb } );
+            }
+
             return {tree_weight, tree};
         }
 
@@ -1471,6 +1484,20 @@ namespace panna {
                       num_collisions,
                       "num_total_pairs",
                       ( (size_t )num_data - 1 ) * (size_t)num_data / 2 );
+
+            // Reweight the output edges with the mutual reachability
+            // distance (which was already used in update_tree).
+            // Furthermore, switch to the Euclidean distance, if
+            // the metric used was something different
+            for ( size_t i = 0; i < tree.size(); i++ ) {
+                const float w = Distance::to_euclidean( tree[i].weight );
+                const float ca =
+                    Distance::to_euclidean( core_distances.core_distance( tree[i].a ) );
+                const float cb =
+                    Distance::to_euclidean( core_distances.core_distance( tree[i].b ) );
+                tree[i].weight = std::max( { w, ca, cb } );
+            }
+
             return { tree, core_distances };
         }
 

@@ -329,6 +329,7 @@ struct EMST_exposed {
 
     nb::tuple find_mst_exact() {
         auto tree = std::visit( []( auto& index ) { return index.exact_tree().second; }, inner );
+        // TODO: move this reweighting to emst.hpp
         reweight_with_euclidean( tree );
         return tree_to_pytuple( tree );
     }
@@ -369,6 +370,8 @@ struct EMST_exposed {
         auto& neighbor_results = result_pair.second;
         size_t num_points = neighbor_results.size();
 
+        // FIXME: watch out that these are not Euclidean if the user chose
+        // simhash or cross polytope
         auto core_vec_ptr = std::make_unique<std::vector<float>>(num_points);
         for (size_t i = 0; i < num_points; ++i) {
             (*core_vec_ptr)[i] = neighbor_results.core_distance(i);
