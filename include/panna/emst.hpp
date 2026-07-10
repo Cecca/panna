@@ -405,6 +405,7 @@ namespace panna {
             neighbors(
                 num_points * num_neighbors,
                 { std::numeric_limits<float>::infinity(), std::numeric_limits<uint32_t>::max() } ) {
+                LOG_INFO("msg", "create CoreDistances", "num_neighbors", num_neighbors);
         }
 
         template <typename Dataset, typename Distance>

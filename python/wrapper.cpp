@@ -391,6 +391,14 @@ struct EMST_exposed {
 
 
         // 3. Neighbors
+        // fast_hdbscan builds this array with a KD-tree self-query of
+        // k+1 columns, where each point appears among its own neighbors
+        // (at distance 0). CoreDistances instead stores exactly k
+        // neighbors excluding the point itself, so we widen each row to
+        // k+1 and pad with the point's own index to match the expected
+        // shape and content. Note two remaining differences from
+        // fast_hdbscan: self is in the last column rather than the
+        // first, and rows are in heap order, not sorted by distance.
         size_t num_neighbors_per_point = k + 1;
         auto neighbors_vec_ptr = std::make_unique<std::vector<uint32_t>>(num_points * num_neighbors_per_point);
         

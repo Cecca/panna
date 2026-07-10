@@ -29,12 +29,12 @@ int main( int argc, char** argv ) {
 
     // Parameters for the LSH index used by the EMST construction
     const size_t rep = 512;
-    using Dataset = UnitNormPoints;
-    using Distance = CosineDistance;
-    using Hasher = Simhash<24, Dataset, Distance>;
-    // using Dataset = EuclideanPoints;
-    // using Distance = EuclideanDistance;
-    // using Hasher = LatticeLSH<4, Dataset, Distance>;
+    // using Dataset = UnitNormPoints;
+    // using Distance = CosineDistance;
+    // using Hasher = Simhash<24, Dataset, Distance>;
+    using Dataset = EuclideanPoints;
+    using Distance = EuclideanDistance;
+    using Hasher = LatticeLSH<4, Dataset, Distance>;
 
     H5Easy::File file( path, H5Easy::File::ReadOnly );
     std::vector<std::vector<float>> points =
