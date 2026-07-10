@@ -213,6 +213,11 @@ namespace panna {
         size_t repetition;
     };
 
+    struct MRPartial {
+        std::vector<Edge> tree_edges;
+        std::vector<Edge> core_distance_edges;
+    };
+
     /// The tentative minimm spanning tree as it is being constructed
     /// by multiple threads
     struct RunningResult {
@@ -283,6 +288,7 @@ namespace panna {
             }
         }
     }
+
 
     /// implementation of Kruskal's algorithm that picks updates from two sorted
     /// vectors. Avoids having to sort both their concatenation.
@@ -881,7 +887,7 @@ namespace panna {
                                                     std::atomic_size_t& count_distances,
                                                     std::atomic_size_t& count_collisions,
                                                     Channel<WorkItem>& work,
-                                                    Channel<std::vector<Edge>>& partials ) {
+                                                    Channel<MRPartial>& partials ) {
             for ( std::optional<WorkItem> oitem = work.receive(); oitem.has_value();
                   oitem = work.receive() ) {
                 const size_t prefix = oitem->prefix;
@@ -892,7 +898,8 @@ namespace panna {
                     // so the driver's per-prefix drain count stays balanced.
                     LOG_INFO(
                         "tid", tid, "logger", "worker", "msg", "tree found, skipping work item" );
-                    partials.send( std::vector<Edge>() );
+                    MRPartial partial;
+                    partials.send( std::move( partial ) );
                     continue;
                 }
                 float sum_distances = 0.0, min_distance = std::numeric_limits<float>::infinity(), max_distance = 0.0;
@@ -927,10 +934,16 @@ namespace panna {
                             if (e.weight > max_distance) {
                                 max_distance = e.weight;
                             }
+                            // TODO: here the edges that are _not_ inserted
+                            // in the core distances are the ones that can
+                            // actually participate in the tree?
                             neighborhoods.update(e);
                         }
                         avg_denom += updates.size();
+                        LOG_INFO("logger", "worker", "tid", tid, "repetition", repetition,
+                                 "prefix", "prefix", "updates-size", updates.size());
                         update_tree( local_tree, updates, neighborhoods );
+                        // updates.clear();
                         expect( local_tree.size() > 0 );
                         // early stop if the solution has been found in the meantime
                         return found.load();
@@ -945,12 +958,16 @@ namespace panna {
                 // clang-format on
                 count_distances += cnt_dist;
                 count_collisions += cnt_collisions;
-                std::vector<Edge> possibly_useful_edges;
-                possibly_useful_edges.insert( possibly_useful_edges.end(),
-                                              std::make_move_iterator( local_tree.begin() ),
-                                              std::make_move_iterator( local_tree.end() ) );
-                neighborhoods.diff(rr->neighborhoods, possibly_useful_edges);
-                partials.send( std::move( possibly_useful_edges ) );
+                MRPartial partial;
+                // std::vector<Edge> possibly_useful_edges;
+                neighborhoods.diff(rr->neighborhoods, partial.core_distance_edges);
+                // clang-format off
+                LOG_INFO("logger", "worker", "tid", tid, "repetition", repetition,
+                         "prefix", "prefix", "core-distances-diff", partial.core_distance_edges.size());
+                // clang-format on
+                partial.tree_edges = std::move( local_tree );
+                // TODO: send core distance edges and tree edges separately
+                partials.send( std::move( partial ) );
             }
         }
 
@@ -1296,7 +1313,7 @@ namespace panna {
             // Persistent worker pool: spawned once and reused across every prefix.
             // Workers loop on these channels until `work` is closed.
             Channel<WorkItem> work( max_repetitions );
-            Channel<std::vector<Edge>> partials( max_repetitions );
+            Channel<MRPartial> partials( max_repetitions );
             std::vector<std::thread> workers;
             for ( size_t tid = 0; tid < max_threads; tid++ ) {
                 workers.emplace_back( EMST::worker_fun_mutual_reachability,
@@ -1369,24 +1386,25 @@ namespace panna {
                     // waiting -- this guarantees index quiescence.
                     size_t completed_repetitions = 0;
                     while ( completed_repetitions < max_repetitions ) {
-                        std::optional<std::vector<Edge>> local_tree = partials.receive();
-                        expect( local_tree.has_value() );
+                        std::optional<MRPartial> partial = partials.receive();
+                        expect( partial.has_value() );
                         completed_repetitions++;
                         if ( found ) {
                             // discard late partials; keep draining to balance the channel
                             continue;
                         }
-                        std::vector<Edge> update = std::move( *local_tree );
+                        MRPartial update = std::move( *partial );
                         // clang-format off
-                        LOG_DEBUG( "logger", "collector", "msg", "received update", "update-size", update.size());
+                        LOG_DEBUG( "logger", "collector", "msg", "received update",
+                                   "update-size-core-distances", update.core_distance_edges.size());
                         // clang-format on
 
                         // Update the owned core distances with the incoming partial, then
                         // merge into the owned tree in place.
-                        for (auto & edge : update) {
+                        for (auto & edge : update.core_distance_edges) {
                             state.core_distances.update(edge);
                         }
-                        update_tree(state.tree, update, state.core_distances);
+                        update_tree(state.tree, update.tree_edges, state.core_distances);
                         // clang-format off
                         LOG_INFO( "logger", "collector",
                                   "tree-size", state.tree.size(),

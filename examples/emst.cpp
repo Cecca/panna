@@ -1,4 +1,5 @@
 #include "panna/lsh/crosspolytope.hpp"
+#include "panna/lsh/simhash.hpp"
 #define EXPECT_ACTIVE
 #include "panna/emst.hpp"
 
@@ -30,8 +31,10 @@ int main( int argc, char** argv ) {
     const size_t rep = 512;
     using Dataset = UnitNormPoints;
     using Distance = CosineDistance;
+    using Hasher = Simhash<24, Dataset, Distance>;
+    // using Dataset = EuclideanPoints;
+    // using Distance = EuclideanDistance;
     // using Hasher = LatticeLSH<4, Dataset, Distance>;
-    using Hasher = CrossPolytope<4, Dataset, Distance>;
 
     H5Easy::File file( path, H5Easy::File::ReadOnly );
     std::vector<std::vector<float>> points =
@@ -47,14 +50,14 @@ int main( int argc, char** argv ) {
     const float delta = 0.1;
     EMST<Dataset, Hasher, Distance> tree( dimensions, rep, points, delta, epsilon );
 
-    const auto& [weight, emst] = tree.find_tree();
+    const auto& [emst, cored] = tree.find_tree_mutual_reachability_distance(5);
     const auto end = std::chrono::steady_clock::now();
     const double elapsed_s = std::chrono::duration<double>( end - start ).count();
 
     LOG_INFO(
       "msg", "tree info",
-      "maximum-opt-weight", emst.back().weight,
-      "total-opt-weight", weight,
+      // "maximum-opt-weight", emst.back().weight,
+      // "total-opt-weight", weight,
       "running-time", elapsed_s
     );
 
