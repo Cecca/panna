@@ -489,25 +489,25 @@ namespace panna {
                 if (this->core_distance(i) < other.core_distance(i)) {
                     // there was an improvement in the core distance for point
                     // `i`: collect the neighbor edges that are present in
-                    // `other` but no longer in `this`.
+                    // `this` but not in `other`.
                     auto [this_begin, this_end] = this->neighbors_view(i);
                     auto [other_begin, other_end] = other.neighbors_view(i);
-                    for (auto o = other_begin; o != other_end; ++o) {
-                        const uint32_t nbr = o->second;
+                    for (auto t = this_begin; t != this_end; ++t) {
+                        const uint32_t nbr = t->second;
                         // skip empty/sentinel neighbor slots
                         if (nbr == std::numeric_limits<uint32_t>::max()) {
                             continue;
                         }
-                        bool in_this = false;
-                        for (auto t = this_begin; t != this_end; ++t) {
-                            if (t->second == nbr) {
-                                in_this = true;
+                        bool in_other = false;
+                        for (auto o = other_begin; o != other_end; ++o) {
+                            if (o->second == nbr) {
+                                in_other = true;
                                 break;
                             }
                         }
-                        if (!in_this) {
+                        if (!in_other) {
                             out.push_back(
-                                Edge{ .weight = o->first,
+                                Edge{ .weight = t->first,
                                       .a = static_cast<uint32_t>(i),
                                       .b = nbr } );
                         }

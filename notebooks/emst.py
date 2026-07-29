@@ -424,12 +424,8 @@ def _(GT, cs, mutual_reachability_data, pl):
                 .otherwise("algorithm")
                 .alias("algorithm")
             )
-            .select(
-                "dataset",
-                "cluster_k",
-                "algorithm",
+            .with_columns(
                 pl.col("parameters").struct.field("epsilon"),
-                "relative_error",
             )
             .with_columns(
                 (
@@ -438,7 +434,7 @@ def _(GT, cs, mutual_reachability_data, pl):
                     + pl.col("epsilon").cast(pl.String).fill_null("")
                 ).alias("pivot")
             )
-            .select("dataset", "cluster_k", "pivot", "relative_error")
+            .select("dataset", "cluster_k", "pivot", "emst_weight")
             .pivot(
                 on="pivot",
                 index=["dataset", "cluster_k"],
@@ -462,7 +458,7 @@ def _(GT, cs, mutual_reachability_data, pl):
             fn=lambda c: "exact" if "exact" in c else "approx",
             columns=cs.contains("tutte"),
         )
-        .fmt_percent(columns=cs.numeric())
+        .fmt_number(columns=cs.numeric())
         .fmt_number(columns="cluster_k", decimals=0)
     )
     return
