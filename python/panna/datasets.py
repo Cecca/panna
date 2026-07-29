@@ -93,6 +93,16 @@ def _load_ht(path: Path):
     data = np.nan_to_num(data)
     return data, None, None
 
+def _load_fbin(path: Path):
+    # `.fbin` layout: uint32 number of vectors, uint32 dimension, then the
+    # vectors themselves as row-major float32.
+    with open(path, "rb") as fp:
+        n, d = np.fromfile(fp, dtype=np.uint32, count=2)
+        data = np.fromfile(fp, dtype=np.float32, count=int(n) * int(d))
+    data = data.reshape(int(n), int(d))
+    return data, None, None
+
+
 def _load_chem(path: Path):
     # Unzip
     # Catch and handle not finding the file, try with the explicit file name
@@ -184,6 +194,11 @@ _DATASETS_INFO = {
          "https://archive.ics.uci.edu/static/public/362/gas+sensors+for+home+activity+monitoring.zip",
             _load_ht,
             "euclidean",
+    ),
+     "yandex-t2i": (
+         "https://storage.yandexcloud.net/yandex-research/ann-datasets/T2I/base.1M.fbin",
+         _load_fbin,
+         "euclidean",
     ),
      "chem": (
          "https://archive.ics.uci.edu/static/public/322/gas+sensor+array+under+dynamic+gas+mixtures.zip",

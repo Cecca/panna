@@ -16,7 +16,7 @@
 
 import marimo
 
-__generated_with = "0.23.13"
+__generated_with = "0.23.15"
 app = marimo.App(width="medium")
 
 
@@ -45,7 +45,7 @@ def _():
 def _():
     excluded_shas = [
         # the unnormalized glove-100 dataset
-     "cfc5b3597505fbebf090fbeee98ec44efe4c1113c87b9d5919f89617167447c1d6b1d580fe5bd551f1a000bd278f8882d88ec560aa06b600f565db3277c8f9f3",
+        "cfc5b3597505fbebf090fbeee98ec44efe4c1113c87b9d5919f89617167447c1d6b1d580fe5bd551f1a000bd278f8882d88ec560aa06b600f565db3277c8f9f3",
         # HT
         "24158ef4c3bfbfb1d9f396591fdfca9211d84b15a4e182233096c23d665270b8436154aed0412688fd665fdf4d1d51da0dd1dab952aa311479a3c16ca2c414e5",
         # chem
@@ -115,7 +115,7 @@ def _(excluded_shas, ground_truth, node_name, pl):
         .filter(pl.col("machine").struct.field("node_name") == node_name)
         .filter(pl.col("dataset_sha").is_in(excluded_shas).not_())
         .filter(pl.col("version").is_in(["0.3.2", "13"]))
-        .filter(pl.col("parameters").struct.field("cluster_k").is_null())
+        .filter(pl.col("parameters").struct.field("cluster_k").is_null().and_(pl.col("parameters").struct.field("min_samples") == 1).or_(pl.col("parameters").struct.field("min_samples").is_null()))
         .with_columns(
             pl.col("dataset").str.replace(
                 "-[0-9]+-(euclidean|angular|normalized)", ""
@@ -227,15 +227,6 @@ def _(cs, excluded_shas, ground_truth, node_name, pl, sizes):
     )
     baselines
     return (baselines,)
-
-
-@app.cell
-def _():
-    new = 55855880
-    correct = 55845500
-    relerr = abs(new-correct) / correct
-    relerr
-    return
 
 
 @app.cell(hide_code=True)
