@@ -31,6 +31,7 @@ def _():
     import pyarrow
     import seaborn as sns
     import matplotlib.pyplot as plt
+    import json
 
     return GT, cs, mo, np, pl, plt, sns
 
@@ -51,22 +52,32 @@ def _():
         # chem
         "276e488084569d335e232b50f5dc79abb62002b9f2882935b9a4ce20926ff3df9f9282863085ed378d7b559e48e046e2e62233ad028565e60a06bf5ec9db9710",
         # pamap2
-        "c237bb7ffcd74ea885b10b8fc3b9f5309571f873d25359c11d7c598d9dde91022dfe9b69b324cdb6f88d35db8719aedc4d9ee752d1298cd59df3edd9855a4585"
+        "c237bb7ffcd74ea885b10b8fc3b9f5309571f873d25359c11d7c598d9dde91022dfe9b69b324cdb6f88d35db8719aedc4d9ee752d1298cd59df3edd9855a4585",
+        # census
+        "9fb44a42de6d3412507051103a357630e2dda917013fb8cf03af298503bbffba794bf8c6e25dbb2623906464307925d3afdd704dff1c64ead63badb950f37a98",
+        # pamap
+        "3493a435ff8b9159507e99f2b373bc2c7f0b7d66d73b74222f1fb7f570e4a3bacec7511bf7d8aa8d7cef30902ef35b80ac7b29fe81a30720ee77bff6a5936bbc"
     ]
     return (excluded_shas,)
+
+
+@app.cell
+def _():
+    datasets = ["sift", "mnist", "fashion-mnist", "glove", "nytimes"]
+    return (datasets,)
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    # Clustering
+    # Raw data loading
     """)
     return
 
 
 @app.cell
 def _(experiments, mo):
-    dataset_sel = mo.ui.dropdown(experiments["dataset"].unique().to_list())
+    dataset_sel = mo.ui.dropdown(sorted(experiments["dataset"].unique().to_list()), value="fashion-mnist")
     dataset_sel
     return (dataset_sel,)
 
@@ -76,6 +87,7 @@ def _(GT, dataset_sel, experiments, pl):
     GT(
         experiments
         .filter(pl.col("dataset") == dataset_sel.value)
+        .filter(pl.col("cluster_k") == 1)    
         .select("dataset", "display algorithm", "running_time_s", "relative_error")
         .sort("dataset", "running_time_s")
     ).fmt_number(columns="running_time_s").fmt_number(columns="relative_error", decimals=5)
@@ -83,39 +95,13 @@ def _(GT, dataset_sel, experiments, pl):
 
 
 @app.cell
-def _(dataset_sel, experiments, pl, plt, sns):
-    sns.scatterplot(
-        data=(
-            experiments.filter(pl.col("dataset") == dataset_sel.value)
-            .select(
-                "dataset",
-                "display algorithm",
-                "running_time_s",
-                "relative_error",
-                "algorithm",
-                pl.col("parameters").struct.field("family").fill_null("tutte"),
-            )
-            .sort("dataset", "running_time_s")
-        ),
-        x="relative_error",
-        y="running_time_s",
-        hue="family",
-        style="family"
-    )
-    plt.yscale("log")
-    plt.show()
-    return
-
-
-@app.cell
-def _(excluded_shas, ground_truth, node_name, pl):
+def _(datasets, excluded_shas, ground_truth, node_name, pl):
     experiments = (
         pl.read_ndjson("results/emst.json", infer_schema_length=None)
         .filter(pl.col("dataset_sample_frac").is_null())
         .filter(pl.col("machine").struct.field("node_name") == node_name)
         .filter(pl.col("dataset_sha").is_in(excluded_shas).not_())
         .filter(pl.col("version").is_in(["0.3.2", "13"]))
-        .filter(pl.col("parameters").struct.field("cluster_k").is_null().and_(pl.col("parameters").struct.field("min_samples") == 1).or_(pl.col("parameters").struct.field("min_samples").is_null()))
         .with_columns(
             pl.col("dataset").str.replace(
                 "-[0-9]+-(euclidean|angular|normalized)", ""
@@ -123,7 +109,7 @@ def _(excluded_shas, ground_truth, node_name, pl):
             pl.when(pl.col("parameters").struct.field("exact"))
             .then(pl.col("algorithm") + "-exact")
             .otherwise("algorithm")
-            .alias("display algorithm")
+            .alias("display algorithm"),
         )
         .with_columns(
             pl.when(pl.col("algorithm") == "k+")
@@ -139,6 +125,12 @@ def _(excluded_shas, ground_truth, node_name, pl):
             .otherwise(pl.col("algorithm"))
             .alias("display algorithm")
         )
+        .with_columns(
+            cluster_k=pl.col("parameters")
+            .struct.field("cluster_k")
+            .fill_null(pl.col("parameters").struct.field("min_samples"))
+            .fill_null(pl.lit(1))
+        )
         .join(ground_truth, on="dataset", how="left")
         .with_columns(
             relative_error=(
@@ -147,6 +139,7 @@ def _(excluded_shas, ground_truth, node_name, pl):
             / pl.col("ground_weight")
         )
         .select(pl.exclude("ground_weight"))
+        .filter(pl.col("dataset").is_in(datasets))
     )
     return (experiments,)
 
@@ -232,113 +225,246 @@ def _(cs, excluded_shas, ground_truth, node_name, pl, sizes):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    # Our algorithms
+    # Single linkage clustering
     """)
     return
 
 
 @app.cell
+def _(experiments, pl):
+    single_linkage_data = experiments.filter(pl.col("cluster_k") == 1)
+    single_linkage_data.select(
+        "dataset", "display algorithm", "running_time_s", "relative_error"
+    )
+    return (single_linkage_data,)
+
+
+@app.cell
+def _(GT, cs, pl, single_linkage_data):
+    (
+        GT(
+            single_linkage_data.with_columns(
+                pl.when(pl.col("parameters").struct.field("exact"))
+                .then(pl.col("algorithm") + "-exact")
+                .otherwise("algorithm")
+                .alias("algorithm")
+            )
+            .select(
+                "dataset",
+                "algorithm",
+                pl.col("parameters").struct.field("epsilon"),
+                "running_time_s",
+            )
+            .with_columns(
+                (
+                    pl.col("algorithm")
+                    + "__"
+                    + pl.col("epsilon").cast(pl.String).fill_null("")
+                ).alias("pivot")
+            )
+            .sort("dataset", "algorithm", "epsilon")
+            .select("dataset", "pivot", "running_time_s")
+            .pivot(
+                on="pivot",
+                index="dataset",
+                aggregate_function="min",
+            )
+            .select(
+                "dataset",
+                pl.col(
+                    ["tutte-exact__", "tutte__"]
+                    + ["k+__{}".format(e) for e in [0.0, 0.1, 0.2, 0.5, 1.0]]
+                ),
+            )
+        )
+        .tab_spanner(label="Ours", columns=cs.contains("k+"))
+        .cols_label_with(
+            fn=lambda c: c.split("__")[1], columns=cs.contains("k+")
+        )
+        .tab_spanner(label="Tutte", columns=cs.contains("tutte"))
+        .cols_label_with(
+            fn=lambda c: "exact" if "exact" in c else "approx",
+            columns=cs.contains("tutte"),
+        )
+        .fmt_number(columns=cs.numeric())
+    )
+    return
+
+
+@app.cell
+def _(GT, cs, pl, single_linkage_data):
+    (
+        GT(
+            single_linkage_data.with_columns(
+                pl.when(pl.col("parameters").struct.field("exact"))
+                .then(pl.col("algorithm") + "-exact")
+                .otherwise("algorithm")
+                .alias("algorithm")
+            )
+            .select(
+                "dataset",
+                "algorithm",
+                pl.col("parameters").struct.field("epsilon"),
+                "relative_error",
+            )
+            .with_columns(
+                (
+                    pl.col("algorithm")
+                    + "__"
+                    + pl.col("epsilon").cast(pl.String).fill_null("")
+                ).alias("pivot")
+            )
+            .sort("dataset", "algorithm", "epsilon")
+            .select("dataset", "pivot", "relative_error")
+            .pivot(
+                on="pivot",
+                index="dataset",
+                aggregate_function="min",
+            )
+            .select(
+                "dataset",
+                pl.col(
+                    ["tutte-exact__", "tutte__"]
+                    + ["k+__{}".format(e) for e in [0.0, 0.1, 0.2, 0.5, 1.0]]
+                ),
+            )
+        )
+        .tab_spanner(label="Ours", columns=cs.contains("k+"))
+        .cols_label_with(
+            fn=lambda c: c.split("__")[1], columns=cs.contains("k+")
+        )
+        .tab_spanner(label="Tutte", columns=cs.contains("tutte"))
+        .cols_label_with(
+            fn=lambda c: "exact" if "exact" in c else "approx",
+            columns=cs.contains("tutte"),
+        )
+        .fmt_percent(columns=cs.numeric(), decimals=4)
+    )
+    return
+
+
+@app.cell(hide_code=True)
 def _(mo):
-    sel_algo_version = mo.ui.dropdown(
-            ["0", "0.2.2", "1", "2", "3", "4", "5", "13"],
-            label="algorithm version",
-            value="13",
-        )
-    sel_algo_version
-    return (sel_algo_version,)
+    mo.md(r"""
+    # Mutual reachability clustering
+    """)
+    return
 
 
 @app.cell
-def _(excluded_shas, mo, pl, sel_algo_version):
-    full_results = (
-        pl.read_ndjson("results/emst.json", infer_schema_length=None)
-        .filter(pl.col("version") == sel_algo_version.value)
-        .filter(pl.col("dataset_sha").is_in(excluded_shas).not_())
-        .filter(
-            pl.col("timestamp")
-            == pl.col("timestamp")
-            .max()
-            .over(
-                [
-                    "algorithm",
-                    "parameters",
-                    "machine",
-                    "dataset",
-                    "dataset_sample_frac",
-                    "dataset_sample_seed",
-                ]
+def _(experiments, pl):
+    mutual_reachability_data = experiments.filter(pl.col("cluster_k") > 1)
+    mutual_reachability_data.select(
+        "dataset", "cluster_k", "display algorithm", "running_time_s", "relative_error"
+    ).sort("dataset", "cluster_k", "display algorithm")
+    return (mutual_reachability_data,)
+
+
+@app.cell
+def _(GT, cs, mutual_reachability_data, pl):
+    (
+        GT(
+            mutual_reachability_data.with_columns(
+                pl.when(pl.col("parameters").struct.field("exact"))
+                .then(pl.col("algorithm") + "-exact")
+                .otherwise("algorithm")
+                .alias("algorithm")
             )
-        )
-        .with_columns(
-            pl.col("dataset").str.replace(
-                "-[0-9]+-(euclidean|angular|normalized)", ""
+            .select(
+                "dataset",
+                "cluster_k",
+                "algorithm",
+                pl.col("parameters").struct.field("epsilon"),
+                "running_time_s",
             )
-        )
-        .with_columns(
-            # Split the `k+` algorithm into one algorithm per LSH family,
-            # e.g. `k+ (lattice)`, `k+ (crosspolytope)`, `k+ (simhash)`.
-            pl.when(pl.col("algorithm") == "k+")
-            .then(
-                pl.lit("k+ (")
-                + pl.col("parameters").struct.field("family").fill_null("?")
-                + pl.lit(")")
+            .with_columns(
+                (
+                    pl.col("algorithm")
+                    + "__"
+                    + pl.col("epsilon").cast(pl.String).fill_null("")
+                ).alias("pivot")
             )
-            .otherwise(pl.col("algorithm"))
-            .alias("algorithm")
+            .select("dataset", "cluster_k", "pivot", "running_time_s")
+            .pivot(
+                on="pivot",
+                index=["dataset", "cluster_k"],
+                aggregate_function="min",
+            )
+            .select(
+                "dataset", "cluster_k",
+                pl.col(
+                    ["tutte__"]
+                    + ["k+__{}".format(e) for e in [0.5, 1.0]]
+                ),
+            )
+            .sort("dataset", "cluster_k")
         )
+        .tab_spanner(label="Ours", columns=cs.contains("k+"))
+        .cols_label_with(
+            fn=lambda c: c.split("__")[1], columns=cs.contains("k+")
+        )
+        .tab_spanner(label="Tutte", columns=cs.contains("tutte"))
+        .cols_label_with(
+            fn=lambda c: "exact" if "exact" in c else "approx",
+            columns=cs.contains("tutte"),
+        )
+        .fmt_number(columns=cs.numeric())
+        .fmt_number(columns="cluster_k", decimals=0)
     )
-    _default_algo = next(
-        (a for a in full_results["algorithm"].unique().sort() if a.startswith("k+")),
-        None,
-    )
-    algo_name = mo.ui.dropdown.from_series(full_results["algorithm"], value=_default_algo)
-    algo_name
-    return algo_name, full_results
+    return
 
 
 @app.cell
-def _(full_results, mo, pl):
-    _families = (
-        full_results.filter(pl.col("algorithm").str.starts_with("k+"))
-        .select(pl.col("parameters").struct.field("family"))
-        .to_series()
-        .drop_nulls()
-        .unique()
-        .sort()
-        .to_list()
+def _(GT, cs, mutual_reachability_data, pl):
+    (
+        GT(
+            mutual_reachability_data.with_columns(
+                pl.when(pl.col("parameters").struct.field("exact"))
+                .then(pl.col("algorithm") + "-exact")
+                .otherwise("algorithm")
+                .alias("algorithm")
+            )
+            .select(
+                "dataset",
+                "cluster_k",
+                "algorithm",
+                pl.col("parameters").struct.field("epsilon"),
+                "relative_error",
+            )
+            .with_columns(
+                (
+                    pl.col("algorithm")
+                    + "__"
+                    + pl.col("epsilon").cast(pl.String).fill_null("")
+                ).alias("pivot")
+            )
+            .select("dataset", "cluster_k", "pivot", "relative_error")
+            .pivot(
+                on="pivot",
+                index=["dataset", "cluster_k"],
+                aggregate_function="min",
+            )
+            .select(
+                "dataset", "cluster_k",
+                pl.col(
+                    ["tutte__"]
+                    + ["k+__{}".format(e) for e in [0.5, 1.0]]
+                ),
+            )
+            .sort("dataset", "cluster_k")
+        )
+        .tab_spanner(label="Ours", columns=cs.contains("k+"))
+        .cols_label_with(
+            fn=lambda c: c.split("__")[1], columns=cs.contains("k+")
+        )
+        .tab_spanner(label="Tutte", columns=cs.contains("tutte"))
+        .cols_label_with(
+            fn=lambda c: "exact" if "exact" in c else "approx",
+            columns=cs.contains("tutte"),
+        )
+        .fmt_percent(columns=cs.numeric())
+        .fmt_number(columns="cluster_k", decimals=0)
     )
-    sel_family = mo.ui.dropdown(
-        _families,
-        value=_families[0] if _families else None,
-        label="k+ LSH family",
-    )
-    sel_family
-    return (sel_family,)
-
-
-@app.cell
-def _(full_results, pl, sel_family):
-    emst_results = full_results.filter(
-        pl.col("algorithm") == f"k+ ({sel_family.value})"
-    )
-    return (emst_results,)
-
-
-@app.cell
-def _(algo_name, full_results, pl):
-    all_results = full_results.filter(pl.col("algorithm") == algo_name.value)
-    all_results
-    return (all_results,)
-
-
-@app.cell
-def _(all_results, pl):
-    exact_full = (
-        all_results.filter(pl.col("parameters").struct.field("epsilon") == 0.0)
-        .filter(pl.col("dataset_sample_frac").is_null())
-        .select("dataset", pl.col("running_time_s").round(2), "emst_weight")
-    )
-    exact_full
     return
 
 
