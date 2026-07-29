@@ -368,14 +368,15 @@ namespace panna {
         /// maintain num_neighbors neighbors
         std::vector<std::pair<float, uint32_t>> neighbors;
 
-        void do_update( uint32_t src, uint32_t dst, float dist ) {
+        /// Returns true if the neighborhood of `src` was actually improved.
+        bool do_update( uint32_t src, uint32_t dst, float dist ) {
             // Given the typical small value for num_neighbors,
             // we simply proceed by a linear scan of the points.
             if ( src == dst ) {
-                return;
+                return false;
             }
             if ( num_neighbors == 0 ) {
-                return;
+                return false;
             }
             const size_t offset = src * num_neighbors;
             const float max_distance = neighbors.at( offset ).first;
@@ -385,13 +386,31 @@ namespace panna {
                 // remove duplicates
                 for (auto i=begin; i!=end; i++) {
                     if (i->second == dst) {
-                        return;
+                        return false;
                     }
                 }
                 std::pop_heap( begin, end );
                 neighbors.at( offset + num_neighbors - 1 ) = { dist, dst };
                 std::push_heap( begin, end );
+                return true;
             }
+            return false;
+        }
+
+        /// Like `do_update`, but holding the spinlock guarding `src`'s
+        /// neighborhood. Used by `refine`, where a single pair improves two
+        /// neighborhoods that in general belong to two different threads.
+        bool do_update_sync( uint32_t src,
+                             uint32_t dst,
+                             float dist,
+                             std::vector<std::atomic_flag>& locks ) {
+            while ( locks[src].test_and_set( std::memory_order_acquire ) ) {
+                // spin: the critical section is a scan of num_neighbors entries,
+                // far shorter than the distance computation that precedes it.
+            }
+            const bool updated = do_update( src, dst, dist );
+            locks[src].clear( std::memory_order_release );
+            return updated;
         }
 
     public:
@@ -482,6 +501,134 @@ namespace panna {
 
         void update( Edge& edge ) {
             update( edge.a, edge.b, edge.weight );
+        }
+
+        /// Improve the neighborhoods with `num_iterations` rounds of NN-descent:
+        /// a neighbor of my neighbor is a good candidate to be my neighbor, so
+        /// each round performs a local join on the neighborhood of every point,
+        /// evaluating the distance between pairs of points that are currently
+        /// neighbors of a common point.
+        ///
+        /// Two standard economies keep each round from costing O(n k^2) forever:
+        ///
+        ///  - the join considers the *union* of the forward neighbors and of the
+        ///    reverse ones (points that picked `p` as a neighbor), with the
+        ///    reverse contribution capped at `num_neighbors` entries. Reverse
+        ///    edges are what let a pair be discovered from either end, which in
+        ///    turn makes it safe to lock only the endpoint being written;
+        ///  - a neighbor is *new* if the previous round inserted it. A pair of
+        ///    old neighbors was already evaluated in an earlier round, so only
+        ///    new-new and new-old pairs are joined. Rounds therefore get rapidly
+        ///    cheaper, and the loop stops as soon as one finds no improvement.
+        ///
+        /// Like `update`, this only ever inserts real points at their real
+        /// distances, so a stored k-th neighbor distance can only move *down*
+        /// toward its true value: the core distances stay valid upper bounds.
+        ///
+        /// Returns the total number of accepted neighbor updates.
+        template <typename Dataset, typename Distance>
+        size_t refine( const Dataset& data, size_t num_iterations ) {
+            if ( num_points == 0 || num_neighbors == 0 || num_iterations == 0 ) {
+                return 0;
+            }
+            Timer _timer( "refine core distances" );
+            constexpr uint32_t empty = std::numeric_limits<uint32_t>::max();
+
+            std::vector<std::atomic_flag> locks( num_points );
+            // The neighborhoods as they were before the previous round's join,
+            // against which neighbors are classified as new or old. Empty on the
+            // first round, where every neighbor counts as new.
+            std::vector<std::pair<float, uint32_t>> previous;
+
+            std::vector<std::vector<uint32_t>> fresh( num_points ), stale( num_points );
+            std::vector<uint32_t> reverse_count( num_points );
+            size_t total_updates = 0;
+
+            for ( size_t iteration = 0; iteration < num_iterations; iteration++ ) {
+                for ( size_t i = 0; i < num_points; i++ ) {
+                    fresh[i].clear();
+                    stale[i].clear();
+                    reverse_count[i] = 0;
+                }
+
+                for ( size_t p = 0; p < num_points; p++ ) {
+                    const size_t offset = p * num_neighbors;
+                    for ( size_t j = 0; j < num_neighbors; j++ ) {
+                        const uint32_t nbr = neighbors.at( offset + j ).second;
+                        if ( nbr == empty ) {
+                            continue;
+                        }
+                        bool is_new = true;
+                        if ( !previous.empty() ) {
+                            for ( size_t j2 = 0; j2 < num_neighbors; j2++ ) {
+                                if ( previous.at( offset + j2 ).second == nbr ) {
+                                    is_new = false;
+                                    break;
+                                }
+                            }
+                        }
+                        auto& lists = is_new ? fresh : stale;
+                        lists.at( p ).push_back( nbr );
+                        if ( reverse_count.at( nbr ) < num_neighbors ) {
+                            lists.at( nbr ).push_back( static_cast<uint32_t>( p ) );
+                            reverse_count.at( nbr )++;
+                        }
+                    }
+                }
+
+                // Snapshot the neighborhoods *before* the join, so that the next
+                // iteration classifies exactly this iteration's insertions as new.
+                previous = neighbors;
+
+                size_t updates = 0;
+                size_t computed = 0;
+                #pragma omp parallel for schedule( dynamic, 64 ) reduction( +: updates, computed )
+                for ( size_t p = 0; p < num_points; p++ ) {
+                    auto& new_list = fresh.at( p );
+                    auto& old_list = stale.at( p );
+                    // the same point can reach `p` both as a neighbor and as a
+                    // reverse neighbor, and joining it with itself is wasted work
+                    std::sort( new_list.begin(), new_list.end() );
+                    new_list.erase( std::unique( new_list.begin(), new_list.end() ),
+                                    new_list.end() );
+                    std::sort( old_list.begin(), old_list.end() );
+                    old_list.erase( std::unique( old_list.begin(), old_list.end() ),
+                                    old_list.end() );
+
+                    auto join = [&]( uint32_t u, uint32_t v ) {
+                        if ( u == v ) {
+                            return;
+                        }
+                        const float dist = Distance::compute( data[u], data[v] );
+                        computed++;
+                        updates += do_update_sync( u, v, dist, locks );
+                        updates += do_update_sync( v, u, dist, locks );
+                    };
+
+                    for ( size_t i = 0; i < new_list.size(); i++ ) {
+                        for ( size_t j = i + 1; j < new_list.size(); j++ ) {
+                            join( new_list[i], new_list[j] );
+                        }
+                        for ( const uint32_t v : old_list ) {
+                            join( new_list[i], v );
+                        }
+                    }
+                }
+
+                total_updates += updates;
+                // clang-format off
+                LOG_INFO( "msg", "nn-descent iteration",
+                          "iteration", iteration,
+                          "distances", computed,
+                          "updates", updates );
+                // clang-format on
+                if ( updates == 0 ) {
+                    break;
+                }
+            }
+
+            LOG_INFO( "msg", "refined core distances", "updates", total_updates );
+            return total_updates;
         }
 
         void diff(const CoreDistances & other, std::vector<Edge> & out) const {
@@ -603,6 +750,8 @@ namespace panna {
         uint32_t num_data{ 0 };
         float delta{ 0.01 };
         const float epsilon{ 0.2 };
+        /// how many NN-descent rounds to run on the seeded core distances
+        size_t refine_iterations{ 10 };
         size_t distances_computed = 0;
         size_t num_collisions = 0;
         size_t index_size_bytes = 0;
@@ -644,6 +793,9 @@ namespace panna {
          * @param data_dimensionality Dimensionality of the input data
          * @param delta Probability of failure parameter (default: 0.01)
          * @param epsilon Approximation factor parameter (default: 0.2)
+         * @param refine_iterations Rounds of NN-descent used to sharpen the seeded
+         *        core distances, 0 to disable (default: 10). Only used by
+         *        `find_tree_mutual_reachability_distance`.
          *
          * @details This constructor initializes an EMST object by:
          * 1. Set up the LSH index table with the distance metric
@@ -656,13 +808,15 @@ namespace panna {
               const size_t repetitions,
               std::vector<std::vector<float>>& data_in,
               const float delta_in = 0.01f,
-              const float epsilon = 0.2f ):
+              const float epsilon = 0.2f,
+              const size_t refine_iterations = 10 ):
             dimensionality( dimensions ),
             max_repetitions( 0 ),
             max_hashbits( 0 ),
             table( EMST::setup_index( data_in, dimensions, repetitions ) ),
             num_data( data_in.size() ),
             epsilon( epsilon ),
+            refine_iterations( refine_iterations ),
             distances_computed( 0 ),
             num_collisions( 0 ),
             index_size_bytes( 0 ),
@@ -1360,6 +1514,12 @@ namespace panna {
                 // distances instead of hoarding them.
                 if ( !seeded ) {
                     seed_core_distances( state.core_distances );
+                    // The seeded neighborhoods are a good enough starting point
+                    // for NN-descent, which pushes the core distances further
+                    // down toward their true values -- and hence the pruning
+                    // bound further down -- before any work item is dispatched.
+                    state.core_distances.template refine<Dataset, Distance>(
+                        table.get_dataset(), refine_iterations );
                     // Re-normalize the tree under the tightened core distances
                     // (no updates to merge, just a re-sort by the new
                     // mutual-reachability weights) and republish the snapshot so

@@ -232,6 +232,7 @@ struct EMST_exposed {
         size_t repetitions = 500;
         double delta = 0.1;
         float epsilon = 0.2;
+        size_t refine_iterations = 10;
 
         if (kwargs.contains("repetitions")) {
             repetitions = nb::cast<size_t>(kwargs["repetitions"]);
@@ -241,6 +242,9 @@ struct EMST_exposed {
         }
         if (kwargs.contains("epsilon")) {
             epsilon = nb::cast<float>(kwargs["epsilon"]);
+        }
+        if (kwargs.contains("refine_iterations")) {
+            refine_iterations = nb::cast<size_t>(kwargs["refine_iterations"]);
         }
 
         // Take ownership of the input data
@@ -258,20 +262,20 @@ struct EMST_exposed {
         case Lattice:
             inner
                 .emplace<panna::EMST<panna::EuclideanPoints, LatticeHasher, panna::EuclideanDistance>>(
-                    dimensions, repetitions, data_cpp, delta, epsilon );
+                    dimensions, repetitions, data_cpp, delta, epsilon, refine_iterations );
             break;
         case E2LSH:
             inner
                 .emplace<panna::EMST<panna::EuclideanPoints, E2LSHHasher, panna::EuclideanDistance>>(
-                    dimensions, repetitions, data_cpp, delta, epsilon );
+                    dimensions, repetitions, data_cpp, delta, epsilon, refine_iterations );
             break;
         case CrossPolytope:
             inner.emplace<CrossPolytopeEMST>(
-                dimensions, repetitions, data_cpp, delta, epsilon );
+                dimensions, repetitions, data_cpp, delta, epsilon, refine_iterations );
             break;
         case Simhash:
             inner.emplace<SimhashEMST>(
-                dimensions, repetitions, data_cpp, delta, epsilon );
+                dimensions, repetitions, data_cpp, delta, epsilon, refine_iterations );
             break;
         }
     }
@@ -570,7 +574,15 @@ NB_MODULE( _panna_impl, m ) {
 
     nb::class_<EMST_exposed>( m, "EMST")
         .def(nb::init<const nb::ndarray<float, nb::c_contig>&, nb::kwargs>(),
-             "Constructs the EMST index from a NumPy array of data points.")
+             "Constructs the EMST index from a NumPy array of data points.\n\n"
+             "Keyword arguments:\n"
+             "  repetitions (int, default 500): repetitions of the LSH index.\n"
+             "  delta (float, default 0.1): probability of failure.\n"
+             "  epsilon (float, default 0.2): approximation factor.\n"
+             "  refine_iterations (int, default 10): rounds of NN-descent used to\n"
+             "    sharpen the seeded core distances, 0 to disable. Only affects\n"
+             "    find_mst_dbscan.\n"
+             "  family (str, default 'lattice'): hash family to use.")
         .def_ro_static("version", &panna::EMST_VERSION)
         // Bind the find_mst method
         .def("find_mst_dbscan", &EMST_exposed::find_mst_dbscan, nb::arg("k") = 5,
