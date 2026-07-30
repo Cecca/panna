@@ -1,5 +1,5 @@
 {pkgs}:
-pkgs.stdenv.mkDerivation rec {
+pkgs.stdenv.mkDerivation {
   pname = "tree-similarity";
   version = "0.1.1";
 
@@ -24,4 +24,9 @@ pkgs.stdenv.mkDerivation rec {
     "-DCMAKE_BUILD_TYPE=Release"
     "-GNinja"
   ];
+
+  installPhase = ''
+    mkdir -p $out/bin
+    cp ./ted $out/bin/tree-edit-distance
+  '';
 }
