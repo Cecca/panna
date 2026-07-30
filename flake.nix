@@ -59,7 +59,21 @@
           pname = "panna";
           version = "0.0.1";
           pyproject = true;
-          src = ./.;
+          # Only the files the wheel build actually reads: everything else in
+          # CMakeLists.txt sits behind `if (NOT SKBUILD)`. Keeping `results/`
+          # (20MB, churns constantly) out of the source means editing scripts
+          # or committing experiment output no longer triggers a full rebuild.
+          src = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [
+              ./CMakeLists.txt
+              ./pyproject.toml
+              ./README.md
+              ./include
+              ./external
+              ./python
+            ];
+          };
           GIT_COMMIT_HASH = self.rev or "dirty";
 
           # as stated here, one should disable the cmake setup:
