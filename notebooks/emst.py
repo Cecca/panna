@@ -353,9 +353,9 @@ def _(mo):
 
 @app.cell
 def _(experiments, pl):
-    mutual_reachability_data = experiments.filter(pl.col("cluster_k") > 1)
+    mutual_reachability_data = experiments.filter(pl.col("cluster_k") > 1).select(pl.exclude("relative_error"))
     mutual_reachability_data.select(
-        "dataset", "cluster_k", "display algorithm", "running_time_s", "relative_error"
+        "dataset", "cluster_k", "display algorithm", "running_time_s"
     ).sort("dataset", "cluster_k", "display algorithm")
     return (mutual_reachability_data,)
 
@@ -370,13 +370,11 @@ def _(GT, cs, mutual_reachability_data, pl):
                 .otherwise("algorithm")
                 .alias("algorithm")
             )
-            .select(
-                "dataset",
-                "cluster_k",
-                "algorithm",
+            .with_columns(
                 pl.col("parameters").struct.field("epsilon"),
-                "running_time_s",
+                pl.col("parameters").struct.field("refine_iterations").fill_null(0)
             )
+            .filter(pl.col("refine_iterations") == 0)
             .with_columns(
                 (
                     pl.col("algorithm")
@@ -397,7 +395,8 @@ def _(GT, cs, mutual_reachability_data, pl):
                     + ["k+__{}".format(e) for e in [0.5, 1.0]]
                 ),
             )
-            .sort("dataset", "cluster_k")
+            .sort("dataset", "cluster_k"),
+            groupname_col="dataset", rowname_col="cluster_k"
         )
         .tab_spanner(label="Ours", columns=cs.contains("k+"))
         .cols_label_with(
@@ -410,6 +409,7 @@ def _(GT, cs, mutual_reachability_data, pl):
         )
         .fmt_number(columns=cs.numeric())
         .fmt_number(columns="cluster_k", decimals=0)
+        .tab_options(row_group_as_column=True)
     )
     return
 
@@ -426,7 +426,9 @@ def _(GT, cs, mutual_reachability_data, pl):
             )
             .with_columns(
                 pl.col("parameters").struct.field("epsilon"),
+                pl.col("parameters").struct.field("refine_iterations").fill_null(0)
             )
+            .filter(pl.col("refine_iterations") == 0)
             .with_columns(
                 (
                     pl.col("algorithm")
@@ -445,7 +447,7 @@ def _(GT, cs, mutual_reachability_data, pl):
                 pl.col(
                     ["tutte__"]
                     + ["k+__{}".format(e) for e in [0.5, 1.0]]
-                ),
+                )
             )
             .sort("dataset", "cluster_k")
         )

@@ -58,8 +58,12 @@ def get_version(algorithm: str):
         return dict(version=panna.EMST.version, git_version=get_git_version())
     elif algorithm == "tutte":
         return dict(version=version("fast_hdbscan"), git_version="")
+    elif algorithm == "mlpack":
+        return dict(version=version("mlpack"), git_version="")
     elif algorithm == "pyhdbscan":
         return dict(version=version("pyhdbscan"), git_version="")
+    elif algorithm == "hssl":
+        return dict(version=version("hnswhsslrust"), git_version="")
     else:
         raise ValueError(f"unknown algorithm `{algorithm}`")
 
@@ -372,6 +376,79 @@ def _run_pyhdbscan(data, params):
     return edges, weights, dict()
 
 
+def _run_mlpack(data, params):
+    import mlpack
+
+    print("run mlpack algorithm")
+    res = mlpack.emst(data)["output"]
+    edges = res[:, :2].astype(np.int64)
+    weights = res[:, 2].astype(np.float64)
+    return edges, weights, dict()
+
+# Default HNSW construction parameters, as used by the reference wrapper
+# https://github.com/CamillaOkkels/singleLinkage-benchmark/blob/main/benchmark/algorithms/default_hnsw_params.py
+HSSL_DEFAULT_PARAMS = dict(
+    higher_max_degree=25,
+    lowest_max_degree=50,
+    max_layers=None,
+    n_parallel_burnin=1_000,
+    max_build_heap_size=100,
+    max_build_frontier_size=None,
+    level_norm_param_override=None,
+    insert_heuristic=False,
+    insert_heuristic_extend=False,
+    post_prune_heuristic=False,
+    insert_minibatch_size=None,
+    n_rounds=1,
+)
+
+
+def _linkage_to_edges(linkage: np.ndarray, n: int):
+    """Convert a scipy-style linkage matrix (rows `[node, node, weight, size]`,
+    where ids `>= n` denote clusters created by previous merges) into a list of
+    edges between point indices, plus the corresponding weights.
+
+    Each merge is turned into an edge between arbitrary representatives of the
+    two merged clusters: the result is a spanning tree of the points whose total
+    weight equals the weight of the single linkage tree, but whose individual
+    endpoints are *not* the endpoints of the corresponding MST edges (the
+    dendrogram does not record them)."""
+    num_merges = linkage.shape[0]
+    representative = np.empty(n + num_merges, dtype=np.int64)
+    representative[:n] = np.arange(n, dtype=np.int64)
+    edges = np.empty((num_merges, 2), dtype=np.int64)
+    for i, (a, b) in enumerate(linkage[:, :2].astype(np.int64)):
+        edges[i, 0] = representative[a]
+        edges[i, 1] = representative[b]
+        representative[n + i] = representative[a]
+    return edges, linkage[:, 2].astype(np.float64)
+
+
+def _run_hssl(data, params):
+    import hnswhsslrust as hrr
+
+    print("run hssl algorithm")
+    data = np.ascontiguousarray(data, dtype=np.float32)
+
+    start = time.time()
+    min_pts = params.get("min_pts", 1)
+    res = hrr.hnsw_based_dendrogram(data, min_pts=min_pts)
+    elapsed_s = time.time() - start
+    dendrogram = np.asarray(res[0])
+
+    n = data.shape[0]
+    if dendrogram.shape[0] != n - 1:
+        print(
+            f"warning: the dendrogram has {dendrogram.shape[0]} merges "
+            f"instead of the expected {n - 1}"
+        )
+    edges, weights = _linkage_to_edges(dendrogram, n)
+    detail = dict(
+        hssl_s=elapsed_s,
+    )
+    return edges, weights, detail
+
+
 def _run_ours_with_options(data, params, cluster, cluster_k):
     return _run_ours(data, params, cluster=cluster, cluster_k=cluster_k)
 
@@ -441,7 +518,7 @@ def run_single(
     _, data = panna.datasets.load(
         dataset,
         pca_dimensions=4 if "pamap2" in dataset else None,
-        normalize="angular" in dataset,
+        normalize=any(d in dataset for d in ["angular", "cosine"]),
     )
     if sample_frac is not None:
         sample_size = int(sample_frac * data.shape[0])
@@ -452,8 +529,10 @@ def run_single(
 
     if cluster:
         parameters = {**parameters, "cluster_k": cluster_k}
+    print(f"running {algorithm} on {dataset} with params {parameters} at sample fraction {sample_frac}")
 
-    algo_name = "k+scan" if algorithm == "k+" and cluster else algorithm
+    # algo_name = "k+scan" if algorithm == "k+" and cluster else algorithm
+    algo_name = algorithm
 
     entry = Entry(
         algorithm=algo_name,
@@ -474,6 +553,8 @@ def run_single(
         "k+": _run_ours_with_options,
         "tutte": _run_tutte,
         "pyhdbscan": _run_pyhdbscan,
+        "mlpack": _run_mlpack,
+        "hssl": _run_hssl,
     }
     if algorithm not in runners:
         raise ValueError(f"Unknown algorithm {algorithm}")
@@ -527,7 +608,7 @@ def run_single(
             fp.write(line + "\n")
 
 
-ALGORITHMS = ["k+", "tutte", "pyhdbscan"]
+ALGORITHMS = ["k+", "tutte", "pyhdbscan", "mlpack", "hssl"]
 
 
 def run_experiments(
@@ -535,6 +616,7 @@ def run_experiments(
     algorithms=None,
     cluster: bool = False,
     cluster_k: int = 5,
+    repetitions: int = 512,
 ):
     if datasets is None:
         import panna.datasets
@@ -544,42 +626,70 @@ def run_experiments(
         algorithms = ["k+"]
 
     for dataset in datasets:
-        for sample_frac in [0.01, 0.1, 0.2, None]:
+        # for sample_frac in [0.01, 0.1, 0.2, None]:
+        for sample_frac in [None]:
             print(f"Running experiments on {dataset} at sample fraction {sample_frac}")
             if "k+" in algorithms:
-                for epsilon in [0.0, 0.1, 0.2, 0.5, 1.0]:
+                epsilons = [0.0, 0.1, 0.2, 0.5, 1.0]
+                if cluster:
+                    epsilons = [1.0, 0.5]
+                for epsilon in epsilons:
+                    family = "lattice"
+                    # if any(d in dataset for d in ["normalized", "angular", "cosine"]):
+                    #     family = "crosspolytope"
+                    params = {
+                        "epsilon": epsilon,
+                        "delta": 0.1,
+                        "family": family,
+                        "repetitions": repetitions,
+                    }
+                    if cluster:
+                        params["refine_iterations"] = 0
                     run_single(
                         "k+",
                         dataset,
-                        {
-                            "epsilon": epsilon,
-                            "delta": 0.1,
-                            "family": "lattice",
-                            "repetitions": 512,
-                        },
+                        params,
                         sample_frac=sample_frac,
                         emst_stats=epsilon == 0.0,
                         cluster=cluster,
                         cluster_k=cluster_k,
                     )
 
-            if sample_frac is not None:
-                if "tutte" in algorithms:
-                    tutte_params = {"min_samples": 5 if cluster else 1}
+            if "tutte" in algorithms:
+                for exact in [True, False]:
+                    tutte_params = {"min_samples": cluster_k if cluster else 1, "exact": exact}
                     run_single(
                         "tutte",
                         dataset,
                         tutte_params,
                         sample_frac=sample_frac
                     )
-                if "pyhdbscan" in algorithms:
-                    pyhdbscan_params = {"min_pts": 5 if cluster else 1}
-                    run_single(
-                        "pyhdbscan",
-                        dataset,
-                        pyhdbscan_params,
-                        sample_frac=sample_frac
-                    )
+            if "pyhdbscan" in algorithms:
+                pyhdbscan_params = {"min_pts": cluster_k if cluster else 1}
+                run_single(
+                    "pyhdbscan",
+                    dataset,
+                    pyhdbscan_params,
+                    sample_frac=sample_frac
+                )
+
+            if "hssl" in algorithms:
+                hssl_params = {"min_pts": cluster_k if cluster else 1}
+                run_single(
+                    "hssl",
+                    dataset,
+                    hssl_params,
+                    sample_frac=sample_frac
+                )
+
+            if "mlpack" in algorithms and not cluster:
+                params = {}
+                run_single(
+                    "mlpack",
+                    dataset,
+                    params,
+                    sample_frac=sample_frac
+                )
 
 
 def merge_results(other_file: Path):
@@ -652,6 +762,12 @@ def main():
         default=5,
         help="Number of neighbors for the clustering variant (default: 5).",
     )
+    run_parser.add_argument(
+        "--repetitions",
+        type=int,
+        default=512,
+        help="Number of repetitions for k+ (default: 512).",
+    )
 
     # merge command
     merge_parser = subparsers.add_parser(
@@ -680,6 +796,7 @@ def main():
             algorithms=algorithms,
             cluster=args.cluster,
             cluster_k=args.cluster_k,
+            repetitions=args.repetitions,
         )
     elif args.command == "merge":
         merge_results(args.file)

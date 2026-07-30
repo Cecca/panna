@@ -38,6 +38,7 @@
             # `pynndescent.distance_count()` and `pynndescent.reset_distance_count()`.
             pynndescent = pyprev.pynndescent.overridePythonAttrs (old: {
               patches = (old.patches or []) ++ [./pynndescent-count-distances.patch];
+              doCheck = false;
             });
           };
         };
@@ -50,6 +51,7 @@
         hssl = import ./nix/hssl.nix {inherit pkgs python;};
 
         mlpack = import ./nix/mlpack.nix {inherit pkgs;};
+        pymlpack = import ./nix/pymlpack.nix {inherit pkgs python;};
 
         ensmallen = import ./nix/ensmallen.nix {inherit pkgs;};
 
@@ -127,6 +129,7 @@
               matplotlib
               certifi
               filelock
+              pymlpack
             ]);
 
         container = pkgs.singularity-tools.buildImage {
