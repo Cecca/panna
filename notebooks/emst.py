@@ -20,7 +20,7 @@
 
 import marimo
 
-__generated_with = "0.23.15"
+__generated_with = "0.23.16"
 app = marimo.App(width="medium")
 
 
@@ -105,7 +105,7 @@ def _(datasets, excluded_shas, ground_truth, node_name, pl):
         .filter(pl.col("dataset_sample_frac").is_null())
         .filter(pl.col("machine").struct.field("node_name") == node_name)
         .filter(pl.col("dataset_sha").is_in(excluded_shas).not_())
-        .filter(pl.col("version").is_in(["0.3.2", "13", "0.1.0"]))
+        .filter(pl.col("version").is_in(["0.3.2", "13", "0.1.0", "4.8.0"]))
         .with_columns(
             pl.col("dataset").str.replace(
                 "-[0-9]+-(euclidean|angular|normalized)", ""
@@ -279,13 +279,15 @@ def _(GT, cs, pl, single_linkage_data):
             .select(
                 "dataset",
                 pl.col(
-                    ["tutte-exact__", "tutte__", "hssl__"]
+                    ["tutte-exact__", "tutte__", "mlpack__", "hssl__"]
                     + ["panna__{}".format(e) for e in [0.0, 0.1, 0.2, 0.5, 1.0]]
                 ),
             )
         )
         .tab_spanner(label="HSSL", columns=cs.contains("hssl"))
-        .cols_label_with(columns=cs.contains("hssl"), fn=lambda c: "")
+        .cols_label_with(columns=cs.contains("hssl"), fn=lambda c: "approx")
+        .tab_spanner(label="MLPACK", columns=cs.contains("mlpack"))
+        .cols_label_with(columns=cs.contains("mlpack"), fn=lambda c: "exact")
         .tab_spanner(label="Ours", columns=cs.contains("panna"))
         .cols_label_with(
             fn=lambda c: c.split("__")[1], columns=cs.contains("panna")
@@ -295,7 +297,7 @@ def _(GT, cs, pl, single_linkage_data):
             fn=lambda c: "exact" if "exact" in c else "approx",
             columns=cs.contains("tutte"),
         )
-        .fmt_number(columns=cs.numeric())
+        .fmt_number(columns=cs.numeric(), decimals=1)
     )
     with open("/tmp/single-linkage-time.tex", "w") as _fp:
         print(to_latex(sl_time), file=_fp)
@@ -336,13 +338,15 @@ def _(GT, cs, pl, single_linkage_data):
             .select(
                 "dataset",
                 pl.col(
-                    ["tutte-exact__", "tutte__", "hssl__"]
+                    ["tutte-exact__", "tutte__", "mlpack__", "hssl__"]
                     + ["panna__{}".format(e) for e in [0.0, 0.1, 0.2, 0.5, 1.0]]
                 ),
             )
         )    
         .tab_spanner(label="HSSL", columns=cs.contains("hssl"))
-        .cols_label_with(columns=cs.contains("hssl"), fn=lambda c: "")
+        .cols_label_with(columns=cs.contains("hssl"), fn=lambda c: "approx")
+        .tab_spanner(label="MLPACK", columns=cs.contains("mlpack"))
+        .cols_label_with(columns=cs.contains("mlpack"), fn=lambda c: "exact")
         .tab_spanner(label="Ours", columns=cs.contains("panna"))
         .cols_label_with(
             fn=lambda c: c.split("__")[1], columns=cs.contains("panna")
@@ -391,7 +395,7 @@ def _(GT, cs, mutual_reachability_data, pl):
                 pl.col("parameters").struct.field("epsilon"),
                 pl.col("parameters").struct.field("refine_iterations").fill_null(0)
             )
-            .filter((pl.col("algorithm") != "panna").or_(((pl.col("refine_iterations") == 10).and_(pl.col("algorithm") == "panna"))))
+            .filter((pl.col("algorithm") != "panna").or_(((pl.col("refine_iterations") == 0).and_(pl.col("algorithm") == "panna"))))
             .with_columns(
                 (
                     pl.col("algorithm")
@@ -474,23 +478,25 @@ def _(GT, cs, mutual_reachability_data, pl):
                     + ["panna__{}".format(e) for e in [0.5, 1.0]]
                 )
             )
+            .with_columns((cs.contains("__") - pl.col("tutte__")) / pl.col("tutte__"))
+            .select(pl.exclude("tutte__"))
             .sort("dataset", "cluster_k")
         )
         .tab_spanner(label="Ours", columns=cs.contains("panna"))
         .cols_label_with(
             fn=lambda c: c.split("__")[1], columns=cs.contains("panna")
         )
-        .tab_spanner(label="Tutte", columns=cs.contains("tutte"))
-        .cols_label_with(
-            fn=lambda c: "exact" if "exact" in c else "approx",
-            columns=cs.contains("tutte"),
-        )
+        # .tab_spanner(label="Tutte", columns=cs.contains("tutte"))
+        # .cols_label_with(
+        #     fn=lambda c: "exact" if "exact" in c else "approx",
+        #     columns=cs.contains("tutte"),
+        # )
         .tab_spanner(label="HSSL", columns=cs.contains("hssl"))
         .cols_label_with(
             fn=lambda c: "",
             columns=cs.contains("hssl"),
         )
-        .fmt_number(columns=cs.numeric())
+        .fmt_percent(columns=cs.numeric())
         .fmt_number(columns="cluster_k", decimals=0)
     )
     with open("/tmp/mr-error.tex", "w") as _fp:
@@ -529,15 +535,21 @@ def _(pl):
 
 
 @app.cell
-def _():
-    # tbl_size = (
-    #     sizes.select(pl.exclude("diameter"))
-    #     .filter(pl.col("dataset").is_in(datasets))
-    #     .style.fmt_number(columns=cs.numeric(), decimals=0)
-    # )
-    # with open("/tmp/sizes.tex", "w") as _fp:
-    #     print(to_latex(tbl_size), file=_fp)
-    # tbl_size
+def _(experiments, pl):
+    (
+        experiments
+        .filter(pl.col("parameters").struct.field("epsilon") == 0)
+        .select("dataset", "detail").unnest("detail")
+        .select("dataset", "n", "d", "mass-frac@0.0", "contrast@0.0", "mass-frac@1.0", "contrast@1.0")
+        .filter(pl.col("mass-frac@0.0") == pl.col("mass-frac@0.0").max().over("dataset"))
+        .with_columns(
+            cost = pl.col("n").pow(2/pl.col("contrast@0.0")) * (pl.col("mass-frac@0.0")*pl.col("n").pow(2)).pow(1-1/pl.col("contrast@0.0"))
+        )
+        .with_columns(
+            pl.col("cost") / (pl.col("n").pow(2))
+        )
+        .sort("dataset")
+    )
     return
 
 
@@ -733,7 +745,7 @@ def _(GT, cophenetic_scores, cs, pl):
             fn=lambda c: "",
             columns=cs.contains("hssl"),
         )
-        .fmt_number(columns=cs.numeric(), decimals=4)
+        .fmt_percent(columns=cs.numeric(), decimals=2)
         .fmt_number(columns="core_k", decimals=0)
         # .tab_options(row_group_as_column=True)
     )
