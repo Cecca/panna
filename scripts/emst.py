@@ -33,7 +33,7 @@ import gzip
 DATABASE_DIR = Path("results")
 DATABASE_FILE = DATABASE_DIR / "emst.json"
 LOCKFILE = DATABASE_DIR / "emst.lock"
-TIMEOUT_S = 24 * 3600 # 24 hours timeout
+TIMEOUT_S = 2 * 3600
 
 
 def get_git_version():
@@ -438,17 +438,17 @@ def _run_hssl(data, params):
     data = np.ascontiguousarray(data, dtype=np.float32)
 
     start = time.time()
-    min_pts = params.get("min_pts", 1)
-    M = params.get("M", 100)
+    min_pts = int(params.get("min_pts", 1))
+    M = int(params.get("M", 100))
     efSearch = params.get("efS", None)
-    efC = params.get("efC", 100)
+    efC = int(params.get("efC", 100))
     self_join_neighbors = params.get("self_join_neighbors", False)
     if self_join_neighbors is not None:
         res = hrr.hnsw_based_dendrogram_self_joined(
             data,
             min_pts,
-            self_join_neighbors,
-            efSearch,
+            int(self_join_neighbors),
+            int(efSearch),
             max_build_heap_size=efC,
             higher_max_degree=M,
             lowest_max_degree=M,

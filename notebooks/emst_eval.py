@@ -346,7 +346,7 @@ def branch_members(tree: np.ndarray, min_cluster_size: int) -> list[np.ndarray]:
 
     return [np.sort(members[branch]) for branch in branches]
 
-
+@MEM.cache
 def compare_branches(
     reference_tree: np.ndarray,
     other_tree: np.ndarray,
