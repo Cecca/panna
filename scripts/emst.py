@@ -403,6 +403,7 @@ HSSL_DEFAULT_PARAMS = dict(
 )
 
 
+
 def _linkage_to_edges(linkage: np.ndarray, n: int):
     """Convert a scipy-style linkage matrix (rows `[node, node, weight, size]`,
     where ids `>= n` denote clusters created by previous merges) into a list of
@@ -424,6 +425,12 @@ def _linkage_to_edges(linkage: np.ndarray, n: int):
     return edges, linkage[:, 2].astype(np.float64)
 
 
+# self_join_neighbors = 100
+# query_max_heap_size = 25
+# higher_max_degree/lower_max_degree play the role of M
+# query_max_heap_size is efSearch
+
+
 def _run_hssl(data, params):
     import hnswhsslrust as hrr
 
@@ -432,7 +439,28 @@ def _run_hssl(data, params):
 
     start = time.time()
     min_pts = params.get("min_pts", 1)
-    res = hrr.hnsw_based_dendrogram(data, min_pts=min_pts)
+    M = params.get("M", 100)
+    efSearch = params.get("efS", None)
+    efC = params.get("efC", 100)
+    self_join_neighbors = params.get("self_join_neighbors", False)
+    if self_join_neighbors is not None:
+        res = hrr.hnsw_based_dendrogram_self_joined(
+            data,
+            min_pts,
+            self_join_neighbors,
+            efSearch,
+            max_build_heap_size=efC,
+            higher_max_degree=M,
+            lowest_max_degree=M,
+        )
+    else:
+        res = hrr.hnsw_based_dendrogram(
+            data,
+            min_pts=min_pts,
+            max_build_heap_size=efC,
+            higher_max_degree=M,
+            lowest_max_degree=M,
+        )
     elapsed_s = time.time() - start
     dendrogram = np.asarray(res[0])
 
@@ -674,13 +702,35 @@ def run_experiments(
                 )
 
             if "hssl" in algorithms:
-                hssl_params = {"min_pts": cluster_k if cluster else 1}
-                run_single(
-                    "hssl",
-                    dataset,
-                    hssl_params,
-                    sample_frac=sample_frac
-                )
+                configs = []
+                min_pts = cluster_k if cluster else 1
+                for f in [2, 3, 4]:
+                    for self_join_neighbors in [None, 100]:
+                        M = max(20, f * min_pts)
+                        efC = max(300, 1.5 * M)
+                        efS_values = [5, 10]
+                        if self_join_neighbors is not None:
+                            for efS in efS_values:
+                                hssl_params = {
+                                    "min_pts": min_pts,
+                                    "M": M,
+                                    "efC": efC,
+                                    "efS": efS,
+                                    "self_join_neighbors": self_join_neighbors,
+                                }
+                                configs.append(hssl_params)
+                        else:
+                            hssl_params = {
+                                "min_pts": min_pts,
+                                "M": M,
+                                "efC": efC,
+                                "self_join_neighbors": self_join_neighbors,
+                            }
+                            configs.append(hssl_params)
+                for hssl_params in configs:
+                    run_single(
+                        "hssl", dataset, hssl_params, sample_frac=sample_frac
+                    )
 
             if "mlpack" in algorithms and not cluster:
                 params = {}
