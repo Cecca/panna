@@ -48,6 +48,8 @@
           patch = ./fast-hdbscan-exact-mst.patch;
         };
 
+        densired = import ./nix/densired.nix {inherit python;};
+
         hssl = import ./nix/hssl.nix {inherit pkgs python;};
 
         mlpack = import ./nix/mlpack.nix {inherit pkgs;};
@@ -121,6 +123,7 @@
               requests
               panna-python
               fast-hdbscan
+              densired
               hssl
               icecream
               sigmod-hdbscan.packages.${system}.default
@@ -194,6 +197,7 @@
             cereal
             catch2_3
             fast-hdbscan
+            densired
             hssl
             ensmallen
             mlpack

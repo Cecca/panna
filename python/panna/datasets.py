@@ -21,6 +21,11 @@ DATASETS_DIR = Path(os.environ.get("PANNA_DATA_DIR", "datasets"))
 def _download(url, destination: Path):
     import requests
     from tqdm import tqdm
+    if urlparse(url).scheme not in ("http", "https"):
+        # Synthetic/local datasets (e.g. densired-hard) use a
+        # non-fetchable placeholder URL and are generated on demand by
+        # their own loader instead of being downloaded.
+        return
     if not destination.is_file():
         logging.info(f"downloading {url} to {destination}")
         with requests.get(url, stream=True) as response:
@@ -73,6 +78,25 @@ def _load_pamap(path: Path):
 def _load_census(path: Path):
     raw = np.load(path)
     data = raw["X"].astype(np.float32)
+    return data, None, None
+
+def _load_densired_hard(path: Path):
+    """Synthetic densired dataset (https://github.com/PhilJahn/DENSIRED):
+    5000 tight, well-separated clusters (core_num=1, radius=0.15) over
+    n=100000 points, dim=100.
+    """
+    if not path.is_file():
+        from densired import datagen
+        skeleton = datagen.densityDataGen(
+            dim=100, clunum=5000, core_num=1, radius=0.15, momentum=0.5,
+            ratio_noise=0.0, seed=1234,
+        )
+        raw = skeleton.generate_data(100_000)
+        data = np.unique(raw[:, :-1].astype(np.float32), axis=0)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(path, X=data)
+    else:
+        data = np.load(path)["X"].astype(np.float32)
     return data, None, None
 
 def _load_ht(path: Path):
@@ -204,6 +228,13 @@ _DATASETS_INFO = {
          "https://archive.ics.uci.edu/static/public/322/gas+sensor+array+under+dynamic+gas+mixtures.zip",
          _load_chem,
          "euclidean",
+    ),
+    "densired-hard": (
+        # Not a real download URL: this dataset is synthetic (see
+        # _load_densired_hard).
+        "file:///densired-hard.npz",
+        _load_densired_hard,
+        "euclidean",
     ),
 }
 
