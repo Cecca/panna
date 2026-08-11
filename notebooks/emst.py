@@ -391,6 +391,7 @@ def _(GT, cs, mutual_reachability_data, pl):
                 .otherwise("algorithm")
                 .alias("algorithm")
             )
+            .filter(pl.col("running_time_s") > 0)
             .with_columns(
                 pl.col("parameters").struct.field("epsilon"),
                 pl.col("parameters").struct.field("refine_iterations").fill_null(0)
@@ -712,7 +713,7 @@ def _(GT, cophenetic_scores, cs, pl):
                     + "__"
                     + pl.col("epsilon").cast(pl.String).fill_null("")
                 ).alias("pivot"),
-            
+    
                 pl.format("{} ({}%)", pl.col("cophenetic_pearson").round(2), (pl.col("cophenetic_mare") * 100).round(2)).alias("score")
             )
             .select("pivot", "dataset", "core_k", "score")
@@ -861,6 +862,48 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
+    # Synthetic data
+    """)
+    return
+
+
+@app.cell
+def _(cs, pl):
+    (
+        pl.read_ndjson("results/emst.json", infer_schema_length=None)
+        .filter(pl.col("dataset") == "densired-hard")
+        .filter(pl.col("emst_weight") == pl.col("emst_weight").min().over("algorithm", "parameters"))
+        .with_columns(
+            pl.when(pl.col("algorithm") == "k+")
+            .then(
+                pl.lit("panna (")
+                + pl.col("parameters").struct.field("family").fill_null("?")
+                + ", "
+                + pl.col("parameters").struct.field("epsilon").fill_null("?")
+                + pl.lit(")")
+            )
+            .when(pl.col("parameters").struct.field("exact"))
+            .then(pl.col("algorithm") + "-exact")
+            .otherwise(pl.col("algorithm"))
+            .alias("display algorithm")
+        )
+        .filter(pl.col("emst_weight") > 2)
+        .select("display algorithm", "emst_weight", "running_time_s")
+        .sort("emst_weight")
+        .with_columns(
+            weight_ratio = pl.col("emst_weight") / pl.col("emst_weight").min(),
+            weight_relerr = (pl.col("emst_weight") - pl.col("emst_weight").min()) / pl.col("emst_weight").min()
+        )
+        .style
+        .fmt_number(columns=cs.numeric())
+        .fmt_percent(columns=["weight_relerr"])
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
     # Appendix: utilities
     """)
     return
@@ -876,6 +919,7 @@ def _(pl):
         trees = (
             df
             .filter(pl.col("machine").struct.field("node_name") != "nixos")
+            .filter(pl.col("detail").struct.field("tree_path").is_null().not_())
             .select(pl.col("detail").struct.field("tree_path"))["tree_path"].to_list()
         )
         for tree in trees:
