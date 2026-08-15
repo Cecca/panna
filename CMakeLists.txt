@@ -85,6 +85,7 @@ if (NOT SKBUILD)
 
   add_executable(lattice_lsh_collision_probabilities scripts/lattice_lsh_collision_probabilties.cpp)
   add_executable(bench test/bench.cpp)
+  add_executable(bench_lattice_dots test/bench_lattice_dots.cpp)
 
   # if (HighFive_FOUND)
   #   add_executable(glove examples/glove.cpp)

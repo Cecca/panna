@@ -382,10 +382,9 @@ def _(experiments, pl):
 
 
 @app.cell
-def _(GT, cs, mutual_reachability_data, pl):
-    mr_time = (
-        GT(
-            mutual_reachability_data.with_columns(
+def _(mutual_reachability_data, pl):
+    mr_time_data = (
+        mutual_reachability_data.with_columns(
                 pl.when(pl.col("parameters").struct.field("exact"))
                 .then(pl.col("algorithm") + "-exact")
                 .otherwise("algorithm")
@@ -404,6 +403,15 @@ def _(GT, cs, mutual_reachability_data, pl):
                     + pl.col("epsilon").cast(pl.String).fill_null("")
                 ).alias("pivot")
             )
+    )
+    return (mr_time_data,)
+
+
+@app.cell
+def _(GT, cs, mr_time_data, pl):
+    mr_time = (
+        GT(
+            mr_time_data
             .select("dataset", "cluster_k", "pivot", "running_time_s")
             .pivot(
                 on="pivot",
@@ -609,14 +617,15 @@ def _(noise_floor, pl):
 
 
 @app.cell
-def _(excluded_shas, experiments, mo, pl):
+def _(mo, mr_time_data, pl):
     import os
 
     tree_catalogue = (
-        experiments
-        .filter(pl.col("dataset_sample_frac").is_null())
-        .filter(pl.col("dataset_sha").is_in(excluded_shas).not_())
-        .filter(pl.col("detail").struct.field("tree_path").is_not_null())
+        # experiments
+        # .filter(pl.col("dataset_sample_frac").is_null())
+        # .filter(pl.col("dataset_sha").is_in(excluded_shas).not_())
+        # .filter(pl.col("detail").struct.field("tree_path").is_not_null())
+        mr_time_data
         .select(
             pl.col("dataset").alias("full_dataset"),
             pl.col("dataset").str.replace(
@@ -713,7 +722,7 @@ def _(GT, cophenetic_scores, cs, pl):
                     + "__"
                     + pl.col("epsilon").cast(pl.String).fill_null("")
                 ).alias("pivot"),
-    
+
                 pl.format("{} ({}%)", pl.col("cophenetic_pearson").round(2), (pl.col("cophenetic_mare") * 100).round(2)).alias("score")
             )
             .select("pivot", "dataset", "core_k", "score")
@@ -869,18 +878,19 @@ def _(mo):
 
 @app.cell
 def _(cs, pl):
-    (
+    tab_synth = (
         pl.read_ndjson("results/emst.json", infer_schema_length=None)
         .filter(pl.col("dataset") == "densired-hard")
         .filter(pl.col("emst_weight") == pl.col("emst_weight").min().over("algorithm", "parameters"))
         .with_columns(
-            pl.when(pl.col("algorithm") == "k+")
+            pl.when(pl.col("algorithm") == "k+", pl.col("parameters").struct.field("epsilon") == 0)
+            .then(pl.lit("panna (exact)"))
+            .when(pl.col("algorithm") == "k+")
             .then(
                 pl.lit("panna (")
-                + pl.col("parameters").struct.field("family").fill_null("?")
-                + ", "
-                + pl.col("parameters").struct.field("epsilon").fill_null("?")
-                + pl.lit(")")
+                + "eps="
+                + ((100*pl.col("parameters").struct.field("epsilon")).cast(pl.Int32)).fill_null("?")
+                + pl.lit("%)")
             )
             .when(pl.col("parameters").struct.field("exact"))
             .then(pl.col("algorithm") + "-exact")
@@ -894,10 +904,17 @@ def _(cs, pl):
             weight_ratio = pl.col("emst_weight") / pl.col("emst_weight").min(),
             weight_relerr = (pl.col("emst_weight") - pl.col("emst_weight").min()) / pl.col("emst_weight").min()
         )
+        .select(pl.exclude("running_time_s", "emst_weight"))
+        .filter(pl.col("display algorithm") != "pyhdbscan")
         .style
         .fmt_number(columns=cs.numeric())
         .fmt_percent(columns=["weight_relerr"])
+        .cols_label_with(fn=lambda c: c.replace("_", " "))
+        .cols_label({"display algorithm": ""})
     )
+    with open("/tmp/synth.tex", "w") as _fp:
+        print(to_latex(tab_synth), file=_fp)
+    tab_synth
     return
 
 
