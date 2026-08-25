@@ -246,6 +246,7 @@ struct EMST_exposed {
         if (kwargs.contains("refine_iterations")) {
             refine_iterations = nb::cast<size_t>(kwargs["refine_iterations"]);
         }
+        LOG_INFO("refine_iterations", refine_iterations);
 
         // Take ownership of the input data
         std::vector<std::vector<float>> data_cpp(num_points, std::vector<float>(dimensions));

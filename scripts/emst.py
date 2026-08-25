@@ -307,8 +307,8 @@ def _run_ours(data, params, cluster: bool = False, cluster_k: int = 5):
             cluster_k=cluster_k,
         )
         detail |= algo.stats()
-        edges = tree_array[:, 1:3].astype(np.int64)
-        tree_weights = tree_array[:, 0]
+        edges = tree_array[:, :2].astype(np.int64)
+        tree_weights = tree_array[:, 2]
         return edges, tree_weights, detail
     _, tree = algo.find_mst()
     elapsed_discovery_s = time.time() - start - elapsed_index_s
@@ -317,11 +317,12 @@ def _run_ours(data, params, cluster: bool = False, cluster_k: int = 5):
     return tree, None, detail
 
 
-def _complete_tree(data, tree):
+def _complete_tree(data, tree, core_distances):
     """Replace edges with infinite weight by arbitrary edges connecting
     different components, so that the result is a spanning tree with an
-    actual (finite) weight. Returns the fixed tree and the number of
-    replaced edges."""
+    actual (finite) weight. The replacement edges are weighted with the
+    mutual reachability distance, like the ones already in the tree.
+    Returns the fixed tree and the number of replaced edges."""
     infinite_mask = ~np.isfinite(tree[:, 2])
     if not infinite_mask.any():
         return tree, 0
@@ -339,11 +340,15 @@ def _complete_tree(data, tree):
     _, representatives = np.unique(labels, return_index=True)
     anchor = representatives[0]
     others = representatives[1:]
+    new_weights = np.maximum(
+        np.linalg.norm(data[others] - data[anchor], axis=1),
+        np.maximum(core_distances[others], core_distances[anchor]),
+    )
     new_edges = np.column_stack(
         [
             np.full(len(others), anchor, dtype=np.float64),
             others.astype(np.float64),
-            np.linalg.norm(data[others] - data[anchor], axis=1),
+            new_weights,
         ]
     )
     num_replaced = int(infinite_mask.sum())
@@ -359,8 +364,16 @@ def _run_tutte(data, params):
     res = fast_hdbscan.hdbscan.compute_minimum_spanning_tree(data[:10], **params)
     print("run tutte institute algorithm")
     res = fast_hdbscan.hdbscan.compute_minimum_spanning_tree(data, **params)
-    tree, num_replaced = _complete_tree(data, res[0])
-    return tree.astype(np.int64), None, dict(replaced_infinite_edges=num_replaced)
+    # `compute_minimum_spanning_tree` returns (mst_edges, neighbors,
+    # core_distances), where the edge columns are [src, dst, mrd_weight]: the
+    # weight is the mutual reachability distance, which coincides with the
+    # Euclidean one only for min_samples=1. Report it as it is rather than
+    # recomputing the distance between the endpoints, otherwise the recorded
+    # weight is neither the weight of this tree nor the one of the EMST.
+    tree, num_replaced = _complete_tree(data, res[0], res[2])
+    edges = tree[:, :2].astype(np.int64)
+    weights = tree[:, 2].astype(np.float64)
+    return edges, weights, dict(replaced_infinite_edges=num_replaced)
 
 
 def _run_pyhdbscan(data, params):
@@ -371,10 +384,11 @@ def _run_pyhdbscan(data, params):
     # pyhdbscan returns a single-linkage dendrogram as an (n-1, 4) array: columns
     # are [node, node, weight, size]. The weight column holds the (mutual
     # reachability) MST edge weights, which for min_pts=1 coincide with the
-    # Euclidean EMST weights.
-    res = pyhdbscan.HDBSCAN(data, min_pts)
-    edges = res[:, :2].astype(np.int64)
-    weights = res[:, 2].astype(np.float64)
+    # Euclidean EMST weights. Ids `>= n` denote clusters built by previous
+    # merges, hence the first two columns are not point ids: go through
+    # `_linkage_to_edges` to get a spanning tree over the points.
+    res = np.asarray(pyhdbscan.HDBSCAN(data, min_pts))
+    edges, weights = _linkage_to_edges(res, data.shape[0])
     return edges, weights, dict()
 
 
