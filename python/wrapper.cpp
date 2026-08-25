@@ -353,10 +353,9 @@ struct EMST_exposed {
         auto tree_vec_ptr = std::make_unique<std::vector<float>>(num_edges * 3);
 
         for (size_t i = 0; i < num_edges; ++i) {
-            // FIXME: be consistent with fast_hdbscan, i.e. the weight is the last column
-            (*tree_vec_ptr)[i * 3 + 0] = tree_edges_vec[i].weight;
-            (*tree_vec_ptr)[i * 3 + 1] = tree_edges_vec[i].a;
-            (*tree_vec_ptr)[i * 3 + 2] = tree_edges_vec[i].b;
+            (*tree_vec_ptr)[i * 3 + 0] = tree_edges_vec[i].a;
+            (*tree_vec_ptr)[i * 3 + 1] = tree_edges_vec[i].b;
+            (*tree_vec_ptr)[i * 3 + 2] = tree_edges_vec[i].weight;
         }
 
         nb::capsule tree_owner(tree_vec_ptr.get(), [](void *p) noexcept {
