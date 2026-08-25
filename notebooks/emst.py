@@ -20,7 +20,7 @@
 
 import marimo
 
-__generated_with = "0.23.16"
+__generated_with = "0.24.0"
 app = marimo.App(width="medium")
 
 
@@ -247,20 +247,61 @@ def _(experiments, pl):
 
 
 @app.cell
-def _(GT, cs, pl, single_linkage_data):
+def _(choose2, pl, single_linkage_data, sizes):
+    (
+        single_linkage_data
+        .join(sizes, on="dataset")
+        .select("display algorithm", "dataset", pl.col("detail").struct.field("distance_count") / choose2("n"))
+    )
+    return
+
+
+@app.cell
+def _(pl):
+    def with_percentage(time_col, frac_col):
+        return (
+            pl.when(pl.col(frac_col).is_null().not_())
+              .then(pl.format("{} {{\\footnotesize ({}%)}}", pl.col(time_col).round(1), (100* pl.col(frac_col)).round(1)))
+              .otherwise(pl.format("{}", pl.col(time_col).round(1)))
+        )
+
+    return (with_percentage,)
+
+
+@app.cell
+def _(choose2, pl, single_linkage_data, sizes):
+    (
+        single_linkage_data
+        .join(sizes, on="dataset")
+        .with_columns(
+            pl.when(pl.col("parameters").struct.field("exact"))
+            .then(pl.col("algorithm") + "-exact")
+            .otherwise("algorithm")
+            .alias("algorithm"),
+            (pl.col("detail").struct.field("distance_count") / choose2("n")).alias("dist_frac")
+        ).select("dataset", "display algorithm", "dist_frac", pl.col("detail").struct.field("distance_count"), choose2("n"))
+    )
+    return
+
+
+@app.cell
+def _(GT, choose2, cs, pl, single_linkage_data, sizes, with_percentage):
     sl_time = (
         GT(
-            single_linkage_data.with_columns(
+            single_linkage_data
+            .join(sizes, on="dataset")
+            .with_columns(
                 pl.when(pl.col("parameters").struct.field("exact"))
                 .then(pl.col("algorithm") + "-exact")
                 .otherwise("algorithm")
-                .alias("algorithm")
+                .alias("algorithm"),
+                (pl.col("detail").struct.field("distance_count") / choose2("n")).alias("dist_frac")
             )
             .select(
                 "dataset",
                 "algorithm",
                 pl.col("parameters").struct.field("epsilon"),
-                "running_time_s",
+                with_percentage("running_time_s", "dist_frac").alias("running_time_s"),
             )
             .with_columns(
                 (
@@ -298,6 +339,7 @@ def _(GT, cs, pl, single_linkage_data):
             columns=cs.contains("tutte"),
         )
         .fmt_number(columns=cs.numeric(), decimals=1)
+        .cols_align(columns=cs.contains("_"), align="right")
     )
     with open("/tmp/single-linkage-time.tex", "w") as _fp:
         print(to_latex(sl_time), file=_fp)
@@ -376,7 +418,7 @@ def _(mo):
 def _(experiments, pl):
     mutual_reachability_data = experiments.filter(pl.col("cluster_k") > 1).select(pl.exclude("relative_error"))
     mutual_reachability_data.select(
-        "dataset", "cluster_k", "display algorithm", "running_time_s"
+        "dataset", "cluster_k", "display algorithm", "running_time_s", "emst_weight"
     ).sort("dataset", "cluster_k", "display algorithm")
     return (mutual_reachability_data,)
 
@@ -395,7 +437,7 @@ def _(mutual_reachability_data, pl):
                 pl.col("parameters").struct.field("epsilon"),
                 pl.col("parameters").struct.field("refine_iterations").fill_null(0)
             )
-            .filter((pl.col("algorithm") != "panna").or_(((pl.col("refine_iterations") == 0).and_(pl.col("algorithm") == "panna"))))
+            # .filter((pl.col("algorithm") != "panna").or_(((pl.col("refine_iterations") == 0).and_(pl.col("algorithm") == "panna"))))
             .with_columns(
                 (
                     pl.col("algorithm")
@@ -439,7 +481,7 @@ def _(GT, cs, mr_time_data, pl):
         )
         .tab_spanner(label="HSSL", columns=cs.contains("hssl"))
         .cols_label_with(
-            fn=lambda c: "",
+            fn=lambda c: "approx",
             columns=cs.contains("hssl"),
         )
         .fmt_number(columns=cs.numeric())
@@ -449,6 +491,26 @@ def _(GT, cs, mr_time_data, pl):
     with open("/tmp/mr-time.tex", "w") as _fp:
         print(to_latex(mr_time), file=_fp)
     mr_time
+    return
+
+
+@app.cell
+def _(mutual_reachability_data, pl):
+    (
+        mutual_reachability_data.with_columns(
+            pl.when(pl.col("parameters").struct.field("exact"))
+            .then(pl.col("algorithm") + "-exact")
+            .otherwise("algorithm")
+            .alias("algorithm")
+        )
+        .with_columns(
+            pl.col("parameters").struct.field("epsilon"),
+            pl.col("parameters").struct.field("refine_iterations").fill_null(0)
+        )
+        .filter(pl.col("refine_iterations") == 0)
+        .select("dataset", "cluster_k", "display algorithm", "emst_weight")
+        .sort("dataset", "cluster_k", "display algorithm")
+    )
     return
 
 
@@ -466,7 +528,7 @@ def _(GT, cs, mutual_reachability_data, pl):
                 pl.col("parameters").struct.field("epsilon"),
                 pl.col("parameters").struct.field("refine_iterations").fill_null(0)
             )
-            .filter(pl.col("refine_iterations") == 0)
+            # .filter(pl.col("refine_iterations") == 0)
             .with_columns(
                 (
                     pl.col("algorithm")
@@ -484,20 +546,25 @@ def _(GT, cs, mutual_reachability_data, pl):
                 "dataset", "cluster_k",
                 pl.col(
                     ["tutte__", "hssl__"]
-                    + ["panna__{}".format(e) for e in [0.5, 1.0]]
+                    + ["panna__{}".format(e) for e in [0.0, 0.5, 1.0]]
                 )
             )
-            .with_columns((cs.contains("__") - pl.col("tutte__")) / pl.col("tutte__"))
-            .select(pl.exclude("tutte__"))
+            .with_columns((cs.contains("__") - pl.col("panna__0.0")) / pl.col("panna__0.0"))
+            .select(pl.exclude("panna__0.0"))
             .sort("dataset", "cluster_k")
         )
         .tab_spanner(label="Ours", columns=cs.contains("panna"))
         .cols_label_with(
             fn=lambda c: c.split("__")[1], columns=cs.contains("panna")
         )
+        .tab_spanner(label="tutte", columns=cs.contains("tutte"))
+        .cols_label_with(
+            fn=lambda c: "approx",
+            columns=cs.contains("tutte"),
+        )
         .tab_spanner(label="HSSL", columns=cs.contains("hssl"))
         .cols_label_with(
-            fn=lambda c: "",
+            fn=lambda c: "approx",
             columns=cs.contains("hssl"),
         )
         .fmt_percent(columns=cs.numeric())
@@ -605,7 +672,7 @@ def _():
 @app.cell
 def _(noise_floor, pl):
     def cophenetic_calibration(trees):
-        references = trees.filter(pl.col("algorithm") == "tutte")
+        references = trees.filter(pl.col("algorithm") == "k+", pl.col("parameters").struct.field("epsilon") == 0.0)
         cases = references.select("dataset", "core_k").unique().to_dicts()
         res = []
         for case in cases[:3]:
@@ -642,7 +709,7 @@ def _(mo, mr_time_data, pl):
             pl.col("detail").struct.field("tree_path"),
             pl.col("parameters").struct.field("refine_iterations").fill_null(0)
         )
-        .filter(pl.col("refine_iterations") == 0)
+        # .filter(pl.col("refine_iterations") == 0)
         .with_columns(
             local_path=pl.lit("results/")
             + pl.col("tree_path").str.split("/").list.last()
@@ -673,7 +740,7 @@ def _(mo, mr_time_data, pl):
 def _(compare_cophenetic, load_tree, mo, pl):
     @mo.cache
     def cophenetic_comparison(trees):
-        references = trees.filter(pl.col("algorithm") == "tutte")
+        references = trees.filter(pl.col("algorithm") == "panna", pl.col("epsilon") == 0.0)
         datasets = references["dataset"].unique().to_list()
         res = []
         for dataset in datasets:
@@ -715,7 +782,7 @@ def _(GT, cophenetic_scores, cs, pl):
     mr_cophenetic = (
         GT(
             cophenetic_scores
-            .filter(pl.col("algorithm") != "tutte")
+            # .filter(pl.col("algorithm") != "tutte")
             .with_columns(
                 (
                     pl.col("algorithm")
@@ -723,7 +790,7 @@ def _(GT, cophenetic_scores, cs, pl):
                     + pl.col("epsilon").cast(pl.String).fill_null("")
                 ).alias("pivot"),
 
-                pl.format("{} ({}%)", pl.col("cophenetic_pearson").round(2), (pl.col("cophenetic_mare") * 100).round(2)).alias("score")
+                pl.format("{} ({}%)", pl.col("cophenetic_pearson").round(2), (pl.col("cophenetic_mare") * 100).round(1)).alias("score")
             )
             .select("pivot", "dataset", "core_k", "score")
             .pivot(
@@ -735,7 +802,7 @@ def _(GT, cophenetic_scores, cs, pl):
                 "dataset",
                 "core_k",
                 pl.col(
-                    ["hssl__"]
+                    ["tutte__", "hssl__"]
                     + ["panna__{}".format(e) for e in [0.5, 1.0]]
                 ),
             )
@@ -743,13 +810,18 @@ def _(GT, cophenetic_scores, cs, pl):
             # groupname_col="dataset",
             # rowname_col="core_k",
         )
-        .tab_spanner(label="Ours", columns=cs.contains("panna"))
+        .tab_spanner(label="\\ours", columns=cs.contains("panna"))
         .cols_label_with(
             fn=lambda c: c.split("__")[1], columns=cs.contains("panna")
         )
-        .tab_spanner(label="HSSL", columns=cs.contains("hssl"))
+        .tab_spanner(label="\\tutte", columns=cs.contains("tutte"))
         .cols_label_with(
-            fn=lambda c: "",
+            fn=lambda c: "approx",
+            columns=cs.contains("tutte"),
+        )
+        .tab_spanner(label="\\hssl", columns=cs.contains("hssl"))
+        .cols_label_with(
+            fn=lambda c: "approx",
             columns=cs.contains("hssl"),
         )
         .fmt_percent(columns=cs.numeric(), decimals=2)
@@ -784,6 +856,7 @@ def _(any_dataset_sel, experiments, mo, pl):
         (experiments
         .filter(pl.col("profile_path").is_null().not_())
         .filter(pl.col("dataset") == any_dataset_sel.value)
+        .filter(pl.col("parameters").struct.field("cluster_k").is_null())
         .filter(pl.col("parameters").struct.field("epsilon") == 0.0)["display algorithm"]
         ).to_list()
     )
@@ -834,17 +907,13 @@ def _(
             label=c.replace("emst_", "").replace("_", " "),
         )
 
-    # plt.plot(
-    #     profile["elapsed_ms"] / 1000,
-    #     profile["emst_num_confirmed"] / num_edges,
-    #     label="fraction confirmed edges",
-    # )
-
-    prev_prefix = 4
-    for pline in profile.to_dicts():
-        if pline["prefix"] != prev_prefix:
-            prev_prefix = pline["prefix"]
-            # plt.axvline(pline["elapsed_ms"] / 1000)
+    # prev_prefix = 4
+    # for pline in profile.sort("elapsed_ms").to_dicts():
+    #     if pline["prefix"] != prev_prefix:
+    #         prev_prefix = pline["prefix"]
+    #         plt.axvline(pline["elapsed_ms"] / 1000, c="lightgray", zorder=-1)
+    #     if pline["repetition"] % 32 == 0:
+    #         plt.axvline(pline["elapsed_ms"] / 1000, c="lightgray", zorder=-1, linestyle="dotted")
 
     plt.axhline(1, c="lightgray", zorder=-1)
     # plt.title(
@@ -949,6 +1018,12 @@ def _(pl):
 
 
 @app.cell
+def _(download_trees, mutual_reachability_data):
+    download_trees(mutual_reachability_data)
+    return
+
+
+@app.cell
 def _(pl):
     def download_profiles(df, base="ceccarello@login.dei.unipd.it:/nfsd/lovelace/ceccarello/panna-tmp/"):
         """Downloads all the profiles referenced in the given dataframe"""
@@ -970,12 +1045,6 @@ def _(pl):
     return (download_profiles,)
 
 
-@app.cell
-def _(download_trees, mutual_reachability_data):
-    download_trees(mutual_reachability_data)
-    return
-
-
 @app.function
 def to_latex(table):
     import re
@@ -988,6 +1057,8 @@ def to_latex(table):
     latex = latex.replace(r"[!t]", "")
     latex = latex.replace("None", "-")
     latex = latex.replace("\\$", "$")
+    latex = latex.replace("\\{", "{").replace("\\}", "}")
+    latex = latex.replace("\\\\footnotesize", "\\footnotesize")
     latex = multirow_first_column(latex)
     return latex
 
@@ -1155,6 +1226,14 @@ def _(compute_emst, mo, np, plt, sns):
         return weights, ax
 
     return
+
+
+@app.cell
+def _(pl):
+    def choose2(col):
+        return (pl.col(col) * (pl.col(col) - 1)) / 2
+
+    return (choose2,)
 
 
 if __name__ == "__main__":

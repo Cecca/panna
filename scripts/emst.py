@@ -681,7 +681,7 @@ def run_experiments(
             if "k+" in algorithms:
                 epsilons = [0.0, 0.1, 0.2, 0.5, 1.0]
                 if cluster:
-                    epsilons = [1.0, 0.5]
+                    epsilons = [0.0, 1.0, 0.5]
                 for epsilon in epsilons:
                     family = "lattice"
                     # if any(d in dataset for d in ["normalized", "angular", "cosine"]):
@@ -692,7 +692,9 @@ def run_experiments(
                         "family": family,
                         "repetitions": repetitions,
                     }
-                    if cluster:
+                    if cluster and epsilon == 0.0:
+                        params["refine_iterations"] = 1000
+                    else:
                         params["refine_iterations"] = 0
                     run_single(
                         "k+",
