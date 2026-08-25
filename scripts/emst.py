@@ -184,7 +184,9 @@ def compute_flexibility(tree, epsilon, diameter):
 
 def compute_edge_mass(weights, counts, threshold):
     idx = np.searchsorted(weights, threshold, side="right")
-    return counts[idx]
+    # a threshold beyond the last bucket boundary lands past the end of the
+    # cumulative counts: in that case the whole mass is below the threshold
+    return counts[min(idx, len(counts) - 1)]
 
 
 def estimate_contrast(edge_mass, bounds, cumulative_counts, diameter):
@@ -499,15 +501,20 @@ def worker(fn, fn_args, queue, emst_stats=False):
         n = data.shape[0]
         npairs = n * (n - 1) // 2
         detail |= dict(diameter=float(diameter))
+        # `compute_flexibility` and the threshold lookup below both assume
+        # weights in ascending order. The diameter is only approximate (it is a
+        # lower bound on the true one), hence single tree edges may be longer
+        # than it: extend the histogram range so that no pair is left out.
+        sorted_weights = np.sort(tree_weights)
         bounds, counts, mean_weight = compute_cumulative_distance_distribution(
-            data, tree_weights.min(), diameter
+            data, sorted_weights[0], max(diameter, sorted_weights[-1])
         )
         detail["mean_weight"] = float(mean_weight)
         detail["n"] = int(data.shape[0])
         detail["d"] = int(data.shape[1])
         for epsilon in [0.0, 0.01, 0.1, 0.2, 0.5, 1.0]:
-            flexibility = compute_flexibility(tree_weights, epsilon, diameter)
-            threshold = tree_weights[-flexibility - 1]
+            flexibility = compute_flexibility(sorted_weights, epsilon, diameter)
+            threshold = sorted_weights[-flexibility - 1]
             mass = compute_edge_mass(bounds, counts, threshold)
             contrast = estimate_contrast(mass, bounds, counts, diameter)
             detail |= {

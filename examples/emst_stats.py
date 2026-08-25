@@ -28,7 +28,9 @@ def compute_flexibility(tree, epsilon, diameter):
 
 def compute_edge_mass(weights, counts, threshold):
     idx = np.searchsorted(weights, threshold, side="right")
-    return counts[idx]
+    # a threshold beyond the last bucket boundary lands past the end of the
+    # cumulative counts: in that case the whole mass is below the threshold
+    return counts[min(idx, len(counts) - 1)]
 
 
 def estimate_contrast(edge_mass, bounds, cumulative_counts, diameter):
@@ -88,8 +90,11 @@ def compute_stats_csv():
             weights, edges = compute_emst(data)
             ic(edges)
             diameter = panna.approximate_diameter(data)
+            # the diameter is only approximate (it is a lower bound on the true
+            # one), hence single tree edges may be longer than it: extend the
+            # histogram range so that no pair is left out.
             bounds, counts, mean_weight = compute_cumulative_distance_distribution(
-                data, weights.min(), diameter
+                data, weights.min(), max(diameter, weights.max())
             )
 
             with h5py.File(oname, "w") as hfp:
