@@ -271,6 +271,11 @@ def _array_health_stats(data: np.ndarray) -> tuple[int, int]:
     return zero_norm_rows, non_finite_values
 
 
+def local_path(name: str):
+    url, _, _ = _DATASETS_INFO[name]
+    return DATASETS_DIR / Path(urlparse(url).path).name
+
+
 def load(
     name: str,
     pca_dimensions=None,
@@ -287,7 +292,7 @@ def load(
         DATASETS_DIR.mkdir()
 
     url, loader, distance = _DATASETS_INFO[name]
-    local_name = DATASETS_DIR / Path(urlparse(url).path).name
+    local_name = local_path(name)
     _download(url, local_name)
     train, test, distances = loader(local_name)
     # Remove duplicate rows (if any) from train set
