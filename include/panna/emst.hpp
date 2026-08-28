@@ -499,6 +499,14 @@ namespace panna {
             do_update( b, a, dist );
         }
 
+        /// Update only `src`'s neighborhood with the candidate `dst`, at
+        /// distance `dist`. Unlike `update`, this touches a single row of
+        /// `neighbors`, hence distinct `src` values can be updated
+        /// concurrently without any synchronization.
+        void update_one_sided( uint32_t src, uint32_t dst, float dist ) {
+            do_update( src, dst, dist );
+        }
+
         void update( Edge& edge ) {
             update( edge.a, edge.b, edge.weight );
         }
@@ -908,48 +916,163 @@ namespace panna {
             return exact_emst<Dataset, Distance>(table.get_dataset());
         }
 
+        /// @brief Computes, exactly, the minimum spanning tree under the
+        /// mutual reachability distance defined by the `num_neighbors`-th
+        /// nearest neighbor of each point.
+        ///
+        /// This is the reference implementation against which the
+        /// probabilistic one is validated, so it deliberately looks at all
+        /// pairs. It does so in two phases, neither of which materializes the
+        /// quadratically-many edges:
+        ///
+        ///  1. the exact core distances, by scanning, for each point, the
+        ///     distances towards all the others and keeping the `num_neighbors`
+        ///     smallest ones;
+        ///  2. Prim's algorithm on the (implicit) complete graph weighted by
+        ///     the mutual reachability distance, in the dense O(n^2) time and
+        ///     O(n) space formulation.
+        ///
+        /// @return the weight of the tree, along with its edges. As in
+        /// `find_tree_mutual_reachability_distance`, the edge weights of the
+        /// returned tree are Euclidean mutual reachability distances.
         std::pair<float, std::vector<Edge>> exact_mutual_reachability_distance_tree( const size_t num_neighbors ) {
+            Timer _t( "exact_mutual_reachability_distance_tree" );
             // Clear from any previous runs
             clear();
-            // Compute all the distances
-            //  We can pre-allocate all the memory, and avoid the critical region
-            std::vector<Edge> all_edges( ( num_data - 1 ) * num_data / 2 );
-#pragma omp parallel for collapse (2)
-            for ( size_t i = 0; i < num_data; i++ ) {
-                for ( size_t j = i + 1; j < num_data; j++ ) {
-                    float dist = table.get_distance( i, j );
-                    all_edges.at(i * ( num_data - 1 ) - ( i * ( i + 1 ) / 2 ) + j - 1) =
-                        Edge{ .weight = dist, .a = (uint32_t)i, .b = (uint32_t)j };
+
+            // Phase 1: the exact core distances.
+            //
+            // Each iteration of the outer loop owns a single row of the
+            // neighborhoods array, hence `update_one_sided` needs no
+            // synchronization. Scanning all the ordered pairs costs twice the
+            // distance computations of a triangular scan, but in exchange the
+            // loop is embarassingly parallel and, above all, we never store any
+            // edge: the memory footprint is the O(num_data * num_neighbors) of
+            // the neighborhoods themselves.
+            CoreDistances cd( num_data, num_neighbors );
+            const bool has_cores = num_neighbors > 0;
+            if ( has_cores ) {
+#pragma omp parallel for schedule( static )
+                for ( size_t i = 0; i < num_data; i++ ) {
+                    for ( size_t j = 0; j < num_data; j++ ) {
+                        if ( i == j ) {
+                            continue;
+                        }
+                        cd.update_one_sided(
+                            (uint32_t)i, (uint32_t)j, table.get_distance( i, j ) );
+                    }
                 }
             }
-            CoreDistances cd( num_data, num_neighbors );
-            for (auto &e: all_edges) {
-                cd.update(e.a, e.b, e.weight);
-            }
 
-            // Create the DSU
-            float tree_weight = 0;
-            std::cout << "Creating the MST" << std::endl;
+            // Phase 2: Prim's algorithm on the complete graph weighted by the
+            // mutual reachability distance. `best[v]` is the weight of the
+            // lightest edge connecting `v` to the tree built so far, and
+            // `parent[v]` is the endpoint of that edge inside the tree.
+            constexpr float infinity = std::numeric_limits<float>::infinity();
+            constexpr uint32_t none = std::numeric_limits<uint32_t>::max();
             std::vector<Edge> tree;
-            update_tree( tree, all_edges, cd );
-            for ( const auto& edge : tree ) {
-                tree_weight += edge.weight ;
+            if ( num_data > 1 ) {
+                tree.reserve( num_data - 1 );
             }
-            LOG_INFO("msg", "MST created",
-                      "heaviest_edge",  tree.back().weight ,
-                      "tree-weight", tree_weight
-            );
-            // Reweight the output edges with the mutual reachability
-            // distance (which was already used in update_tree).
-            // Furthermore, switch to the Euclidean distance, if
-            // the metric used was something different
+            std::vector<float> best( num_data, infinity );
+            std::vector<uint32_t> parent( num_data, none );
+            std::vector<char> in_tree( num_data, 0 );
+
+            LOG_INFO( "msg", "creating the MST" );
+            uint32_t current = 0;
+            if ( num_data > 0 ) {
+                in_tree.at( 0 ) = 1;
+            }
+            while ( tree.size() + 1 < num_data ) {
+                // Relax the frontier with the edges leaving the vertex just
+                // added, and pick the cheapest vertex still outside the tree in
+                // the same pass: the relaxation touches every `j` anyway, and
+                // its cost is dominated by the distance computation.
+                const uint32_t u = current;
+                uint32_t next = none;
+                float next_weight = infinity;
+#pragma omp parallel
+                {
+                    uint32_t local_next = none;
+                    float local_weight = infinity;
+#pragma omp for schedule( static ) nowait
+                    for ( size_t j = 0; j < num_data; j++ ) {
+                        if ( in_tree.at( j ) ) {
+                            continue;
+                        }
+                        const float dist = table.get_distance( u, j );
+                        const float mr =
+                            has_cores
+                                ? cd.mutual_reachability_distance( u, (uint32_t)j, dist )
+                                : dist;
+                        // `parent == none` covers the degenerate case of
+                        // infinite mutual reachability distances (which happens
+                        // when `num_neighbors >= num_data`): every vertex still
+                        // gets a parent, so the result stays a spanning tree.
+                        if ( parent.at( j ) == none || mr < best.at( j ) ) {
+                            best.at( j ) = mr;
+                            parent.at( j ) = u;
+                        }
+                        // ties are broken on the vertex index, so that the
+                        // result does not depend on the number of threads
+                        if ( local_next == none || best.at( j ) < local_weight ||
+                             ( best.at( j ) == local_weight && j < local_next ) ) {
+                            local_weight = best.at( j );
+                            local_next = (uint32_t)j;
+                        }
+                    }
+#pragma omp critical
+                    {
+                        if ( local_next != none &&
+                             ( next == none || local_weight < next_weight ||
+                               ( local_weight == next_weight && local_next < next ) ) ) {
+                            next_weight = local_weight;
+                            next = local_next;
+                        }
+                    }
+                }
+                expect( next != none );
+                expect( parent.at( next ) != none );
+                in_tree.at( next ) = 1;
+                tree.push_back( Edge{ .weight = best.at( next ),
+                                      .a = parent.at( next ),
+                                      .b = next } );
+                current = next;
+            }
+            std::sort( tree.begin(), tree.end() );
+            expect( num_data == 0 || tree.size() == num_data - 1 );
+            expect( num_data <= 1 || is_connected( tree ) );
+
+            // Switch the weights to the Euclidean distance, if the metric
+            // used was something different, exactly as
+            // `find_tree_mutual_reachability_distance` does. The maximum with
+            // the core distances is redundant here (the weights already are
+            // mutual reachability distances) but it is kept so that the two
+            // functions compute the weights in the very same way. Since
+            // `to_euclidean` is monotone, this preserves the sorted order of
+            // the tree.
             for ( size_t i = 0; i < tree.size(); i++ ) {
                 const float w = Distance::to_euclidean( tree[i].weight );
-                const float ca =
-                    Distance::to_euclidean( cd.core_distance( tree[i].a ) );
-                const float cb =
-                    Distance::to_euclidean( cd.core_distance( tree[i].b ) );
+                const float ca = has_cores ? Distance::to_euclidean(
+                                                 cd.core_distance( tree[i].a ) )
+                                           : 0.0f;
+                const float cb = has_cores ? Distance::to_euclidean(
+                                                 cd.core_distance( tree[i].b ) )
+                                           : 0.0f;
                 tree[i].weight = std::max( { w, ca, cb } );
+            }
+
+            // The weight is accumulated on the reweighted edges, so that it is
+            // directly comparable with the one of the tree returned by
+            // `find_tree_mutual_reachability_distance`.
+            float tree_weight = 0;
+            for ( const auto& edge : tree ) {
+                tree_weight += edge.weight;
+            }
+            if ( !tree.empty() ) {
+                LOG_INFO( "msg", "MST created",
+                          "heaviest_edge", tree.back().weight,
+                          "tree-weight", tree_weight );
             }
 
             return {tree_weight, tree};
