@@ -24,6 +24,23 @@ def load_tree(path: Path | str) -> np.ndarray:
     ).astype(np.float64)
 
 
+def load_base_tree(dataset, minPts) -> np.ndarray:
+    from pathlib import Path
+    import h5py
+
+    path = None
+    for d in Path("datasets").glob("*.hdf5"):
+        if d.name.startswith(dataset):
+            path = d
+            break
+    if path is None:
+        raise ValueError("cannot find dataset")
+    with h5py.File(path) as hfp:
+        if f"/tree-{minPts}" not in hfp:
+            raise ValueError(f"missing tree for {minPts}")
+        return hfp[f"/tree-{minPts}/tree"][:]
+
+
 def tree_clustering(tree: np.ndarray, min_cluster_size: int) -> np.ndarray:
     """Labels that HDBSCAN's condensation and excess-of-mass extraction assign
     to the hierarchy induced by `tree`, which is a `(n-1, 3)` array of

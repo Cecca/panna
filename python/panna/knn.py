@@ -163,6 +163,6 @@ if __name__ == "__main__":
     if output is None:
         output = datasets.local_path(args.dataset)
 
-    _, data = datasets.load(args.dataset)
+    _, data = datasets.load(args.dataset, normalize="angular" in dataset)
     write_knn(data, output, args.k, args.block_size)
     print(f"wrote the {args.k}-nn graph of {args.dataset} to {output}")

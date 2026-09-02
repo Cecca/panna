@@ -664,9 +664,9 @@ def _(mo):
 
 @app.cell
 def _():
-    from emst_eval import load_tree, sweep_clusterings, tree_clustering, compare_cophenetic, noise_floor, compare_branches
+    from emst_eval import load_tree, load_base_tree, sweep_clusterings, tree_clustering, compare_cophenetic, noise_floor, compare_branches
 
-    return compare_cophenetic, load_tree, noise_floor
+    return compare_cophenetic, load_base_tree, load_tree, noise_floor
 
 
 @app.cell
@@ -737,15 +737,14 @@ def _(mo, mr_time_data, pl):
 
 
 @app.cell
-def _(compare_cophenetic, load_tree, mo, pl):
+def _(compare_cophenetic, load_base_tree, load_tree, mo, pl):
     @mo.cache
     def cophenetic_comparison(trees):
-        references = trees.filter(pl.col("algorithm") == "panna", pl.col("epsilon") == 0.0)
-        datasets = references["dataset"].unique().to_list()
+        datasets = trees["dataset"].unique().to_list()
         res = []
         for dataset in datasets:
             cluster_ks = (
-                references.filter(pl.col("dataset") == dataset)["core_k"]
+                trees.filter(pl.col("dataset") == dataset)["core_k"]
                 .unique()
                 .to_list()
             )
@@ -754,9 +753,7 @@ def _(compare_cophenetic, load_tree, mo, pl):
                     pl.col("dataset") == dataset,
                     pl.col("core_k") == ck,
                 )
-                reference_tree = load_tree(
-                    references.filter(filter_expr)["tree_path"].to_list()[0]
-                )
+                reference_tree = load_base_tree(dataset, ck)
                 for experiment in trees.filter(filter_expr).to_dicts():
                     row = dict(dataset=dataset, core_k=ck, epsilon=experiment["epsilon"])
                     exp_tree = load_tree(experiment["tree_path"])

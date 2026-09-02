@@ -455,7 +455,7 @@ if __name__ == "__main__":
     if output is None:
         output = datasets.local_path(args.dataset)
 
-    _, data = datasets.load(args.dataset)
+    _, data = datasets.load(args.dataset, normalize="angular" in dataset)
     with h5py.File(output) as hfp:
         if "/graph" not in hfp:
             print("computing the knn graph")
