@@ -1,6 +1,8 @@
 #pragma once
 #include <catch2/catch_test_macros.hpp>
 
+#include <unordered_set>
+
 #include "panna/lsh/values.hpp"
 
 namespace panna {
@@ -33,5 +35,56 @@ namespace panna {
         BytewiseLshValue<4> b = BytewiseLshValue<4>::make( bytes_b );
         BytewiseLshValue<8> expected = BytewiseLshValue<8>::make( bytes_expected );
         REQUIRE( BytewiseLshValue<8>::interleave( a, b ) == expected );
+    }
+
+    TEST_CASE( "hash values can be hashed" ) {
+        std::array<int8_t, 4> bytes_a = { 0, 2, 4, 6 };
+        std::array<int8_t, 4> bytes_b = { 1, 3, 5, 7 };
+        BytewiseLshValue<4> a = BytewiseLshValue<4>::make( bytes_a );
+        BytewiseLshValue<4> b = BytewiseLshValue<4>::make( bytes_b );
+        REQUIRE( std::hash<BytewiseLshValue<4>>{}(a) != std::hash<BytewiseLshValue<4>>{}(b)  );
+        REQUIRE( std::hash<BytewiseLshValue<4>>{}(a) ==
+                 std::hash<BytewiseLshValue<4>>{}( BytewiseLshValue<4>::make( bytes_a ) ) );
+
+        std::unordered_set<BytewiseLshValue<4>> set;
+        set.insert( a );
+        set.insert( b );
+        set.insert( BytewiseLshValue<4>::make( bytes_a ) );
+        REQUIRE( set.size() == 2 );
+        REQUIRE( set.count( a ) == 1 );
+    }
+
+    TEST_CASE( "array hash values can be hashed" ) {
+        using Value = ArrayLshValue<int32_t, 3, 2>;
+        std::array<std::array<int32_t, 3>, 2> arrays_a = { { { 0, 1, 2 }, { 3, 4, 5 } } };
+        std::array<std::array<int32_t, 3>, 2> arrays_b = { { { 0, 1, 2 }, { 3, 4, 6 } } };
+        Value a = Value::make( arrays_a );
+        Value b = Value::make( arrays_b );
+        REQUIRE( std::hash<Value>{}( a ) != std::hash<Value>{}( b ) );
+        REQUIRE( std::hash<Value>{}( a ) == std::hash<Value>{}( Value::make( arrays_a ) ) );
+        REQUIRE( a == Value::make( arrays_a ) );
+        REQUIRE( !( a == b ) );
+
+        std::unordered_set<Value> set;
+        set.insert( a );
+        set.insert( b );
+        set.insert( Value::make( arrays_a ) );
+        REQUIRE( set.size() == 2 );
+        REQUIRE( set.count( a ) == 1 );
+    }
+
+    TEST_CASE( "bitwise hash values can be hashed" ) {
+        BitwiseLshValue<16> a = BitwiseLshValue<16>::make( 0xaaaa );
+        BitwiseLshValue<16> b = BitwiseLshValue<16>::make( 0x5555 );
+        REQUIRE( std::hash<BitwiseLshValue<16>>{}( a ) != std::hash<BitwiseLshValue<16>>{}( b ) );
+        REQUIRE( std::hash<BitwiseLshValue<16>>{}( a ) ==
+                 std::hash<BitwiseLshValue<16>>{}( BitwiseLshValue<16>::make( 0xaaaa ) ) );
+
+        std::unordered_set<BitwiseLshValue<16>> set;
+        set.insert( a );
+        set.insert( b );
+        set.insert( BitwiseLshValue<16>::make( 0xaaaa ) );
+        REQUIRE( set.size() == 2 );
+        REQUIRE( set.count( a ) == 1 );
     }
 } // namespace panna

@@ -8,6 +8,7 @@
 #include <cstring>
 #include <ostream>
 #include <type_traits>
+#include <functional>
 
 namespace panna {
     //! Places zeros between the bits of the given value.
@@ -78,6 +79,7 @@ namespace panna {
 
     public:
         using DoubleWidth = BitwiseLshValue<2 * K>;
+        friend struct std::hash<BitwiseLshValue<K>>;
 
         //! How many concatenated hash values are stored in this value?
         constexpr static uint8_t get_concatenations() {
@@ -177,6 +179,8 @@ namespace panna {
 
     public:
         using DoubleWidth = SymbolLshValue<Symbol, 2 * K>;
+
+        friend struct std::hash<SymbolLshValue<Symbol, K>>;
 
         template <typename Archive>
         void serialize( Archive& ar ) {
@@ -286,8 +290,14 @@ namespace panna {
         friend std::ostream& operator<<( std::ostream& os, const ArrayLshValue<T, SIZE, K>& hash ) {
             os << "#";
             for ( size_t i = 0; i < K; i++ ) {
-                os << std::hex << +hash.hashes[i];
-                // os << std::hex << static_cast<int64_t>( hash.hashes[i] );
+                os << "[";
+                for ( size_t j = 0; j < SIZE; j++ ) {
+                    os << std::hex << +hash.hashes[i][j];
+                    if ( j < SIZE - 1 ) {
+                        os << ",";
+                    }
+                }
+                os << "]";
                 if ( i < K - 1 ) {
                     os << "_";
                 }
@@ -297,6 +307,8 @@ namespace panna {
 
     public:
         using DoubleWidth = ArrayLshValue<T, SIZE, 2 * K>;
+
+        friend struct std::hash<ArrayLshValue<T, SIZE, K>>;
 
         template <typename Archive>
         void serialize( Archive& ar ) {
@@ -363,3 +375,45 @@ namespace panna {
         }
     };
 } // namespace panna
+
+
+template<typename Symbol, uint8_t K>
+struct std::hash<panna::SymbolLshValue<Symbol, K>>
+{
+    std::size_t operator()(const panna::SymbolLshValue<Symbol, K>& s) const noexcept
+    {
+        std::size_t hval = 0;
+        for ( uint8_t i = 0; i < K; i++ ) {
+            hval ^= std::hash<Symbol>{}( s.hashes[i] ) + 0x9e3779b97f4a7c15ULL
+                  + ( hval << 6 ) + ( hval >> 2 );
+        }
+        return hval;
+    }
+};
+
+template<typename T, size_t SIZE, uint8_t K>
+struct std::hash<panna::ArrayLshValue<T, SIZE, K>>
+{
+    std::size_t operator()(const panna::ArrayLshValue<T, SIZE, K>& s) const noexcept
+    {
+        std::size_t hval = 0;
+        for ( uint8_t i = 0; i < K; i++ ) {
+            for ( size_t j = 0; j < SIZE; j++ ) {
+                hval ^= std::hash<T>{}( s.hashes[i][j] ) + 0x9e3779b97f4a7c15ULL
+                      + ( hval << 6 ) + ( hval >> 2 );
+            }
+        }
+        return hval;
+    }
+};
+
+template<uint8_t K>
+struct std::hash<panna::BitwiseLshValue<K>>
+{
+    std::size_t operator()(const panna::BitwiseLshValue<K>& s) const noexcept
+    {
+        std::size_t hval = std::hash<uint32_t>{}(s.bits);
+        return hval;
+    }
+};
+
