@@ -3,6 +3,9 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <cmath>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "panna/data.hpp"
 #include "panna/distance.hpp"
@@ -101,6 +104,154 @@ namespace panna {
             test_hash_collision_probability<Dataset, EuclideanDistance, E2LSHBuilder<1, Dataset, EuclideanDistance>>(
                 builder, dimensions, 4096 );
         }
+    }
+
+    //! Draw a point uniformly at random from the ball of the given radius
+    //! centered on `query`, and hash it the straightforward way.
+    template <uint8_t K>
+    static BytewiseLshValue<K>
+    hash_explicit_ball_sample( const E2LSH<K, EuclideanPoints, EuclideanDistance>& hasher,
+                               const std::vector<float>& query,
+                               float radius,
+                               size_t rep,
+                               EuclideanPoints& scratch,
+                               std::vector<BytewiseLshValue<K>>& output ) {
+        const size_t dimensions = query.size();
+        std::vector<float> direction = sample_random_normal_vector( dimensions );
+        normalize( direction );
+        float sampled_radius =
+            radius * std::pow( sample_random_01(), 1.0f / dimensions );
+
+        std::vector<float> point( dimensions );
+        for ( size_t i = 0; i < dimensions; i++ ) {
+            point.at( i ) = query.at( i ) + sampled_radius * direction.at( i );
+        }
+
+        scratch.clear();
+        scratch.push_back( point.begin(), point.end() );
+        hasher.hash( scratch[0], output );
+        return output.at( rep );
+    }
+
+    //! Total variation distance between two histograms over hash values.
+    template <typename Value>
+    static float total_variation( const std::unordered_map<Value, size_t>& a,
+                                  const std::unordered_map<Value, size_t>& b,
+                                  size_t samples ) {
+        std::unordered_set<Value> keys;
+        for ( const auto& entry : a ) {
+            keys.insert( entry.first );
+        }
+        for ( const auto& entry : b ) {
+            keys.insert( entry.first );
+        }
+
+        float distance = 0.0;
+        for ( const Value& key : keys ) {
+            auto in_a = a.find( key );
+            auto in_b = b.find( key );
+            float pa = ( in_a == a.end() ) ? 0.0f : static_cast<float>( in_a->second ) / samples;
+            float pb = ( in_b == b.end() ) ? 0.0f : static_cast<float>( in_b->second ) / samples;
+            distance += std::abs( pa - pb );
+        }
+        return distance / 2.0;
+    }
+
+    //! With a zero radius the sampled point is the query itself, so the sampled
+    //! hash must reproduce the plain hash exactly. This pins down the
+    //! bookkeeping of the `A q + b` terms, independently of the random part.
+    template <typename Dataset>
+    static void test_ball_sampler_zero_radius() {
+        constexpr uint8_t K = 4;
+        const size_t dimensions = 64;
+        const size_t repetitions = 8;
+        seed_global_rng( 1234 );
+
+        E2LSH<K, Dataset, EuclideanDistance> hasher( 1.5, dimensions, repetitions );
+        E2LSHBallSampler<K, Dataset, EuclideanDistance> sampler( hasher );
+        REQUIRE( sampler.get_repetitions() == repetitions );
+
+        Dataset queries( dimensions );
+        queries.push_back_random();
+
+        std::vector<BytewiseLshValue<K>> expected;
+        hasher.hash( queries[0], expected );
+
+        auto prepared = sampler.prepare( queries[0] );
+        for ( size_t rep = 0; rep < repetitions; rep++ ) {
+            REQUIRE( sampler.sample_hash( prepared, 0.0, rep ) == expected.at( rep ) );
+            REQUIRE( sampler.sample_hash( queries[0], 0.0, rep ) == expected.at( rep ) );
+        }
+    }
+
+    TEST_CASE( "E2LSHBallSampler with zero radius reproduces the hash" ) {
+        // Both dataset layouts E2LSH is instantiated with, since each stores
+        // the projection vectors differently and hence yields a different Gram
+        // matrix.
+        test_ball_sampler_zero_radius<EuclideanPoints>();
+        test_ball_sampler_zero_radius<NormedPoints>();
+    }
+
+    //! The hashes sampled directly in the projected space must follow the same
+    //! distribution as the hashes of points explicitly sampled in the ball.
+    template <uint8_t K>
+    static void test_ball_sampler_distribution( size_t dimensions,
+                                                float radius,
+                                                float quantization_width,
+                                                float accepted_deviation = 0.03 ) {
+        using Dataset = EuclideanPoints;
+        using Value = BytewiseLshValue<K>;
+        const size_t samples = 200000;
+        const size_t rep = 0;
+        seed_global_rng( 1234 );
+
+        E2LSH<K, Dataset, EuclideanDistance> hasher( quantization_width, dimensions, 1 );
+        E2LSHBallSampler<K, Dataset, EuclideanDistance> sampler( hasher );
+
+        Dataset queries( dimensions );
+        queries.push_back_random();
+        std::vector<float> query( dimensions );
+        queries[0].into_vec( query );
+
+        auto prepared = sampler.prepare( queries[0] );
+        std::unordered_map<Value, size_t> sampled;
+        for ( size_t i = 0; i < samples; i++ ) {
+            sampled[sampler.sample_hash( prepared, radius, rep )] += 1;
+        }
+
+        std::unordered_map<Value, size_t> explicitly_sampled;
+        Dataset scratch( dimensions );
+        std::vector<Value> output;
+        for ( size_t i = 0; i < samples; i++ ) {
+            explicitly_sampled[hash_explicit_ball_sample<K>(
+                hasher, query, radius, rep, scratch, output )] += 1;
+        }
+
+        // A degenerate run, where everything lands in one bucket, would pass
+        // the comparison below without testing anything.
+        REQUIRE( sampled.size() > 4 );
+
+        float distance = total_variation( sampled, explicitly_sampled, samples );
+        LOG_INFO( "concatenations", static_cast<int>( K ),
+                  "buckets", sampled.size(),
+                  "total-variation", distance );
+        REQUIRE( distance <= accepted_deviation );
+    }
+
+    //! A single projection, checking the marginal distribution and in
+    //! particular the interplay of the chi-squared term with the sampled
+    //! radius.
+    TEST_CASE( "E2LSHBallSampler marginal distribution" ) {
+        test_ball_sampler_distribution<1>( 64, 2.0, 1.0 );
+    }
+
+    //! The joint distribution of several projections, which is what the
+    //! Cholesky factor is there for. The dimensionality is deliberately small:
+    //! with many dimensions the projection vectors are nearly orthogonal, the
+    //! Gram matrix is nearly diagonal, and the test loses the power to tell a
+    //! correct factor from, say, its transpose.
+    TEST_CASE( "E2LSHBallSampler joint distribution" ) {
+        test_ball_sampler_distribution<4>( 8, 2.0, 2.0 );
     }
 
     TEST_CASE( "MinHash collision probability" ) {

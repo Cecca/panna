@@ -1,5 +1,7 @@
 #pragma once
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <limits>
 #include <numeric>
 #include <optional>
@@ -25,6 +27,9 @@ namespace panna {
     class E2LSHBuilder;
 
     template <uint8_t K, typename Dataset, typename Distance>
+    class E2LSHBallSampler;
+
+    template <uint8_t K, typename Dataset, typename Distance>
     class E2LSH {
     public:
         //! The datatype of the output
@@ -32,6 +37,8 @@ namespace panna {
         using Builder = E2LSHBuilder<K, Dataset, Distance>;
 
     private:
+        friend class E2LSHBallSampler<K, Dataset, Distance>;
+
         float quantization_width;
         size_t repetitions;
         Dataset random_vectors;
@@ -92,6 +99,148 @@ namespace panna {
             return 1.0 - 2.0 * normal_cdf( -r / distance ) -
                    ( 2.0 / ( std::sqrt( M_PI * 2.0 ) * ( r / distance ) ) ) *
                        ( 1.0 - std::exp( -r * r / ( 2.0 * distance * distance ) ) );
+        }
+    };
+
+    //! A companion to `E2LSH`, sampling the hash of a uniformly random point
+    //! of the ball `B(query, radius)` without ever materialising that point.
+    //!
+    //! Writing `A` for the matrix stacking the `K` projection vectors of one
+    //! repetition, the point `u = q + r g / ||g||` with `g ~ N(0, I_d)` hashes
+    //! to `floor( (A q + r A g / ||g|| + b) / w )`. Since `A g ~ N(0, A A^T)`,
+    //! we can draw the projected displacement directly as `L z`, where `L` is
+    //! the Cholesky factor of the Gram matrix `G = A A^T` and `z ~ N(0, I_K)`.
+    //! Decomposing `g` into the part lying in the span of the rows of `A` and
+    //! the part orthogonal to it gives `||g||^2 = ||z||^2 + s`, with
+    //! `s ~ chi^2(d - K)`.
+    //!
+    //! Each sample therefore costs `K + 2` scalar draws and a `K x K`
+    //! triangular product, instead of `d` draws and a `K x d` product.
+    //!
+    //! The sampler borrows the hasher it is built from, which must outlive it.
+    template <uint8_t K, typename Dataset, typename Distance>
+    class E2LSHBallSampler {
+    public:
+        using Hasher = E2LSH<K, Dataset, Distance>;
+        using Value = typename Hasher::Value;
+        using PointHandle = typename Dataset::PointHandle;
+
+        //! The part of the hash that only depends on the query, namely `A q`.
+        //! The projections are laid out like the projection vectors of the
+        //! hasher, with `K` consecutive entries per repetition.
+        struct PreparedQuery {
+            std::vector<float> projections;
+        };
+
+    private:
+        const Hasher* hasher = nullptr;
+        size_t dimensions = 0;
+        //! One `K x K` Cholesky factor per repetition.
+        std::vector<CholeskyFactor> factors;
+
+    public:
+        E2LSHBallSampler( const Hasher& hasher ):
+            hasher( &hasher ), dimensions( hasher.random_vectors.get_dimensions() ) {
+            // The orthogonal component of `g` has `d - K` degrees of freedom.
+            if ( dimensions <= K ) {
+                throw std::invalid_argument(
+                    "the number of concatenations must be smaller than the dimensionality" );
+            }
+
+            // The Gram matrix is built from the stored projection vectors
+            // rather than from the floats they were created with, so that it
+            // describes exactly the vectors `E2LSH::hash` uses, including any
+            // normalization and quantization the dataset applies to them.
+            std::vector<float> gram( static_cast<size_t>( K ) * K );
+            factors.reserve( hasher.repetitions );
+            for ( size_t rep = 0; rep < hasher.repetitions; rep++ ) {
+                const size_t rep_base = K * rep;
+                for ( size_t i = 0; i < K; i++ ) {
+                    PointHandle row_i = hasher.random_vectors[rep_base + i];
+                    for ( size_t j = 0; j <= i; j++ ) {
+                        PointHandle row_j = hasher.random_vectors[rep_base + j];
+                        float g = dot_product( row_i, row_j );
+                        gram.at( i * K + j ) = g;
+                        gram.at( j * K + i ) = g;
+                    }
+                }
+                factors.emplace_back( gram, K );
+            }
+        }
+
+        size_t get_repetitions() const {
+            return hasher->get_repetitions();
+        }
+
+        //! Compute the query-dependent part of the hash, `A q`. This costs
+        //! `K d` work per repetition, and can be reused across any number of
+        //! samples drawn around the same query.
+        PreparedQuery prepare( PointHandle query ) const {
+            PreparedQuery prepared;
+            prepared.projections.resize( hasher->offsets.size() );
+            for ( size_t idx = 0; idx < prepared.projections.size(); idx++ ) {
+                prepared.projections.at( idx ) =
+                    dot_product( query, hasher->random_vectors[idx] );
+            }
+            return prepared;
+        }
+
+        //! Sample the hash, in repetition `rep`, of a uniformly random point of
+        //! the ball of the given radius centered on the prepared query.
+        Value sample_hash( const PreparedQuery& query,
+                           float radius,
+                           size_t rep,
+                           std::mt19937_64& rng ) const {
+            expect( rep < factors.size() );
+            expect( query.projections.size() == hasher->offsets.size() );
+
+            // The displacement in the projected space, `L z`, together with the
+            // squared norm of the component of `g` lying in the span of `A`.
+            std::array<float, K> z;
+            float z_squared_norm = 0.0f;
+            for ( size_t i = 0; i < K; i++ ) {
+                float sample = sample_random_normal( rng );
+                z[i] = sample;
+                z_squared_norm += sample * sample;
+            }
+            std::array<float, K> displacement;
+            factors.at( rep ).multiply( z.data(), displacement.data() );
+
+            // The squared norm of the component of `g` orthogonal to the span
+            // of `A`, which is a sum of `d - K` squared standard normals.
+            std::chi_squared_distribution<float> chi_squared(
+                static_cast<float>( dimensions - K ) );
+            float orthogonal_squared_norm = chi_squared( rng );
+
+            // The radius of the sampled point, distributed so that the point is
+            // uniform in the ball rather than biased towards its center.
+            float sampled_radius =
+                radius * std::pow( sample_random_01( rng ), 1.0f / dimensions );
+            float scale =
+                sampled_radius / std::sqrt( z_squared_norm + orthogonal_squared_norm );
+
+            const float inv_quantization_width = 1.0f / hasher->quantization_width;
+            const size_t rep_base = K * rep;
+            Value out;
+            for ( size_t concat = 0; concat < K; concat++ ) {
+                const size_t idx = rep_base + concat;
+                float dotp = query.projections.at( idx ) + scale * displacement[concat];
+                float quantized =
+                    std::floor( ( dotp + hasher->offsets.at( idx ) ) * inv_quantization_width );
+                out.set( concat, static_cast<int8_t>( quantized ) );
+            }
+            return out;
+        }
+
+        Value sample_hash( const PreparedQuery& query, float radius, size_t rep ) const {
+            return sample_hash( query, radius, rep, get_global_rng() );
+        }
+
+        //! Convenience overload preparing the query on the fly. It pays `K d`
+        //! work on every call, so prefer `prepare` when drawing more than a
+        //! handful of samples around the same query.
+        Value sample_hash( PointHandle query, float radius, size_t rep = 0 ) const {
+            return sample_hash( prepare( query ), radius, rep );
         }
     };
 
