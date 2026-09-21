@@ -286,6 +286,17 @@ namespace panna {
         const size_t dimensions;
         const float * vector;
 
+        //! Computed on the fly (`EuclideanPoints` stores no norms). This is what
+        //! lets `EuclideanDistanceNoSqrt::compute`, which asks every point type
+        //! for its squared norm, work on `EuclideanPoints` at all.
+        float squared_norm() const {
+            float sum = 0.0f;
+            for ( size_t i = 0; i < dimensions; i++ ) {
+                sum += vector[i] * vector[i];
+            }
+            return sum;
+        }
+
         void into_vec( std::vector<float>& vec ) const {
             // in some cases (like cross polytope) the output vector holds more
             // elements than the dimensions

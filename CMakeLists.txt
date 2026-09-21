@@ -63,9 +63,18 @@ if (NOT SKBUILD)
   # FetchContent_MakeAvailable(Catch2)
   find_package(Catch2)
 
+  # Eigen (header-only) provides the GEMM behind the `EuclideanPoints` tile
+  # kernel of `PairForestIndex` (`panna/gemm_tile.hpp`), so only the targets
+  # that reach `pairforest.hpp` (directly or through `pairemst.hpp`) need it.
+  # The tile kernels run inside our own OpenMP threads, hence
+  # `EIGEN_DONT_PARALLELIZE`. `gemm_tile.hpp` defines it too, but that is too
+  # late when something (e.g. HighFive's H5Easy) has included Eigen first.
+  find_package(Eigen3 3.4 REQUIRED NO_MODULE)
+
   include_directories("test/include")
   add_executable(tests test/tests.cpp)
-  target_link_libraries(tests PRIVATE Catch2::Catch2WithMain)
+  target_link_libraries(tests PRIVATE Catch2::Catch2WithMain Eigen3::Eigen)
+  target_compile_definitions(tests PRIVATE EIGEN_DONT_PARALLELIZE)
 
   find_package(HighFive)
   add_executable(emst examples/emst.cpp)
@@ -75,7 +84,8 @@ if (NOT SKBUILD)
   target_link_libraries(emst-test PRIVATE HighFive)
 
   add_executable(pairemst-bench test/pairemst_bench.cpp)
-  target_link_libraries(pairemst-bench PRIVATE HighFive)
+  target_link_libraries(pairemst-bench PRIVATE HighFive Eigen3::Eigen)
+  target_compile_definitions(pairemst-bench PRIVATE EIGEN_DONT_PARALLELIZE)
 
   add_executable(recall test/recall_test.cpp)
   target_link_libraries(recall PRIVATE  HighFive)

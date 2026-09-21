@@ -30,6 +30,7 @@
 
 #include "panna/data.hpp" // Edge
 #include "panna/expect.hpp"
+#include "panna/gemm_tile.hpp"
 #include "panna/logging.hpp"
 #include "panna/lsh/predicates.hpp" // failure_probability
 #include "panna/timer.hpp"
@@ -389,6 +390,12 @@ namespace panna {
         static_assert( K == Hasher::Value::get_concatenations() );
         static_assert( std::is_same_v<Hasher, typename Hasher::Builder::Output> );
 
+        //! The scratch of the GEMM tile kernel, or an empty stand-in when this
+        //! `(Dataset, Distance)` pair keeps the scalar kernel.
+        using GemmScratch = std::conditional_t<GemmTileKernel<Dataset, Distance>::enabled,
+                                               GemmTileBuffers,
+                                               NoGemmTileBuffers>;
+
         //! Per-thread scratch reused across `search_pairs` calls. Holding one per
         //! worker avoids recomputing the novelty labels for every prefix.
         //!
@@ -399,6 +406,16 @@ namespace panna {
         struct SearchScratch {
             std::vector<uint32_t> novelty_labels; //!< rank(., cached_level); 4 B/point while alive
             std::vector<Edge> tile_buffer;        //!< edges between two callback hand-offs
+            //! Gathered points and inner products of the GEMM kernel; holds no
+            //! memory until the first tile that uses it.
+            [[no_unique_address]] GemmScratch gemm;
+            //! When the searches using this scratch evaluate tiles with the GEMM
+            //! filter. The kernels report exactly the same edges and distance
+            //! counts, so this is only a performance knob, for benchmarks and
+            //! tests. Ignored unless `gemm_supported()`. It lives here rather
+            //! than on the index because it is per-thread state, like the
+            //! statistics `GemmPolicy::adaptive` keeps in `gemm`.
+            GemmPolicy gemm_policy = GemmPolicy::adaptive;
             //! The tree `novelty_labels` was built from; `nullptr` until populated.
             //! Trees are owned by the index and never move, so the address is a
             //! stable identity for as long as the scratch could be reused.
@@ -465,6 +482,12 @@ namespace panna {
         //! Number of concatenated hash symbols per repetition.
         static constexpr uint8_t num_concatenations() {
             return K;
+        }
+
+        //! Whether this `(Dataset, Distance)` pair has a GEMM tile kernel at all
+        //! (see `GemmTileKernel`).
+        static constexpr bool gemm_supported() {
+            return GemmTileKernel<Dataset, Distance>::enabled;
         }
 
         //! The borrowed dataset.
@@ -637,7 +660,9 @@ namespace panna {
                                                      novelty_labels,
                                                      components,
                                                      distance_threshold,
-                                                     scratch.tile_buffer );
+                                                     scratch.tile_buffer,
+                                                     scratch.gemm,
+                                                     scratch.gemm_policy );
                     if ( scratch.tile_buffer.size() >= buffer_size ) {
                         const bool stop = batch_output( scratch.tile_buffer );
                         scratch.tile_buffer.clear();
@@ -670,6 +695,10 @@ namespace panna {
         //! family that cached state in those methods would race here.
         mutable std::optional<Hasher> hasher;
         Builder builder; //!< kept for `describe_family()` and for fitting
+
+        //! Tiles with fewer candidate pairs than this go to the scalar kernel:
+        //! below it, gathering the points costs more than the GEMM saves.
+        static constexpr size_t GEMM_MIN_PAIRS = 256;
 
         //! Common prologue of the three constructors: reject oversized datasets
         //! before the expensive hashing, and size the per-repetition storage.
@@ -770,28 +799,27 @@ namespace panna {
             }
         }
 
-        //! The pairwise-distance kernel -- the **only** place in the class that
-        //! computes a distance, and the only one that reads the dataset outside
-        //! construction. Returns the number of distance computations.
+        //! The scalar pairwise-distance kernel. Together with
+        //! `evaluate_tile_gemm` it is the whole of the query path's contact with
+        //! the data -- nothing else in either class names `Distance` or reads the
+        //! dataset outside construction. Returns the number of distance
+        //! computations.
         //!
         //! `FilterNovelty` is a template parameter rather than a runtime flag so
         //! that the novelty test disappears entirely from the inner loop when the
         //! caller does not need it (i.e. at `prefix == K`).
         //!
-        //! GEMM seam: this method is the whole of the query path's contact with
-        //! the data -- nothing else in either class names `Distance`. A float-GEMM
-        //! specialisation would replace exactly this method: it would (a) gather
-        //! the row and the column points into two contiguous row-major float
-        //! matrices -- `EuclideanPoints` is already float, while
-        //! `UnitNormPoints`/`NormedPoints` hold `alignas(32) Int16Chunk` and need
-        //! an int16 -> float conversion or an int16 GEMM; (b) produce a 128x128
-        //! float inner-product block; (c) turn the inner products into the metric
-        //! (`1 - dot` for `CosineDistance`, `|a|^2 + |b|^2 - 2*dot` for the
-        //! Euclidean ones); (d) run a post-pass applying the novelty labels, the
-        //! diagonal `j > i` mask and the threshold. `JaccardDistance` over
-        //! `SparseSets` has no inner-product form and must keep the scalar path,
-        //! so any such specialisation has to be opt-in per `(Dataset, Distance)`
-        //! pair. The indirection is deliberately *not* introduced here.
+        //! GEMM seam: for the `(Dataset, Distance)` pairs that `GemmTileKernel`
+        //! enables -- today only `EuclideanPoints` with the two Euclidean
+        //! distances -- `run_tile` sends the tile to `evaluate_tile_gemm`
+        //! instead, which gathers the row and column points into contiguous
+        //! float matrices, computes their inner-product block with one GEMM and
+        //! uses it to *reject* the pairs that certainly fail the threshold. The
+        //! survivors come back here, to `Distance::compute`, so the two kernels
+        //! agree bit for bit. `UnitNormPoints`/`NormedPoints` hold
+        //! `alignas(32) Int16Chunk` and would need an int16 -> float conversion
+        //! or an int16 GEMM first; `JaccardDistance` over `SparseSets` has no
+        //! inner-product form and always stays on this path.
         template <bool FilterNovelty, bool FilterComponents>
         size_t evaluate_tile( const PairCompactTree& tree, const Tile& tile,
                               [[maybe_unused]] const uint32_t* novelty_labels,
@@ -843,8 +871,151 @@ namespace panna {
             return computed;
         }
 
+        //! The GEMM-filtered twin of `evaluate_tile`, for the pairs enabled by
+        //! `GemmTileKernel`. It visits the pairs in the same order and applies the
+        //! same novelty and component filters, counting every pair that gets
+        //! past them exactly as `evaluate_tile` does; only then does it consult
+        //! the GEMM block, and a pair it cannot reject goes to the very
+        //! `Distance::compute` call of the scalar kernel. The output and the
+        //! returned count are therefore those of `evaluate_tile`, bit for bit
+        //! (see `GemmRejection` for the error bound that makes the rejection
+        //! safe).
+        //!
+        //! Unless the policy is `GemmPolicy::always`, tiles too small to amortise
+        //! the gather, infinite thresholds -- under which nothing can be rejected
+        //! -- and tiles arriving while the filter is not paying off (see
+        //! `GemmTileBuffers::worth_filtering`) go to `evaluate_tile` directly.
+        template <bool FilterNovelty, bool FilterComponents>
+        size_t evaluate_tile_gemm( const PairCompactTree& tree,
+                                   const Tile& tile,
+                                   [[maybe_unused]] const uint32_t* novelty_labels,
+                                   [[maybe_unused]] const uint32_t* components,
+                                   float distance_threshold,
+                                   std::vector<Edge>& output,
+                                   GemmScratch& gemm,
+                                   GemmPolicy policy ) const {
+            const bool diagonal = tile.is_diagonal();
+            const size_t num_rows = tile.row_end - tile.row_begin;
+            const size_t num_cols = tile.col_end - tile.col_begin;
+            /// Row `i` of a diagonal tile has the columns after it; when the
+            /// ranges have the same length that is `r (r - 1) / 2` pairs.
+            const size_t candidates = !diagonal ? num_rows * num_cols
+                                      : num_cols >= num_rows
+                                          ? num_rows * num_cols - num_rows * ( num_rows + 1 ) / 2
+                                          : num_cols * ( num_cols - 1 ) / 2;
+            constexpr bool squared = GemmTileKernel<Dataset, Distance>::squared;
+            const GemmRejection<squared> rejection( distance_threshold, dataset.get_dimensions() );
+            if ( policy != GemmPolicy::always &&
+                 ( candidates < GEMM_MIN_PAIRS || rejection.rejects_nothing() ||
+                   !gemm.worth_filtering() ) ) {
+                return evaluate_tile<FilterNovelty, FilterComponents>(
+                    tree, tile, novelty_labels, components, distance_threshold, output );
+            }
+
+            const uint32_t* ids = tree.sorted_ids().data();
+            /// `is_diagonal` only compares the starts; the ends always agree for
+            /// the tiles `for_each_tile` produces, but gathering the columns
+            /// separately when they do not costs nothing to get right.
+            gemm.compute( dataset,
+                          ids + tile.row_begin,
+                          num_rows,
+                          ids + tile.col_begin,
+                          num_cols,
+                          diagonal && tile.row_end == tile.col_end,
+                          /*exact_norms=*/squared );
+            const float* row_norms = gemm.row_norms();
+            const float* col_norms = gemm.col_norms();
+            [[maybe_unused]] const float* row_exact_norms = gemm.row_exact_norms();
+            [[maybe_unused]] const float* col_exact_norms = gemm.col_exact_norms();
+            size_t computed = 0;
+            size_t rejected = 0;
+
+            for ( uint32_t i = tile.row_begin; i < tile.row_end; i++ ) {
+                const uint32_t a = ids[i];
+                const PointHandle point_a = dataset[a];
+                const float norm_a = row_norms[i - tile.row_begin];
+                float exact_norm_a = 0.0f;
+                if constexpr ( squared ) {
+                    exact_norm_a = row_exact_norms[i - tile.row_begin];
+                }
+                const float* products = gemm.products_row( i - tile.row_begin );
+                uint32_t label_a = 0;
+                if constexpr ( FilterNovelty ) {
+                    label_a = novelty_labels[i];
+                }
+                uint32_t component_a = 0;
+                if constexpr ( FilterComponents ) {
+                    component_a = components[a];
+                }
+                const uint32_t j_begin = diagonal ? i + 1 : tile.col_begin;
+
+                for ( uint32_t j = j_begin; j < tile.col_end; j++ ) {
+                    if constexpr ( FilterNovelty ) {
+                        if ( novelty_labels[j] == label_a ) {
+                            continue;
+                        }
+                    }
+                    const uint32_t b = ids[j];
+                    if constexpr ( FilterComponents ) {
+                        if ( components[b] == component_a ) {
+                            continue;
+                        }
+                    }
+                    /// Counted before the rejection test: a rejected pair stands
+                    /// for a distance the scalar kernel would have computed.
+                    computed++;
+                    const uint32_t col = j - tile.col_begin;
+                    float exact_norm_b = 0.0f;
+                    if constexpr ( squared ) {
+                        exact_norm_b = col_exact_norms[col];
+                    }
+                    if ( rejection.rejects(
+                             norm_a, col_norms[col], products[col], exact_norm_a, exact_norm_b ) ) {
+                        rejected++;
+                        continue;
+                    }
+                    const float distance = Distance::compute( point_a, dataset[b] );
+                    // A NaN distance fails this test and is silently dropped.
+                    if ( distance <= distance_threshold ) {
+                        output.push_back( Edge{
+                            .weight = distance, .a = std::min( a, b ), .b = std::max( a, b ) } );
+                    }
+                }
+            }
+            gemm.record( rejected, candidates );
+            return computed;
+        }
+
+        //! Picks the kernel for one tile: the GEMM one when this `(Dataset,
+        //! Distance)` pair has it and the policy allows it, the scalar one
+        //! otherwise.
+        template <bool FilterNovelty, bool FilterComponents>
+        size_t run_tile( const PairCompactTree& tree,
+                         const Tile& tile,
+                         const uint32_t* novelty_labels,
+                         const uint32_t* components,
+                         float distance_threshold,
+                         std::vector<Edge>& output,
+                         [[maybe_unused]] GemmScratch& gemm,
+                         [[maybe_unused]] GemmPolicy policy ) const {
+            if constexpr ( GemmTileKernel<Dataset, Distance>::enabled ) {
+                if ( policy != GemmPolicy::never ) {
+                    return evaluate_tile_gemm<FilterNovelty, FilterComponents>( tree,
+                                                                                tile,
+                                                                                novelty_labels,
+                                                                                components,
+                                                                                distance_threshold,
+                                                                                output,
+                                                                                gemm,
+                                                                                policy );
+                }
+            }
+            return evaluate_tile<FilterNovelty, FilterComponents>(
+                tree, tile, novelty_labels, components, distance_threshold, output );
+        }
+
         //! Turns the two runtime "is this filter wanted?" questions into the one
-        //! `evaluate_tile` instantiation that hard-codes both answers, so each
+        //! `run_tile` instantiation that hard-codes both answers, so each
         //! kernel keeps an inner loop free of the tests it does not need.
         //! A plain nested ternary over four template arguments reads poorly
         //! enough to deserve a name of its own.
@@ -854,29 +1025,41 @@ namespace panna {
         //! zero-size vector whose `data()` may legitimately be null, and the
         //! caller's `skip` is the authoritative answer. (No tile is ever visited
         //! in that case, so the null pointer is never dereferenced.)
-        size_t dispatch_tile( const PairCompactTree& tree, const Tile& tile, bool filter_novelty,
-                              const uint32_t* novelty_labels, const uint32_t* components,
-                              float distance_threshold, std::vector<Edge>& output ) const {
+        size_t dispatch_tile( const PairCompactTree& tree,
+                              const Tile& tile,
+                              bool filter_novelty,
+                              const uint32_t* novelty_labels,
+                              const uint32_t* components,
+                              float distance_threshold,
+                              std::vector<Edge>& output,
+                              GemmScratch& gemm,
+                              GemmPolicy policy ) const {
             if ( filter_novelty ) {
                 if ( components != nullptr ) {
-                    return evaluate_tile<true, true>(
-                        tree, tile, novelty_labels, components, distance_threshold, output );
+                    return run_tile<true, true>( tree,
+                                                 tile,
+                                                 novelty_labels,
+                                                 components,
+                                                 distance_threshold,
+                                                 output,
+                                                 gemm,
+                                                 policy );
                 }
-                return evaluate_tile<true, false>(
-                    tree, tile, novelty_labels, nullptr, distance_threshold, output );
+                return run_tile<true, false>(
+                    tree, tile, novelty_labels, nullptr, distance_threshold, output, gemm, policy );
             }
             if ( components != nullptr ) {
-                return evaluate_tile<false, true>(
-                    tree, tile, nullptr, components, distance_threshold, output );
+                return run_tile<false, true>(
+                    tree, tile, nullptr, components, distance_threshold, output, gemm, policy );
             }
-            return evaluate_tile<false, false>(
-                tree, tile, nullptr, nullptr, distance_threshold, output );
+            return run_tile<false, false>(
+                tree, tile, nullptr, nullptr, distance_threshold, output, gemm, policy );
         }
 
         //! Makes sure `scratch.novelty_labels` holds `rank(., level)` of `tree`,
         //! recomputing it only when a different tree or level is asked for.
-        void ensure_labels( SearchScratch& scratch, const PairCompactTree& tree,
-                            uint8_t level ) const {
+        void
+        ensure_labels( SearchScratch& scratch, const PairCompactTree& tree, uint8_t level ) const {
             if ( scratch.cached_tree == &tree && scratch.cached_level == level ) {
                 return;
             }

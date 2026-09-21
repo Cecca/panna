@@ -205,6 +205,7 @@
             hl-bin
             tree-similarity
             nanobench
+            eigen
           ];
 
           NIX_ENFORCE_NO_NATIVE = false;

@@ -201,6 +201,9 @@ namespace panna {
     //!    tile (`TILE_SIZE^2` edges) larger than the buffer itself, since
     //!    `search_pairs` checks the size only after appending a whole tile.
     //!
+    //! (Not counted: the GEMM tile scratch in `SearchScratch`, at most ~320 KiB
+    //! per thread whatever `n`, and only for `EuclideanPoints`.)
+    //!
     //! Only the last item depends on the buffer size, so the budget is spent on
     //! the rest first and whatever remains goes to the buffers, up to
     //! `PAIR_EMST_BUFFER_EDGES_PER_POINT * n` edges.

@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cmath>
 #include <cstdint>
 #include <iterator>
 #include <limits>
@@ -1185,6 +1187,387 @@ namespace panna {
                 }
             }
             REQUIRE( above_cutoff == 0 );
+        }
+
+        // =====================================================================
+        // 14. The GEMM tile kernel reports exactly what the scalar one does
+        // =====================================================================
+
+        //! Bitwise equality of two edge sequences: same length, same order, and
+        //! weights equal down to the last bit (not merely `==`, which would let
+        //! `0.0f` and `-0.0f` through).
+        bool same_edges( const std::vector<Edge>& x, const std::vector<Edge>& y ) {
+            if ( x.size() != y.size() ) {
+                return false;
+            }
+            for ( size_t i = 0; i < x.size(); i++ ) {
+                if ( std::bit_cast<uint32_t>( x[i].weight ) !=
+                         std::bit_cast<uint32_t>( y[i].weight ) ||
+                     x[i].a != y[i].a || x[i].b != y[i].b ) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        //! The kinds of data the parity test runs on.
+        enum class GemmData {
+            gaussian,       //!< standard normal coordinates
+            near_duplicate, //!< clusters of points a few ulps apart, plus exact copies
+            offset,         //!< standard normal, shifted by +1000 on every coordinate
+        };
+
+        EuclideanPoints make_gemm_dataset( GemmData kind, size_t dimensions, size_t n ) {
+            EuclideanPoints data( dimensions );
+            std::vector<float> point( dimensions );
+            std::vector<float> base( dimensions );
+            for ( size_t i = 0; i < n; i++ ) {
+                switch ( kind ) {
+                case GemmData::gaussian:
+                    for ( float& x : point ) {
+                        x = sample_random_normal();
+                    }
+                    break;
+                case GemmData::near_duplicate:
+                    /// Groups of 8: a fresh base point, one exact copy, and
+                    /// copies perturbed by a relative 1e-6 -- well inside the
+                    /// cancellation of `|a|^2 + |b|^2 - 2 a.b`.
+                    if ( i % 8 == 0 ) {
+                        for ( float& x : base ) {
+                            x = 10.0f * sample_random_normal();
+                        }
+                    }
+                    for ( size_t c = 0; c < dimensions; c++ ) {
+                        point[c] = ( i % 8 <= 1 )
+                                       ? base[c]
+                                       : base[c] * ( 1.0f + 1e-6f * sample_random_normal() );
+                    }
+                    break;
+                case GemmData::offset:
+                    for ( float& x : point ) {
+                        x = 1000.0f + sample_random_normal();
+                    }
+                    break;
+                }
+                data.push_back( point.begin(), point.end() );
+            }
+            return data;
+        }
+
+        //! Thresholds worth trying on the sweep `( rep, prefix )`, given the
+        //! edges it reports with no threshold: the special values, plus weights
+        //! taken *from* the output, so that some pairs sit exactly on the
+        //! `distance <= threshold` boundary.
+        std::vector<float> gemm_thresholds( std::vector<Edge> unfiltered ) {
+            const float inf = std::numeric_limits<float>::infinity();
+            std::vector<float> out = { inf,
+                                       0.0f,
+                                       -0.0f,
+                                       -1.0f,
+                                       -inf,
+                                       std::numeric_limits<float>::quiet_NaN(),
+                                       std::numeric_limits<float>::max(),
+                                       std::numeric_limits<float>::min() };
+            std::sort( unfiltered.begin(), unfiltered.end() );
+            if ( !unfiltered.empty() ) {
+                for ( const double q : { 0.0, 0.01, 0.1, 0.5, 0.9 } ) {
+                    const size_t at = static_cast<size_t>( q * ( unfiltered.size() - 1 ) );
+                    const float w = unfiltered[at].weight;
+                    out.push_back( w );
+                    out.push_back( std::nextafter( w, -inf ) );
+                    out.push_back( std::nextafter( w, inf ) );
+                }
+            }
+            return out;
+        }
+
+        //! For every repetition, every prefix `K..1`, every threshold of
+        //! `gemm_thresholds` and with and without a component array, runs the
+        //! same sweep with the GEMM kernel on and off and requires the very same
+        //! edges, in the same order, and the same distance count.
+        template <typename Distance>
+        void check_gemm_parity( const EuclideanPoints& data, size_t repetitions ) {
+            constexpr uint8_t K = 4;
+            using Hasher = Simhash<K, EuclideanPoints, EuclideanDistance>;
+            using ForestT = PairForestIndex<EuclideanPoints, Hasher, Distance>;
+            static_assert( ForestT::gemm_supported() );
+
+            const size_t dimensions = data.get_dimensions();
+            const size_t n = data.size();
+            const float inf = std::numeric_limits<float>::infinity();
+            SimhashBuilder<K, EuclideanPoints, EuclideanDistance> builder( dimensions );
+            ForestT forest( data, repetitions, builder );
+
+            std::vector<uint32_t> components( n );
+            for ( size_t i = 0; i < n; i++ ) {
+                components[i] = static_cast<uint32_t>( ( i * 2654435761u ) % 5 );
+            }
+
+            typename ForestT::SearchScratch scalar_scratch;
+            typename ForestT::SearchScratch gemm_scratch;
+            REQUIRE( gemm_scratch.gemm_policy == GemmPolicy::adaptive ); // the default
+            scalar_scratch.gemm_policy = GemmPolicy::never;
+            size_t checked_edges = 0;
+            for ( size_t rep = 0; rep < repetitions; rep++ ) {
+                for ( uint8_t prefix = K; prefix >= 1; prefix-- ) {
+                    std::vector<Edge> unfiltered;
+                    forest.search_pairs( rep, prefix, inf, unfiltered, scalar_scratch );
+
+                    for ( const float threshold : gemm_thresholds( unfiltered ) ) {
+                        for ( const uint32_t* comps :
+                              { static_cast<const uint32_t*>( nullptr ),
+                                static_cast<const uint32_t*>( components.data() ) } ) {
+                            std::vector<Edge> scalar_edges;
+                            const auto collect = []( std::vector<Edge>& into ) {
+                                return [&into]( std::vector<Edge>& batch ) {
+                                    into.insert( into.end(), batch.begin(), batch.end() );
+                                    return false;
+                                };
+                            };
+
+                            const size_t scalar_count =
+                                forest.search_pairs( rep,
+                                                     prefix,
+                                                     threshold,
+                                                     1024,
+                                                     collect( scalar_edges ),
+                                                     scalar_scratch,
+                                                     comps );
+                            /// `always` exercises the filter on every tile;
+                            /// `adaptive` also exercises the switching.
+                            for ( const GemmPolicy policy :
+                                  { GemmPolicy::always, GemmPolicy::adaptive } ) {
+                                std::vector<Edge> gemm_edges;
+                                gemm_scratch.gemm_policy = policy;
+                                const size_t gemm_count =
+                                    forest.search_pairs( rep,
+                                                         prefix,
+                                                         threshold,
+                                                         1024,
+                                                         collect( gemm_edges ),
+                                                         gemm_scratch,
+                                                         comps );
+
+                                INFO( "rep " << rep << " prefix " << int( prefix ) << " threshold "
+                                             << threshold << " components " << ( comps != nullptr )
+                                             << " adaptive "
+                                             << ( policy == GemmPolicy::adaptive ) );
+                                REQUIRE( gemm_count == scalar_count );
+                                REQUIRE( same_edges( gemm_edges, scalar_edges ) );
+                            }
+                            checked_edges += scalar_edges.size();
+                        }
+                    }
+                }
+            }
+            // The comparison must not be vacuous.
+            REQUIRE( checked_edges > 0 );
+        }
+
+        TEST_CASE( "PairForestIndex GEMM kernel matches the scalar kernel", "[pairforest][gemm]" ) {
+            seed_global_rng( 4242 );
+
+            SECTION( "EuclideanDistance, gaussian data, d = 1" ) {
+                check_gemm_parity<EuclideanDistance>(
+                    make_gemm_dataset( GemmData::gaussian, 1, 2000 ), 2 );
+            }
+            SECTION( "EuclideanDistance, gaussian data, d = 7" ) {
+                check_gemm_parity<EuclideanDistance>(
+                    make_gemm_dataset( GemmData::gaussian, 7, 2000 ), 2 );
+            }
+            SECTION( "EuclideanDistance, gaussian data, d = 100" ) {
+                check_gemm_parity<EuclideanDistance>(
+                    make_gemm_dataset( GemmData::gaussian, 100, 1200 ), 1 );
+            }
+            SECTION( "EuclideanDistance, gaussian data, d = 300 (several GEMM chunks)" ) {
+                check_gemm_parity<EuclideanDistance>(
+                    make_gemm_dataset( GemmData::gaussian, 300, 800 ), 1 );
+            }
+            SECTION( "EuclideanDistance, near-duplicate points" ) {
+                for ( const size_t d : { 1, 7, 100 } ) {
+                    check_gemm_parity<EuclideanDistance>(
+                        make_gemm_dataset( GemmData::near_duplicate, d, 1200 ), 1 );
+                }
+            }
+            SECTION( "EuclideanDistance, large offset" ) {
+                for ( const size_t d : { 1, 7, 100 } ) {
+                    check_gemm_parity<EuclideanDistance>(
+                        make_gemm_dataset( GemmData::offset, d, 1200 ), 1 );
+                }
+            }
+            SECTION( "EuclideanDistanceNoSqrt, gaussian data" ) {
+                for ( const size_t d : { 1, 7, 100 } ) {
+                    check_gemm_parity<EuclideanDistanceNoSqrt>(
+                        make_gemm_dataset( GemmData::gaussian, d, 600 ), 1 );
+                }
+            }
+            SECTION( "EuclideanDistanceNoSqrt, near-duplicate points" ) {
+                for ( const size_t d : { 1, 7, 100 } ) {
+                    check_gemm_parity<EuclideanDistanceNoSqrt>(
+                        make_gemm_dataset( GemmData::near_duplicate, d, 600 ), 1 );
+                }
+            }
+            SECTION( "EuclideanDistanceNoSqrt, large offset" ) {
+                for ( const size_t d : { 1, 7, 100 } ) {
+                    check_gemm_parity<EuclideanDistanceNoSqrt>(
+                        make_gemm_dataset( GemmData::offset, d, 600 ), 1 );
+                }
+            }
+        }
+
+        TEST_CASE( "GEMM rejection filter actually rejects, and only what fails",
+                   "[pairforest][gemm]" ) {
+            /// The parity tests would still pass with a filter that never
+            /// rejected anything; this one drives `GemmTileBuffers` and
+            /// `GemmRejection` directly and counts.
+            seed_global_rng( 2718 );
+            for ( const size_t d : { 1, 7, 100, 300 } ) {
+                for ( const bool offset : { false, true } ) {
+                    const size_t rows = 128;
+                    const size_t cols = 128;
+                    const EuclideanPoints data = make_gemm_dataset(
+                        offset ? GemmData::offset : GemmData::gaussian, d, rows + cols );
+                    std::vector<uint32_t> row_ids( rows );
+                    std::vector<uint32_t> col_ids( cols );
+                    for ( uint32_t i = 0; i < rows; i++ ) {
+                        row_ids[i] = i;
+                    }
+                    for ( uint32_t j = 0; j < cols; j++ ) {
+                        col_ids[j] = static_cast<uint32_t>( rows + j );
+                    }
+
+                    std::vector<float> distances;
+                    for ( uint32_t i = 0; i < rows; i++ ) {
+                        for ( uint32_t j = 0; j < cols; j++ ) {
+                            distances.push_back(
+                                EuclideanDistance::compute( data[row_ids[i]], data[col_ids[j]] ) );
+                        }
+                    }
+                    std::vector<float> sorted = distances;
+                    std::sort( sorted.begin(), sorted.end() );
+                    // A tight threshold: one pair in ten passes.
+                    const float threshold = sorted[sorted.size() / 10];
+
+                    GemmTileBuffers buffers;
+                    buffers.compute( data,
+                                     row_ids.data(),
+                                     rows,
+                                     col_ids.data(),
+                                     cols,
+                                     /*same_ids=*/false,
+                                     /*exact_norms=*/false );
+                    const GemmRejection</*squared=*/false> rejection( threshold, d );
+                    REQUIRE_FALSE( rejection.rejects_nothing() );
+
+                    size_t rejected = 0;
+                    size_t failing = 0;
+                    size_t wrongly_rejected = 0;
+                    for ( uint32_t i = 0; i < rows; i++ ) {
+                        for ( uint32_t j = 0; j < cols; j++ ) {
+                            const bool passes = distances[i * cols + j] <= threshold;
+                            failing += passes ? 0 : 1;
+                            if ( rejection.rejects( buffers.row_norms()[i],
+                                                    buffers.col_norms()[j],
+                                                    buffers.products_row( i )[j],
+                                                    0.0f,
+                                                    0.0f ) ) {
+                                rejected++;
+                                wrongly_rejected += passes ? 1 : 0;
+                            }
+                        }
+                    }
+                    INFO( "d " << d << " offset " << offset << " rejected " << rejected << " of "
+                               << failing << " failing pairs" );
+                    REQUIRE( wrongly_rejected == 0 );
+                    // All but a sliver of the failing pairs are caught; the
+                    // centring is what makes this hold on the offset data too.
+                    REQUIRE( rejected >= failing * 9 / 10 );
+                }
+            }
+        }
+
+        TEST_CASE( "PairForestIndex GEMM kernel is only enabled for EuclideanPoints",
+                   "[pairforest][gemm]" ) {
+            constexpr uint8_t K = 4;
+            STATIC_REQUIRE( PairForestIndex<EuclideanPoints,
+                                            Simhash<K, EuclideanPoints, EuclideanDistance>,
+                                            EuclideanDistance>::gemm_supported() );
+            STATIC_REQUIRE( PairForestIndex<EuclideanPoints,
+                                            Simhash<K, EuclideanPoints, EuclideanDistance>,
+                                            EuclideanDistanceNoSqrt>::gemm_supported() );
+            STATIC_REQUIRE_FALSE( PairForestIndex<UnitNormPoints,
+                                                  Simhash<K, UnitNormPoints, CosineDistance>,
+                                                  CosineDistance>::gemm_supported() );
+            STATIC_REQUIRE_FALSE( PairForestIndex<NormedPoints,
+                                                  Simhash<K, NormedPoints, EuclideanDistance>,
+                                                  EuclideanDistance>::gemm_supported() );
+        }
+
+        TEST_CASE( "PairForestIndex GEMM kernel honours a live threshold like the scalar one",
+                   "[pairforest][gemm]" ) {
+            constexpr uint8_t K = 4;
+            using Hasher = Simhash<K, EuclideanPoints, EuclideanDistance>;
+            using ForestT = PairForestIndex<EuclideanPoints, Hasher, EuclideanDistance>;
+            const float inf = std::numeric_limits<float>::infinity();
+
+            seed_global_rng( 777 );
+            bool lowered_mid_sweep = false;
+            for ( const size_t d : { 1, 7, 100 } ) {
+                const EuclideanPoints data = make_gemm_dataset( GemmData::gaussian, d, 2000 );
+                SimhashBuilder<K, EuclideanPoints, EuclideanDistance> builder( d );
+                ForestT forest( data, /*repetitions=*/1, builder );
+
+                //! One sweep at `prefix` that ratchets the cutoff down to the
+                //! median weight of every batch, as in the live-threshold test.
+                const auto sweep = [&]( bool gemm,
+                                        uint8_t prefix,
+                                        std::vector<Edge>& reported,
+                                        float& final_cutoff ) {
+                    typename ForestT::SearchScratch scratch;
+                    scratch.gemm_policy = gemm ? GemmPolicy::always : GemmPolicy::never;
+                    float cutoff = inf;
+                    const size_t count = forest.search_pairs(
+                        0,
+                        prefix,
+                        cutoff,
+                        256,
+                        [&]( std::vector<Edge>& batch ) {
+                            reported.insert( reported.end(), batch.begin(), batch.end() );
+                            std::vector<float> weights;
+                            for ( const Edge& e : batch ) {
+                                weights.push_back( e.weight );
+                            }
+                            std::sort( weights.begin(), weights.end() );
+                            cutoff = std::min( cutoff, weights[weights.size() / 2] );
+                            return false;
+                        },
+                        scratch );
+                    final_cutoff = cutoff;
+                    return count;
+                };
+
+                for ( uint8_t prefix = K; prefix >= 1; prefix-- ) {
+                    std::vector<Edge> scalar_edges;
+                    std::vector<Edge> gemm_edges;
+                    float scalar_cutoff = inf;
+                    float gemm_cutoff = inf;
+                    const size_t scalar_count = sweep( false, prefix, scalar_edges, scalar_cutoff );
+                    const size_t gemm_count = sweep( true, prefix, gemm_edges, gemm_cutoff );
+
+                    INFO( "d " << d << " prefix " << int( prefix ) );
+                    REQUIRE( gemm_count == scalar_count );
+                    REQUIRE( same_edges( gemm_edges, scalar_edges ) );
+                    REQUIRE( std::bit_cast<uint32_t>( gemm_cutoff ) ==
+                             std::bit_cast<uint32_t>( scalar_cutoff ) );
+                    if ( scalar_edges.size() > 1024 ) {
+                        // Several batches: the cutoff was lowered mid-sweep.
+                        REQUIRE( scalar_cutoff < inf );
+                        lowered_mid_sweep = true;
+                    }
+                }
+            }
+            // The comparison must not be vacuous.
+            REQUIRE( lowered_mid_sweep );
         }
 
     } // namespace pairforest_test

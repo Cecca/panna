@@ -40,11 +40,11 @@ int main( int argc, char** argv ) {
     using Distance = EuclideanDistance;
     using Hasher = LatticeLSH<4, Dataset, Distance>;
 
-    H5Easy::File file( "datasets/glove-100-normalized.hdf5", H5Easy::File::ReadOnly );
-    // H5Easy::File file( "datasets/fashion-mnist-784-euclidean.hdf5", H5Easy::File::ReadOnly );
+    // H5Easy::File file( "datasets/glove-100-normalized.hdf5", H5Easy::File::ReadOnly );
+    H5Easy::File file( "datasets/fashion-mnist-784-euclidean.hdf5", H5Easy::File::ReadOnly );
     std::vector<std::vector<float>> points =
         H5Easy::load<std::vector<std::vector<float>>>( file, "/train" );
-    points.resize(50000);
+    // points.resize(50000);
 
     const size_t dimensions = points[0].size();
     // clang-format off
