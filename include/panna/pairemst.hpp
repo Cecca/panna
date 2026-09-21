@@ -39,10 +39,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <omp.h>
+#include <sstream>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -80,7 +83,21 @@ namespace panna {
     //! lot into its `local_tree` with one Kruskal merge. Expressed per point
     //! because that is what the merge itself costs: a merge touches the whole
     //! `n - 1` edge tree, so buffering O(n) edges keeps the merge amortised.
+    //! This is the size the buffers get when memory allows it; see
+    //! `buffer_edges_within_budget` for when it does not.
     static constexpr size_t PAIR_EMST_BUFFER_EDGES_PER_POINT = 10;
+
+    //! The smallest buffer, again in edges per point, worth running with. Below
+    //! one tree's worth of edges per flush the merge -- which walks the whole
+    //! tree -- costs more than the edges it folds in, and the search would
+    //! crawl rather than fail. It is better to refuse to start.
+    static constexpr size_t PAIR_EMST_MIN_BUFFER_EDGES_PER_POINT = 1;
+
+    //! Fraction of the available memory the per-thread state may take. The
+    //! rest is headroom for what the estimate in `buffer_edges_within_budget`
+    //! leaves out: allocator overhead, the reduction, and the rest of the
+    //! process.
+    static constexpr double PAIR_EMST_MEMORY_FRACTION = 0.8;
 
     //! The outcome of one evaluation of the stopping rule.
     struct PairEmstStop {
@@ -130,6 +147,92 @@ namespace panna {
             return std::numeric_limits<float>::infinity();
         }
         return tree.back().weight * ( 1.0f + 1e-5f ) + 1e-7f;
+    }
+
+    //! Bytes this process can still allocate without pushing the machine into
+    //! swap: `MemAvailable` from `/proc/meminfo`, further capped by the memory
+    //! limit of the process's own cgroup (cgroup v2), which is what binds in a
+    //! container or a SLURM job. Where neither can be read -- not Linux, say --
+    //! the answer is "unbounded", and the buffers get their full size.
+    static size_t available_memory_bytes() {
+        size_t available = std::numeric_limits<size_t>::max();
+
+        std::ifstream meminfo( "/proc/meminfo" );
+        for ( std::string line; std::getline( meminfo, line ); ) {
+            if ( line.rfind( "MemAvailable:", 0 ) == 0 ) {
+                std::istringstream fields( line.substr( std::strlen( "MemAvailable:" ) ) );
+                size_t kilobytes = 0;
+                if ( fields >> kilobytes ) {
+                    available = kilobytes * 1024;
+                }
+                break;
+            }
+        }
+
+        /// Under cgroup v2, `/proc/self/cgroup` is the single line `0::<path>`.
+        /// A `memory.max` of `max` means no limit, and fails to parse as a
+        /// number, which leaves `available` alone.
+        std::ifstream cgroup( "/proc/self/cgroup" );
+        std::string line;
+        if ( std::getline( cgroup, line ) && line.rfind( "0::", 0 ) == 0 ) {
+            const std::string dir = "/sys/fs/cgroup" + line.substr( 3 );
+            std::ifstream max_file( dir + "/memory.max" );
+            std::ifstream current_file( dir + "/memory.current" );
+            size_t limit = 0;
+            size_t current = 0;
+            if ( max_file >> limit && current_file >> current ) {
+                available = std::min( available, ( limit > current ) ? limit - current : 0 );
+            }
+        }
+
+        return available;
+    }
+
+    //! How many edges each of `threads` threads may buffer between two flushes
+    //! if their state has to fit in `budget_bytes` all together.
+    //!
+    //! Per thread, the state that stays alive through a batch is
+    //!
+    //!  - `local_tree` and `merged`, the two halves of the merge, `n - 1` edges
+    //!    each;
+    //!  - the merge's `DSU`, two `uint32_t` per point;
+    //!  - the novelty labels in `SearchScratch`, one `uint32_t` per point;
+    //!  - the edge buffer and the radix sort's ping-pong copy of it, each one
+    //!    tile (`TILE_SIZE^2` edges) larger than the buffer itself, since
+    //!    `search_pairs` checks the size only after appending a whole tile.
+    //!
+    //! Only the last item depends on the buffer size, so the budget is spent on
+    //! the rest first and whatever remains goes to the buffers, up to
+    //! `PAIR_EMST_BUFFER_EDGES_PER_POINT * n` edges.
+    //!
+    //! Throws `std::runtime_error` when not even
+    //! `PAIR_EMST_MIN_BUFFER_EDGES_PER_POINT * n` edges fit.
+    static size_t buffer_edges_within_budget( size_t n, size_t threads, size_t budget_bytes ) {
+        const size_t tile_edges =
+            static_cast<size_t>( PairCompactTree::TILE_SIZE ) * PairCompactTree::TILE_SIZE;
+        const size_t fixed_bytes = n * ( 2 * sizeof( Edge ) + 3 * sizeof( uint32_t ) );
+        const size_t bytes_per_buffered_edge = 2 * sizeof( Edge );
+
+        const size_t wanted = PAIR_EMST_BUFFER_EDGES_PER_POINT * n;
+        const size_t minimum = PAIR_EMST_MIN_BUFFER_EDGES_PER_POINT * n;
+
+        const size_t per_thread_bytes = budget_bytes / std::max<size_t>( 1, threads );
+        const size_t buffer_bytes =
+            ( per_thread_bytes > fixed_bytes ) ? per_thread_bytes - fixed_bytes : 0;
+        const size_t affordable_with_overshoot = buffer_bytes / bytes_per_buffered_edge;
+        const size_t affordable =
+            ( affordable_with_overshoot > tile_edges ) ? affordable_with_overshoot - tile_edges : 0;
+
+        if ( affordable < minimum ) {
+            throw std::runtime_error(
+                "pair_forest_emst: not enough memory for the per-thread edge buffers: " +
+                std::to_string( threads ) + " threads need at least " +
+                std::to_string( threads * ( fixed_bytes +
+                                            bytes_per_buffered_edge * ( minimum + tile_edges ) ) ) +
+                " bytes, but the memory budget is only " + std::to_string( budget_bytes ) +
+                " bytes" );
+        }
+        return std::min( wanted, affordable );
     }
 
     //! Step 1: the spanning tree the search starts from.
@@ -412,12 +515,12 @@ namespace panna {
                                         uint8_t k,
                                         size_t begin,
                                         size_t width,
+                                        size_t buffer_edges,
                                         size_t& distances_computed ) {
         using ForestIndex = PairForestIndex<Dataset, Hasher, Distance>;
 
         const size_t n = index.num_points();
         const size_t num_threads = pair_emst_worker_count( width );
-        const size_t buffer_edges = PAIR_EMST_BUFFER_EDGES_PER_POINT * n;
 
         /// One published tree per *thread*. A thread that is handed several
         /// repetitions folds all of them into the same tree, which is the whole
@@ -454,6 +557,14 @@ namespace panna {
             std::function<bool( std::vector<Edge>& )> flush;
 
             bool healthy = guard.run( [&] {
+                /// Reserved up front at the sizes `buffer_edges_within_budget`
+                /// accounted for. Left to grow on their own, the vectors
+                /// would double past them and the memory cap would not hold.
+                const size_t tile_edges =
+                    static_cast<size_t>( PairCompactTree::TILE_SIZE ) * PairCompactTree::TILE_SIZE;
+                scratch.tile_buffer.reserve( buffer_edges + tile_edges );
+                sort_scratch.reserve( buffer_edges + tile_edges );
+                merged.reserve( n - 1 );
                 local_tree = best;
                 dsu = DSU( static_cast<uint32_t>( n ) );
                 cutoff = cutoff_from( local_tree );
@@ -602,6 +713,21 @@ namespace panna {
         // clang-format on
 
         // --- 3. running state ------------------------------------------------
+        /// Sized after the index is built, so that the memory the index took
+        /// is no longer counted as available. The thread count is the one a
+        /// full batch runs with, the largest any batch uses.
+        const size_t max_threads = pair_emst_worker_count( PAIR_EMST_BATCH_REPETITIONS );
+        const size_t memory_budget = static_cast<size_t>(
+            PAIR_EMST_MEMORY_FRACTION * static_cast<double>( available_memory_bytes() ) );
+        const size_t buffer_edges = buffer_edges_within_budget( n, max_threads, memory_budget );
+        // clang-format off
+        LOG_INFO( "msg", "per-thread edge buffers sized",
+                  "threads", max_threads,
+                  "buffer_edges", buffer_edges,
+                  "buffer_edges_per_point", static_cast<double>( buffer_edges ) / n,
+                  "memory_budget_Gbytes", static_cast<double>( memory_budget ) / ( 1 << 30 ) );
+        // clang-format on
+
         /// Edges of `best` that the stopping rule has already confirmed. Both
         /// endpoints of a confirmed edge are permanently in the same component
         /// of the final tree, so a pair inside one component can be skipped
@@ -631,8 +757,15 @@ namespace panna {
                 const uint32_t* component_filter =
                     ( confirmed_edges > 0 ) ? components.data() : nullptr;
 
-                std::vector<Edge> batch_tree = run_batch<Dataset, Hasher, Distance>(
-                    index, best, component_filter, k, begin, width, distances_computed );
+                std::vector<Edge> batch_tree =
+                    run_batch<Dataset, Hasher, Distance>( index,
+                                                          best,
+                                                          component_filter,
+                                                          k,
+                                                          begin,
+                                                          width,
+                                                          buffer_edges,
+                                                          distances_computed );
 
                 /// `batch_tree` already contains `best` (every thread started
                 /// from it), so this merge is cheap; it is here so that the

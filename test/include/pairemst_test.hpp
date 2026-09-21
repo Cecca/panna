@@ -321,4 +321,54 @@ namespace panna {
         }
     }
 
+    TEST_CASE( "buffer_edges_within_budget shrinks the buffers to fit, and refuses below n",
+               "[pairemst]" ) {
+        const size_t n = 100000;
+        const size_t threads = 8;
+        const size_t tile_edges =
+            static_cast<size_t>( PairCompactTree::TILE_SIZE ) * PairCompactTree::TILE_SIZE;
+        /// Restates the cost model of `buffer_edges_within_budget`, so that a
+        /// change to it has to be made in two places on purpose.
+        auto bytes_needed = [&]( size_t buffer_edges ) {
+            const size_t fixed = n * ( 2 * sizeof( Edge ) + 3 * sizeof( uint32_t ) );
+            return threads * ( fixed + 2 * sizeof( Edge ) * ( buffer_edges + tile_edges ) );
+        };
+
+        SECTION( "plenty of memory gives the full 10n" ) {
+            REQUIRE( buffer_edges_within_budget( n, threads, std::numeric_limits<size_t>::max() ) ==
+                     PAIR_EMST_BUFFER_EDGES_PER_POINT * n );
+            REQUIRE( buffer_edges_within_budget( n, threads, bytes_needed( 10 * n ) ) == 10 * n );
+        }
+
+        SECTION( "a tighter budget gives a smaller buffer that still fits" ) {
+            const size_t budget = bytes_needed( 4 * n );
+            const size_t edges = buffer_edges_within_budget( n, threads, budget );
+            REQUIRE( edges == 4 * n );
+            REQUIRE( bytes_needed( edges ) <= budget );
+        }
+
+        SECTION( "more threads sharing the budget get smaller buffers" ) {
+            const size_t budget = bytes_needed( 10 * n );
+            REQUIRE( buffer_edges_within_budget( n, 2 * threads, budget ) < 10 * n );
+        }
+
+        SECTION( "exactly n edges per buffer is accepted, one byte less is not" ) {
+            const size_t budget = bytes_needed( n );
+            REQUIRE( buffer_edges_within_budget( n, threads, budget ) == n );
+            REQUIRE_THROWS_AS( buffer_edges_within_budget( n, threads, budget - threads ),
+                               std::runtime_error );
+        }
+
+        SECTION( "a budget that does not even cover the trees is refused" ) {
+            REQUIRE_THROWS_AS( buffer_edges_within_budget( n, threads, 0 ), std::runtime_error );
+            REQUIRE_THROWS_AS( buffer_edges_within_budget( n, threads, n ), std::runtime_error );
+        }
+    }
+
+    TEST_CASE( "available_memory_bytes reports a usable amount", "[pairemst]" ) {
+        /// Not a statement about this machine, just that the probe does not
+        /// come back with zero on a system where the tests could run at all.
+        REQUIRE( available_memory_bytes() > 0 );
+    }
+
 } // namespace panna
