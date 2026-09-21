@@ -233,12 +233,21 @@ namespace panna {
 
     /// implementation of Kruskal's algorithm that picks updates from two sorted
     /// vectors. Avoids having to sort both their concatenation.
-    static void kruskal_merge( const std::vector<Edge>& old_edges,
-                                   const std::vector<Edge>& new_edges,
-                                   DSU& union_find,
-                                   std::vector<Edge>& out ) {
-        expect( std::is_sorted( old_edges.begin(), old_edges.end() ) );
-        expect( std::is_sorted( new_edges.begin(), new_edges.end() ) );
+    ///
+    /// Templated on the edge type, which needs `a`, `b` and an `operator<`
+    /// that orders by weight first: `Edge`, or the `MREdge` of the
+    /// mutual-reachability search in `pairemst.hpp`.
+    template <typename E>
+    static void kruskal_merge( const std::vector<E>& old_edges,
+                               const std::vector<E>& new_edges,
+                               DSU& union_find,
+                               std::vector<E>& out ) {
+        /// Only weight order is required, and only weight order is checked:
+        /// the radix sort of `pairemst.hpp` breaks ties arbitrarily, which
+        /// Kruskal does not mind but the full `operator<` would.
+        auto by_weight = []( const E& l, const E& r ) { return l.weight < r.weight; };
+        expect( std::is_sorted( old_edges.begin(), old_edges.end(), by_weight ) );
+        expect( std::is_sorted( new_edges.begin(), new_edges.end(), by_weight ) );
 
         union_find.reset();
         size_t asize = old_edges.size();
@@ -247,7 +256,7 @@ namespace panna {
         size_t bidx = 0;
 
         while ( aidx < asize && bidx < bsize ) {
-            Edge e;
+            E e;
             if ( old_edges.at( aidx ) < new_edges.at( bidx ) ) {
                 e = old_edges.at(aidx++);
             } else {
