@@ -16,6 +16,7 @@
 #include "panna/baselines/toc_emst.hpp"
 #include "panna/trieindex.hpp"
 #include "panna/emst.hpp"
+#include "panna/pairemst.hpp"
 #include "panna/git_version.hpp"
 #include "panna/logging.hpp"
 
@@ -432,6 +433,91 @@ struct EMST_exposed {
     }
 };
 
+/// Runs `panna::pair_forest_emst` on `data` with the given hash family.
+///
+/// The cosine-based families search the tree under the cosine distance on
+/// unit-normalized points; as in `EMST_exposed::reweight_with_euclidean`, the
+/// edges are reported with their Euclidean distance instead.
+template <typename Dataset, typename Hasher, typename Distance>
+nb::tuple run_pair_forest_emst( const nb::ndarray<float, nb::c_contig>& data_in,
+                                float epsilon,
+                                float delta,
+                                size_t repetitions ) {
+    size_t nrows = data_in.shape( 0 );
+    size_t dimensionality = data_in.shape( 1 );
+    Dataset dataset( dimensionality );
+    float* data = data_in.data();
+    for ( size_t row = 0; row < nrows; row++ ) {
+        float* begin = data + row * dimensionality;
+        float* end = data + ( row + 1 ) * dimensionality;
+        dataset.push_back( begin, end );
+    }
+
+    panna::PairEmstResult res =
+        panna::pair_forest_emst<Dataset, Hasher, Distance>( dataset, epsilon, delta, repetitions );
+
+    if constexpr ( std::is_same_v<Dataset, panna::UnitNormPoints> ) {
+        for ( auto& e : res.tree ) {
+            e.weight = panna::EuclideanDistance::compute( dataset[e.a], dataset[e.b] );
+        }
+    }
+
+    nb::dict stats;
+    stats["distance_count"] = res.distances_computed;
+    stats["index_size_bytes"] = res.index_bytes;
+    stats["prefix_at_stop"] = res.prefix_at_stop;
+    stats["repetitions_at_stop"] = res.repetitions_at_stop;
+
+    nb::tuple tree = tree_to_pytuple( res.tree );
+    return nb::make_tuple( tree[0], tree[1], stats );
+}
+
+nb::tuple pair_forest_emst( const nb::ndarray<float, nb::c_contig>& data_in, nb::kwargs kwargs ) {
+    if ( data_in.ndim() != 2 ) {
+        throw nb::value_error( "pair_forest_emst: expected a two-dimensional array" );
+    }
+
+    size_t repetitions = 512;
+    float delta = 0.1;
+    float epsilon = 0.2;
+    EuclideanHashFamily family = EuclideanHashFamily::Lattice;
+
+    if ( kwargs.contains( "repetitions" ) ) {
+        repetitions = nb::cast<size_t>( kwargs["repetitions"] );
+    }
+    if ( kwargs.contains( "delta" ) ) {
+        delta = nb::cast<float>( kwargs["delta"] );
+    }
+    if ( kwargs.contains( "epsilon" ) ) {
+        epsilon = nb::cast<float>( kwargs["epsilon"] );
+    }
+    if ( kwargs.contains( "family" ) ) {
+        family = string_to_family( nb::cast<std::string>( kwargs["family"] ) );
+    }
+
+    switch ( family ) {
+    case Lattice:
+        return run_pair_forest_emst<panna::EuclideanPoints,
+                                    EMST_exposed::LatticeHasher,
+                                    panna::EuclideanDistance>(
+            data_in, epsilon, delta, repetitions );
+    case E2LSH:
+        return run_pair_forest_emst<panna::EuclideanPoints,
+                                    EMST_exposed::E2LSHHasher,
+                                    panna::EuclideanDistance>(
+            data_in, epsilon, delta, repetitions );
+    case CrossPolytope:
+        return run_pair_forest_emst<panna::UnitNormPoints,
+                                    EMST_exposed::CrossPolytopeHasher,
+                                    panna::CosineDistance>( data_in, epsilon, delta, repetitions );
+    case Simhash:
+        return run_pair_forest_emst<panna::UnitNormPoints,
+                                    EMST_exposed::SimhashHasher,
+                                    panna::CosineDistance>( data_in, epsilon, delta, repetitions );
+    }
+    throw std::logic_error( "unreachable" );
+}
+
 nb::tuple emst_theory_of_computing( nb::ndarray<float, nb::c_contig>& data_in, nb::kwargs kwargs ) {
     float delta = 0.1;
     float gamma = 1.0;
@@ -555,6 +641,17 @@ NB_MODULE( _panna_impl, m ) {
            &distance_histogram ),
     m.def( "approximate_diameter",
            &approximate_diameter ),
+    m.def( "pair_forest_emst",
+           &pair_forest_emst,
+           "Approximate Euclidean minimum spanning tree of a NumPy array of data\n"
+           "points, via the OpenMP-driven PairForestIndex search.\n\n"
+           "Returns a tuple (weights, edges, stats): the edge weights, the (n-1, 2)\n"
+           "array of edge endpoints, and a dict of execution statistics.\n\n"
+           "Keyword arguments:\n"
+           "  repetitions (int, default 512): repetitions of the LSH index.\n"
+           "  delta (float, default 0.1): probability of failure.\n"
+           "  epsilon (float, default 0.2): approximation factor.\n"
+           "  family (str, default 'lattice'): hash family to use." ),
     nb::class_<TrieIndex>( m, "TrieIndex" )
         .def( nb::init<size_t, std::string, nb::kwargs>() )
         .def( "insert", &TrieIndex::insert )

@@ -53,6 +53,14 @@ configure_file(
 # Add the generated header directory to the include paths
 include_directories(${CMAKE_BINARY_DIR})
 
+# Eigen (header-only) provides the GEMM behind the `EuclideanPoints` tile
+# kernel of `PairForestIndex` (`panna/gemm_tile.hpp`), so only the targets
+# that reach `pairforest.hpp` (directly or through `pairemst.hpp`) need it.
+# The tile kernels run inside our own OpenMP threads, hence
+# `EIGEN_DONT_PARALLELIZE`. `gemm_tile.hpp` defines it too, but that is too
+# late when something (e.g. HighFive's H5Easy) has included Eigen first.
+find_package(Eigen3 3.4 REQUIRED NO_MODULE)
+
 if (NOT SKBUILD)
   # FetchContent_Declare(
   #   Catch2
@@ -62,14 +70,6 @@ if (NOT SKBUILD)
   # )
   # FetchContent_MakeAvailable(Catch2)
   find_package(Catch2)
-
-  # Eigen (header-only) provides the GEMM behind the `EuclideanPoints` tile
-  # kernel of `PairForestIndex` (`panna/gemm_tile.hpp`), so only the targets
-  # that reach `pairforest.hpp` (directly or through `pairemst.hpp`) need it.
-  # The tile kernels run inside our own OpenMP threads, hence
-  # `EIGEN_DONT_PARALLELIZE`. `gemm_tile.hpp` defines it too, but that is too
-  # late when something (e.g. HighFive's H5Easy) has included Eigen first.
-  find_package(Eigen3 3.4 REQUIRED NO_MODULE)
 
   include_directories("test/include")
   add_executable(tests test/tests.cpp)
@@ -127,6 +127,7 @@ execute_process(
 find_package(nanobind CONFIG REQUIRED)
 
 nanobind_add_module(_panna_impl NOMINSIZE NB_STATIC python/wrapper.cpp)
-target_link_libraries(_panna_impl PRIVATE)
+target_link_libraries(_panna_impl PRIVATE Eigen3::Eigen)
+target_compile_definitions(_panna_impl PRIVATE EIGEN_DONT_PARALLELIZE)
 
 install(TARGETS _panna_impl LIBRARY DESTINATION panna)

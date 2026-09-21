@@ -100,6 +100,7 @@
             cereal
             hdf5
             highfive
+            eigen
           ];
           nativeBuildInputs = with pkgs; [
             cmake
