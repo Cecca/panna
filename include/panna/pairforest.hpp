@@ -513,6 +513,17 @@ namespace panna {
             return failure_probability( *hasher, distance, concat, rep, repetitions );
         }
 
+        //! The inverse of `fail_probability` in its distance argument: the
+        //! largest distance whose failure probability, after `rep` repetitions
+        //! at `concat` symbols, is still at most `delta`. Every pair closer than
+        //! this has been seen with probability at least `1 - delta`, which is
+        //! what the EMST stopping rule confirms its edges against.
+        float distance_at_failure_probability( float delta, size_t concat, size_t rep ) const {
+            require_hasher();
+            return panna::distance_at_failure_probability(
+                *hasher, delta, concat, rep, repetitions );
+        }
+
         //! How often the collecting overloads below drain their tile buffer into
         //! the caller's vector. Bounding it matters: with an unbounded buffer the
         //! whole result is built twice over, once in the scratch and once in
@@ -546,6 +557,10 @@ namespace panna {
         //! the tile buffer keeps its capacity across calls.
         size_t search_pairs( size_t repetition, uint8_t prefix, float distance_threshold,
                              std::vector<Edge>& output, SearchScratch& scratch ) const {
+            /// The batched overload binds `distance_threshold` by reference, but
+            /// a by-value parameter lives for the whole of the call it belongs
+            /// to, so the reference stays valid until `search_pairs` returns.
+            /// Nothing here lowers it, so the threshold is simply constant.
             return search_pairs(
                 repetition,
                 prefix,
@@ -563,10 +578,29 @@ namespace panna {
         //! `buffer_size` is a soft bound -- a batch may overshoot it by at most
         //! one tile, i.e. `TILE_SIZE * TILE_SIZE` edges. The residual buffer is
         //! handed over only when the enumeration ran to completion.
-        size_t search_pairs( size_t repetition, uint8_t prefix, float distance_threshold,
+        //!
+        //! **The threshold is live.** `distance_threshold` is taken by reference
+        //! and re-read once per tile, so a caller that owns the float and lowers
+        //! it from inside `batch_output` prunes harder from the very next tile
+        //! on. That is the contract the EMST search relies on: every flush
+        //! rebuilds a spanning tree whose heaviest edge can only have gone down,
+        //! and the new, smaller cutoff takes effect immediately instead of at
+        //! the next call. The caller must keep the referenced float alive for
+        //! the whole call, and must only ever *lower* it -- raising it mid-sweep
+        //! would let through pairs that earlier tiles had already discarded,
+        //! giving an output that corresponds to no single threshold.
+        //!
+        //! `components`, when non-null, is an array of component labels indexed
+        //! by **point id** (not by sorted position) with at least `num_points()`
+        //! entries. A pair whose two endpoints carry the same label is dropped
+        //! before its distance is computed: the caller has already established
+        //! that they are connected, so no edge between them can enter a spanning
+        //! tree. This mirrors `Index::search_pairs_different_groups`.
+        size_t search_pairs( size_t repetition, uint8_t prefix, const float& distance_threshold,
                              size_t buffer_size,
                              const std::function<bool( std::vector<Edge>& )>& batch_output,
-                             SearchScratch& scratch ) const {
+                             SearchScratch& scratch,
+                             const uint32_t* components = nullptr ) const {
             if ( prefix == 0 || prefix > K ) {
                 throw std::invalid_argument(
                     "PairForestIndex::search_pairs: prefix must be in [1, K]" );
@@ -595,11 +629,15 @@ namespace panna {
 
             const bool completed =
                 t.for_each_tile( prefix, skip, [&]( const Tile& tile ) -> bool {
-                    distance_count +=
-                        skip ? evaluate_tile<true>(
-                                   t, tile, novelty_labels, distance_threshold, scratch.tile_buffer )
-                             : evaluate_tile<false>(
-                                   t, tile, nullptr, distance_threshold, scratch.tile_buffer );
+                    /// `distance_threshold` is re-read here, once per tile, so a
+                    /// `batch_output` that lowered it applies from the next tile on.
+                    distance_count += dispatch_tile( t,
+                                                     tile,
+                                                     skip.has_value(),
+                                                     novelty_labels,
+                                                     components,
+                                                     distance_threshold,
+                                                     scratch.tile_buffer );
                     if ( scratch.tile_buffer.size() >= buffer_size ) {
                         const bool stop = batch_output( scratch.tile_buffer );
                         scratch.tile_buffer.clear();
@@ -754,9 +792,10 @@ namespace panna {
         //! `SparseSets` has no inner-product form and must keep the scalar path,
         //! so any such specialisation has to be opt-in per `(Dataset, Distance)`
         //! pair. The indirection is deliberately *not* introduced here.
-        template <bool FilterNovelty>
+        template <bool FilterNovelty, bool FilterComponents>
         size_t evaluate_tile( const PairCompactTree& tree, const Tile& tile,
                               [[maybe_unused]] const uint32_t* novelty_labels,
+                              [[maybe_unused]] const uint32_t* components,
                               float distance_threshold, std::vector<Edge>& output ) const {
             const uint32_t* ids = tree.sorted_ids().data();
             const bool diagonal = tile.is_diagonal();
@@ -769,6 +808,13 @@ namespace panna {
                 if constexpr ( FilterNovelty ) {
                     label_a = novelty_labels[i];
                 }
+                /// Hoisted next to `label_a`: `components` is indexed by point
+                /// id, so this is a random access the inner loop should not pay
+                /// for the row endpoint on every column.
+                uint32_t component_a = 0;
+                if constexpr ( FilterComponents ) {
+                    component_a = components[a];
+                }
                 // A diagonal tile must not revisit the lower triangle.
                 const uint32_t j_begin = diagonal ? i + 1 : tile.col_begin;
 
@@ -779,6 +825,11 @@ namespace panna {
                         }
                     }
                     const uint32_t b = ids[j];
+                    if constexpr ( FilterComponents ) {
+                        if ( components[b] == component_a ) {
+                            continue; // already connected: no edge here can help
+                        }
+                    }
                     const float distance = Distance::compute( point_a, dataset[b] );
                     computed++;
                     // A NaN distance fails this test and is silently dropped.
@@ -790,6 +841,36 @@ namespace panna {
                 }
             }
             return computed;
+        }
+
+        //! Turns the two runtime "is this filter wanted?" questions into the one
+        //! `evaluate_tile` instantiation that hard-codes both answers, so each
+        //! kernel keeps an inner loop free of the tests it does not need.
+        //! A plain nested ternary over four template arguments reads poorly
+        //! enough to deserve a name of its own.
+        //!
+        //! `filter_novelty` is passed in rather than derived from
+        //! `novelty_labels != nullptr`: over an empty tree `labels()` leaves a
+        //! zero-size vector whose `data()` may legitimately be null, and the
+        //! caller's `skip` is the authoritative answer. (No tile is ever visited
+        //! in that case, so the null pointer is never dereferenced.)
+        size_t dispatch_tile( const PairCompactTree& tree, const Tile& tile, bool filter_novelty,
+                              const uint32_t* novelty_labels, const uint32_t* components,
+                              float distance_threshold, std::vector<Edge>& output ) const {
+            if ( filter_novelty ) {
+                if ( components != nullptr ) {
+                    return evaluate_tile<true, true>(
+                        tree, tile, novelty_labels, components, distance_threshold, output );
+                }
+                return evaluate_tile<true, false>(
+                    tree, tile, novelty_labels, nullptr, distance_threshold, output );
+            }
+            if ( components != nullptr ) {
+                return evaluate_tile<false, true>(
+                    tree, tile, nullptr, components, distance_threshold, output );
+            }
+            return evaluate_tile<false, false>(
+                tree, tile, nullptr, nullptr, distance_threshold, output );
         }
 
         //! Makes sure `scratch.novelty_labels` holds `rank(., level)` of `tree`,

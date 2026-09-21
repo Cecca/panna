@@ -74,6 +74,9 @@ if (NOT SKBUILD)
   add_executable(emst-test test/emst_test.cpp)
   target_link_libraries(emst-test PRIVATE HighFive)
 
+  add_executable(pairemst-bench test/pairemst_bench.cpp)
+  target_link_libraries(pairemst-bench PRIVATE HighFive)
+
   add_executable(recall test/recall_test.cpp)
   target_link_libraries(recall PRIVATE  HighFive)
 

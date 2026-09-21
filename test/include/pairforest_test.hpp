@@ -1010,5 +1010,182 @@ namespace panna {
             REQUIRE( appended.front() == Edge{ -1.0f, 0, 0 } );
         }
 
+        // =====================================================================
+        // 12. The confirmed-component filter
+        // =====================================================================
+
+        TEST_CASE( "PairForestIndex search_pairs honours the component filter",
+                   "[pairforest]" ) {
+            constexpr uint8_t K = 8;
+            using Hasher = Simhash<K, UnitNormPoints, CosineDistance>;
+            using ForestT = PairForestIndex<UnitNormPoints, Hasher, CosineDistance>;
+
+            const size_t dimensions = 16;
+            const size_t n = 500;
+            const size_t repetitions = 2;
+            const float inf = std::numeric_limits<float>::infinity();
+
+            seed_global_rng( 4242 );
+            UnitNormPoints dataset( dimensions );
+            for ( size_t i = 0; i < n; i++ ) {
+                dataset.push_back_random();
+            }
+            SimhashBuilder<K, UnitNormPoints, CosineDistance> builder( dimensions );
+            ForestT forest( dataset, repetitions, builder );
+
+            //! Runs the batched overload to completion, collecting everything.
+            auto collect = [&]( size_t rep, uint8_t k, const uint32_t* components,
+                                std::vector<Edge>& out ) {
+                typename ForestT::SearchScratch scratch;
+                const float threshold = inf;
+                return forest.search_pairs(
+                    rep,
+                    k,
+                    threshold,
+                    64,
+                    [&]( std::vector<Edge>& batch ) {
+                        out.insert( out.end(), batch.begin(), batch.end() );
+                        return false;
+                    },
+                    scratch,
+                    components );
+            };
+
+            SECTION( "one component for everybody reports nothing" ) {
+                // Every endpoint pair is already connected, so the filter must
+                // reject each of them *before* any distance is computed.
+                const std::vector<uint32_t> single( n, 7 );
+                for ( size_t rep = 0; rep < repetitions; rep++ ) {
+                    for ( uint8_t k = K; k >= 1; k-- ) {
+                        INFO( "rep=" << rep << " k=" << +k );
+                        std::vector<Edge> out;
+                        const size_t computed = collect( rep, k, single.data(), out );
+                        REQUIRE( out.empty() );
+                        REQUIRE( computed == 0 );
+                    }
+                }
+            }
+
+            SECTION( "a two-way split reports exactly the cross-component pairs" ) {
+                // Labels are indexed by *point id*, so the split is by id parity
+                // and has nothing to do with the sorted positions of any tree.
+                std::vector<uint32_t> halves( n );
+                for ( size_t i = 0; i < n; i++ ) {
+                    halves[i] = static_cast<uint32_t>( i % 2 );
+                }
+
+                size_t total_reported = 0;
+                for ( size_t rep = 0; rep < repetitions; rep++ ) {
+                    for ( uint8_t k = K; k >= 1; k-- ) {
+                        INFO( "rep=" << rep << " k=" << +k );
+
+                        // The oracle: the unfiltered output, minus the pairs
+                        // whose endpoints share a label.
+                        std::vector<Edge> unfiltered;
+                        forest.search_pairs( rep, k, inf, unfiltered );
+                        std::vector<IdPair> expected;
+                        for ( const Edge& e : unfiltered ) {
+                            if ( halves[e.a] != halves[e.b] ) {
+                                expected.emplace_back( e.a, e.b );
+                            }
+                        }
+                        std::sort( expected.begin(), expected.end() );
+
+                        std::vector<Edge> filtered;
+                        const size_t computed = collect( rep, k, halves.data(), filtered );
+                        REQUIRE( edge_ids( filtered ) == expected );
+                        // No distance is spent on a rejected pair.
+                        REQUIRE( computed == expected.size() );
+                        total_reported += filtered.size();
+                    }
+                }
+                REQUIRE( total_reported > 0 ); // not vacuous
+            }
+
+            SECTION( "a null component array changes nothing" ) {
+                for ( uint8_t k = K; k >= 1; k-- ) {
+                    std::vector<Edge> with_null;
+                    collect( 0, k, nullptr, with_null );
+                    std::vector<Edge> plain;
+                    forest.search_pairs( 0, k, inf, plain );
+                    std::sort( with_null.begin(), with_null.end() );
+                    std::sort( plain.begin(), plain.end() );
+                    REQUIRE( with_null == plain );
+                }
+            }
+        }
+
+        // =====================================================================
+        // 13. A threshold lowered from inside `batch_output` takes effect
+        // =====================================================================
+
+        TEST_CASE( "PairForestIndex search_pairs re-reads a live threshold", "[pairforest]" ) {
+            constexpr uint8_t K = 8;
+            using Hasher = Simhash<K, UnitNormPoints, CosineDistance>;
+            using ForestT = PairForestIndex<UnitNormPoints, Hasher, CosineDistance>;
+
+            const size_t dimensions = 16;
+            const size_t n = 600;
+            const float inf = std::numeric_limits<float>::infinity();
+
+            seed_global_rng( 909090 );
+            UnitNormPoints dataset( dimensions );
+            for ( size_t i = 0; i < n; i++ ) {
+                dataset.push_back_random();
+            }
+            SimhashBuilder<K, UnitNormPoints, CosineDistance> builder( dimensions );
+            ForestT forest( dataset, /*repetitions=*/1, builder );
+
+            // A prefix long enough to produce many tiles, so there is something
+            // left to prune after the first batch.
+            const uint8_t prefix = 1;
+            std::vector<Edge> full;
+            forest.search_pairs( 0, prefix, inf, full );
+            REQUIRE( full.size() > 1000 );
+
+            typename ForestT::SearchScratch scratch;
+
+            // The caller owns the float; `search_pairs` holds a reference to it.
+            float cutoff = inf;
+            std::vector<Edge> reported;
+            std::vector<float> cutoff_in_force; // the value each edge was admitted under
+            forest.search_pairs(
+                0,
+                prefix,
+                cutoff,
+                256,
+                [&]( std::vector<Edge>& batch ) {
+                    for ( const Edge& e : batch ) {
+                        reported.push_back( e );
+                        cutoff_in_force.push_back( cutoff );
+                    }
+                    // Ratchet the cutoff down to the median of what we have
+                    // seen so far -- monotonically, as the EMST search does.
+                    std::vector<float> weights;
+                    for ( const Edge& e : batch ) {
+                        weights.push_back( e.weight );
+                    }
+                    std::sort( weights.begin(), weights.end() );
+                    cutoff = std::min( cutoff, weights[weights.size() / 2] );
+                    return false;
+                },
+                scratch );
+
+            // Lowering the cutoff must actually have pruned something...
+            REQUIRE( cutoff < inf );
+            REQUIRE( reported.size() < full.size() );
+
+            // ...and every edge reported was admissible under the value that was
+            // in force when its tile ran, which is an upper bound for the value
+            // recorded at hand-off time (the cutoff only ever goes down).
+            size_t above_cutoff = 0;
+            for ( size_t i = 0; i < reported.size(); i++ ) {
+                if ( reported[i].weight > cutoff_in_force[i] ) {
+                    above_cutoff++;
+                }
+            }
+            REQUIRE( above_cutoff == 0 );
+        }
+
     } // namespace pairforest_test
 } // namespace panna
