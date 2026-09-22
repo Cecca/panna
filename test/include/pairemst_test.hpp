@@ -32,6 +32,7 @@
 #include "panna/dsu.hpp"
 #include "panna/emst.hpp"
 #include "panna/emst_common.hpp"
+#include "panna/linalg.hpp"
 #include "panna/lsh/lattice.hpp"
 #include "panna/pairemst.hpp"
 #include "panna/rand.hpp"
@@ -940,6 +941,41 @@ namespace panna {
             }
             REQUIRE( message.find( "end of a batch" ) != std::string::npos );
         }
+    }
+
+    TEST_CASE( "clustering_emst seeds a spanning tree when points are zero vectors",
+               "[pairemst]" ) {
+        // Under the cosine distance a zero vector is at distance 1 from every
+        // point, itself included. Once the k-center radius drops below 1 such a
+        // point is the farthest one, and if choosing it as a center did not
+        // take it out of the running it would be chosen again and again: the
+        // duplicate centers then give a "tree" with more than `n - 1` edges.
+        const size_t dimensions = 8;
+        seed_global_rng( 1234 );
+        UnitNormPoints data( dimensions );
+        // Tight clusters, so that the radius drops well below 1.
+        const std::vector<float> base = sample_random_normal_vector( dimensions );
+        for ( size_t i = 0; i < 400; i++ ) {
+            std::vector<float> x = sample_random_normal_vector( dimensions );
+            for ( size_t d = 0; d < dimensions; d++ ) {
+                x[d] = base[d] + 0.01f * x[d];
+            }
+            normalize( x );
+            data.push_back( x.begin(), x.end() );
+        }
+        const std::vector<float> zero( dimensions, 0.0f );
+        for ( size_t i = 0; i < 5; i++ ) {
+            data.push_back( zero.begin(), zero.end() );
+        }
+        const size_t n = data.size();
+
+        const auto clustering = kcenter<CosineDistance>( data, 30 );
+        std::vector<size_t> centers = clustering.center_indices;
+        std::sort( centers.begin(), centers.end() );
+        REQUIRE( std::adjacent_find( centers.begin(), centers.end() ) == centers.end() );
+
+        const std::vector<Edge> seed = clustering_emst<UnitNormPoints, CosineDistance>( data );
+        pairemst_test::require_spanning_tree( seed, n );
     }
 
 } // namespace panna

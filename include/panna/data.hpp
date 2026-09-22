@@ -607,6 +607,12 @@ namespace panna {
             const auto center = dataset[c];
             float* const dists = min_dist.data();
             uint32_t* const assign = assignment.data();
+            // A center is at distance zero from itself, even when the distance
+            // function disagrees: a zero vector under the cosine distance is at
+            // distance 1 from everything, itself included, and would otherwise
+            // stay the farthest point and be picked as a center over and over.
+            dists[c] = 0.0f;
+            assign[c] = iter;
 
             float maxdist = -1.0;
             size_t maxdist_idx = c;
