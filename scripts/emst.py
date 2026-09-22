@@ -3,9 +3,8 @@
 This script runs all the experiments regarding the EMST, including the baselines
 """
 
-import panna
+import sys
 import dataclasses
-import polars as pl
 from dataclasses import dataclass, asdict
 from icecream import ic
 from pathlib import Path
@@ -21,7 +20,6 @@ from datetime import datetime
 import argparse
 import multiprocessing
 import resource
-import fast_hdbscan
 
 
 # We do not use an actual database, but store results in a newline-delimited json file,
@@ -35,6 +33,7 @@ TIMEOUT_S = 2 * 3600
 
 def get_git_version():
     import subprocess
+    import panna
 
     if hasattr(panna, "git_version"):
         return panna.git_version
@@ -50,8 +49,9 @@ def get_git_version():
 
 def get_version(algorithm: str):
     from importlib.metadata import version
+    import panna
 
-    if algorithm in ("k+", "k+scan"):
+    if algorithm == "panna":
         return dict(version=panna.pair_forest_emst_version, git_version=get_git_version())
     elif algorithm == "tutte":
         return dict(version=version("fast_hdbscan"), git_version="")
@@ -138,6 +138,7 @@ class HashWriter:
         return self.hasher.hexdigest()
 
 def profile_sha_path(profile_list):
+    import polars as pl
     h = HashWriter()
     profile = pl.DataFrame(profile_list)
     profile.write_parquet(h)
@@ -198,6 +199,7 @@ def estimate_contrast(edge_mass, bounds, cumulative_counts, diameter):
 def compute_cumulative_distance_distribution(
     data, min_distance, max_distance, num_buckets=10000, sample_fraction=0.01
 ):
+    import panna
     n = data.shape[0]
     num_pairs = n * (n - 1) // 2
     samples = int(min(1e9, num_pairs * sample_fraction))
@@ -249,15 +251,19 @@ def already_run(key: dict) -> bool:
     if not DATABASE_FILE.is_file():
         return False
     with FileLock(LOCKFILE):
-        df = pl.read_ndjson(DATABASE_FILE, infer_schema_length=None)
-        predicate = [
-            pl.col(k).is_null() if v is None else (pl.col(k) == v)
-            for k, v in key.items()
-        ]
-        df = df.filter(
-            (pl.col("running_time_s").is_null()) | (pl.col("running_time_s") >= 0)
-        )
-        return len(df.filter(predicate)) > 0
+        with open(DATABASE_FILE) as fp:
+            for line in fp.readlines():
+                row = json.loads(line)
+                if all(
+                    row.get(k, None) == v
+                    for k, v in key.items()
+                ):
+                    if row["running_time_s"] < 0:
+                        # mark as already run any configuration that timed out
+                        # at times longer than the current active timeout
+                        return -row["running_time_s"] > TIMEOUT_S
+                    return True
+        return False
 
 
 def tree_weight(data, edges):
@@ -272,6 +278,7 @@ def save_tree(
     edges: np.ndarray,
     weights: np.ndarray | None = None,
 ) -> Path:
+    import polars as pl
     if weights is None:
         xs = data[edges[:, 0]]
         ys = data[edges[:, 1]]
@@ -292,11 +299,12 @@ def save_tree(
 
 
 def _run_ours(data, params, cluster: bool = False, cluster_k: int = 5):
+    import panna
     # start = time.time()
     # algo = panna.EMST(data, **params)
     # elapsed_index_s = time.time() - start
     if cluster:
-        tree_array, _core_array, _neighbors_array, stats = (
+        tree_weights, edges, __core_distances, stats = (
             panna.pair_forest_emst_mutual_reachability(
                 data, num_neighbors=cluster_k, **params
             )
@@ -308,13 +316,11 @@ def _run_ours(data, params, cluster: bool = False, cluster_k: int = 5):
             cluster_k=cluster_k,
         )
         detail |= stats
-        edges = tree_array[:, :2].astype(np.int64)
-        tree_weights = tree_array[:, 2]
         return edges, tree_weights, detail
-    _, tree, detail = panna.pair_forest_emst(data, **params)
+    tree_weights, tree, detail = panna.pair_forest_emst(data, **params)
     # elapsed_discovery_s = time.time() - start - elapsed_index_s
     # detail = dict(index_s=elapsed_index_s, discovery_s=elapsed_discovery_s)
-    return tree, None, detail
+    return tree, tree_weights, detail
 
 
 def _complete_tree(data, tree, core_distances):
@@ -360,6 +366,8 @@ def _complete_tree(data, tree, core_distances):
 
 
 def _run_tutte(data, params):
+    import fast_hdbscan
+
     print("warmup")
     res = fast_hdbscan.hdbscan.compute_minimum_spanning_tree(data[:10], **params)
     print("run tutte institute algorithm")
@@ -498,6 +506,8 @@ def _run_ours_with_options(data, params, cluster, cluster_k):
 
 
 def worker(fn, fn_args, queue, emst_stats=False):
+    import panna
+
     start = time.time()
     res, tree_weights_override, detail = fn(*fn_args)
     end = time.time()
@@ -563,6 +573,9 @@ def run_single(
     cluster: bool = False,
     cluster_k: int = 5,
 ):
+    import panna
+    import polars as pl
+
     dataset = Path(dataset).stem
     _, data = panna.datasets.load(
         dataset,
@@ -580,7 +593,6 @@ def run_single(
         parameters = {**parameters, "cluster_k": cluster_k}
     print(f"running {algorithm} on {dataset} with params {parameters} at sample fraction {sample_frac}")
 
-    # algo_name = "k+scan" if algorithm == "k+" and cluster else algorithm
     algo_name = algorithm
 
     entry = Entry(
@@ -599,7 +611,7 @@ def run_single(
         return
 
     runners = {
-        "k+": _run_ours_with_options,
+        "panna": _run_ours_with_options,
         "tutte": _run_tutte,
         "pyhdbscan": _run_pyhdbscan,
         "mlpack": _run_mlpack,
@@ -613,7 +625,7 @@ def run_single(
     # its memory usage. Use 'spawn' to avoid OpenMP-related fork issues.
     ctx = multiprocessing.get_context("spawn")
     queue = ctx.Queue()
-    if algorithm == "k+":
+    if algorithm == "panna":
         runner_args = (data, parameters, cluster, cluster_k)
     else:
         runner_args = (data, parameters)
@@ -657,7 +669,14 @@ def run_single(
             fp.write(line + "\n")
 
 
-ALGORITHMS = ["k+", "tutte", "pyhdbscan", "mlpack", "hssl"]
+ALGORITHMS = ["panna", "tutte", "pyhdbscan", "mlpack", "hssl"]
+DEFAULT_DATASETS = [
+    "fashion-mnist-784-euclidean",
+    "mnist-784-euclidean",
+    "nytimes-256-angular",
+    "glove-100-angular",
+    "sift-128-euclidean"
+]
 
 
 def run_experiments(
@@ -667,18 +686,20 @@ def run_experiments(
     cluster_k: int = 5,
     repetitions: int = 512,
 ):
+    import panna
+
     if datasets is None:
         import panna.datasets
 
         datasets = panna.datasets.available_datasets()
     if algorithms is None:
-        algorithms = ["k+"]
+        algorithms = ["panna"]
 
     for dataset in datasets:
         # for sample_frac in [0.01, 0.1, 0.2, None]:
         for sample_frac in [None]:
             print(f"Running experiments on {dataset} at sample fraction {sample_frac}")
-            if "k+" in algorithms:
+            if "panna" in algorithms:
                 epsilons = [0.0, 0.1, 0.2, 0.5, 1.0]
                 if cluster:
                     epsilons = [0.0, 1.0, 0.5]
@@ -697,7 +718,7 @@ def run_experiments(
                     else:
                         params["refine_iterations"] = 0
                     run_single(
-                        "k+",
+                        "panna",
                         dataset,
                         params,
                         sample_frac=sample_frac,
@@ -765,6 +786,121 @@ def run_experiments(
                 )
 
 
+def run_slurm(
+    datasets,
+    algorithms,
+    sample_fractions,
+    minPtss,
+    repetitions,
+    deltas,
+    epsilons,
+    families,
+    array_id=None
+):
+    from itertools import product
+
+    configurations = []
+
+    for dataset, sample_frac, minPts, algorithm in product(datasets, sample_fractions, minPtss, algorithms):
+        cluster = minPts > 1
+        if "panna" == algorithm:
+            for delta, epsilon, reps, family in product(deltas, epsilons, repetitions, families):
+                # family = "lattice"
+                if family in ["crosspolytope", "simhash"] and not any(
+                    dist in dataset for dist in ["normalized", "angular", "cosine"]
+                ):
+                    # skip this configuration
+                    continue
+                params = {
+                    "epsilon": epsilon,
+                    "delta": delta,
+                    "family": family,
+                    "repetitions": reps,
+                }
+                if cluster and epsilon == 0.0:
+                    params["refine_iterations"] = 1000
+                else:
+                    params["refine_iterations"] = 0
+                configurations.append(dict(
+                    algorithm="panna",
+                    dataset=dataset,
+                    parameters=params,
+                    sample_frac=sample_frac,
+                    emst_stats=epsilon == 0.0,
+                    cluster=cluster,
+                    cluster_k=minPts,
+                ))
+
+        elif "tutte" == algorithm:
+            for exact in [True, False]:
+                tutte_params = {"min_samples": minPts if cluster else 1, "exact": exact}
+                configurations.append(dict(
+                    algorithm="tutte",
+                    dataset=dataset,
+                    parameters=tutte_params,
+                    sample_frac=sample_frac
+                ))
+        elif "pyhdbscan" == algorithm:
+            pyhdbscan_params = {"min_pts": minPts if cluster else 1}
+            configurations.append(dict(
+                algorithm="pyhdbscan",
+                dataset=dataset,
+                parameters=pyhdbscan_params,
+                sample_frac=sample_frac
+            ))
+        elif "hssl" == algorithm:
+            configs = []
+            min_pts = minPts if cluster else 1
+            for f in [2, 3, 4]:
+                for self_join_neighbors in [None, 100]:
+                    M = max(20, f * min_pts)
+                    efC = max(300, 1.5 * M)
+                    efS_values = [5, 10]
+                    if self_join_neighbors is not None:
+                        for efS in efS_values:
+                            hssl_params = {
+                                "min_pts": min_pts,
+                                "M": M,
+                                "efC": efC,
+                                "efS": efS,
+                                "self_join_neighbors": self_join_neighbors,
+                            }
+                            configs.append(hssl_params)
+                    else:
+                        hssl_params = {
+                            "min_pts": min_pts,
+                            "M": M,
+                            "efC": efC,
+                            "self_join_neighbors": self_join_neighbors,
+                        }
+                        configs.append(hssl_params)
+            for hssl_params in configs:
+                configurations.append(dict(
+                    algorithm="hssl",
+                    dataset=dataset,
+                    parameters=hssl_params,
+                    sample_frac=sample_frac
+                ))
+        elif "mlpack" == algorithm and not cluster:
+            params = {}
+            configurations.append(dict(
+                algorithm="mlpack",
+                dataset=dataset,
+                parameters=params,
+                sample_frac=sample_frac
+            ))
+
+    if array_id is None:
+        n = len(configurations)
+        if n == 0:
+            print("No jobs to schedule")
+            sys.exit(1)
+        print(f"0-{n-1}")
+    else:
+        conf = configurations[array_id]
+        run_single(**conf)
+
+
 def merge_results(other_file: Path):
     with open(DATABASE_FILE) as fp:
         current = set(fp.readlines())
@@ -777,7 +913,7 @@ def merge_results(other_file: Path):
 
 
 def convert_results(path: Path):
-
+    import polars as pl
     df = (
         pl.read_ndjson(path, infer_schema_length=None)
         .with_columns(
@@ -821,8 +957,8 @@ def main():
     run_parser.add_argument(
         "--algorithm",
         choices=ALGORITHMS + ["all"],
-        default="k+",
-        help="Algorithm to run (default: k+, our own). Use 'all' to run every algorithm.",
+        default="panna",
+        help="Algorithm to run (default: panna, our own). Use 'all' to run every algorithm.",
     )
     run_parser.add_argument(
         "--cluster",
@@ -839,7 +975,60 @@ def main():
         "--repetitions",
         type=int,
         default=512,
-        help="Number of repetitions for k+ (default: 512).",
+        help="Number of repetitions for panna (default: 512).",
+    )
+    # slurm command: accepts the integer array ID and selects the configuration from
+    # an array built on the fly based on the arguments
+    slurm_parser = subparsers.add_parser("slurm", help="Run experiments as a SLURM array")
+    slurm_parser.add_argument(
+        "--dataset",
+        nargs="*",
+        default=DEFAULT_DATASETS
+    )
+    slurm_parser.add_argument(
+        "--algorithm",
+        nargs="*",
+        default=ALGORITHMS
+    )
+    slurm_parser.add_argument(
+        "--sample",
+        nargs="*",
+        type=float,
+        default=[None]
+    )
+    slurm_parser.add_argument(
+        "--min-pts",
+        nargs="*",
+        type=int,
+        default=[1, 5, 15, 30, 60, 120]
+    )
+    slurm_parser.add_argument(
+        "--repetitions",
+        nargs="*",
+        type=int,
+        default=[512]
+    )
+    slurm_parser.add_argument(
+        "--epsilon",
+        nargs="*",
+        type=float,
+        default=[0.0, 0.5, 1.0]
+    )
+    slurm_parser.add_argument(
+        "--delta",
+        nargs="*",
+        type=float,
+        default=[0.1]
+    )
+    slurm_parser.add_argument(
+        "--family",
+        nargs="*",
+        default=["lattice"]
+    )
+    slurm_parser.add_argument(
+        "--array-id",
+        nargs="?",
+        type=int,
     )
 
     # merge command
@@ -871,10 +1060,24 @@ def main():
             cluster_k=args.cluster_k,
             repetitions=args.repetitions,
         )
+    elif args.command == "slurm":
+        run_slurm(
+            datasets=args.dataset,
+            algorithms=args.algorithm,
+            sample_fractions=args.sample,
+            minPtss=args.min_pts,
+            repetitions=args.repetitions,
+            deltas=args.delta,
+            epsilons=args.epsilon,
+            families=args.family,
+            array_id=args.array_id
+        )
     elif args.command == "merge":
         merge_results(args.file)
     elif args.command == "convert":
         convert_results(args.file)
+    else:
+        print("unknown command", args.command)
 
 
 if __name__ == "__main__":
