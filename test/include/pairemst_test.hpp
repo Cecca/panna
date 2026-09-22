@@ -24,6 +24,7 @@
 #include <omp.h>
 #include <random>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "panna/data.hpp"
@@ -611,88 +612,285 @@ namespace panna {
     // most of them along the way. The other [mr] cases cannot see a mistake in
     // the retention rule: with many repetitions, index seeding and NN-descent
     // the cores are exact before the sweep starts, so no weight ever changes.
-    // Here the cores start poor -- no seeding, no NN-descent -- and a few
-    // repetitions make them drop *during* the sweep, which is the case the
-    // batch-end neighborhood pass and the routing of evicted pairs exist for.
+    // Here the cores start poor -- no seeding, no NN-descent -- so they drop
+    // *during* the sweep, which is the case the batch-end neighborhood pass
+    // and the routing of evicted pairs exist for. Many threads and whole
+    // batches of repetitions make the flushes interleave; clustered data makes
+    // cores drop by orders of magnitude, and duplicate points make distances
+    // tie. Invariant (N) is also checked directly, after every batch.
     // -----------------------------------------------------------------------
+    namespace pairemst_test {
+
+        //! Gaussian clusters with centers spread 10 apart and scales spanning
+        //! three orders of magnitude, about 50 points each.
+        inline Dataset make_clustered_dataset( size_t dimensions, size_t n, uint64_t seed ) {
+            std::mt19937_64 rng( seed );
+            std::normal_distribution<float> gaussian( 0.0f, 1.0f );
+            std::uniform_real_distribution<float> uniform( 0.0f, 1.0f );
+            const size_t num_clusters = std::max<size_t>( 2, n / 50 );
+            std::vector<std::vector<float>> centers( num_clusters,
+                                                     std::vector<float>( dimensions ) );
+            std::vector<float> scales( num_clusters );
+            for ( size_t c = 0; c < num_clusters; c++ ) {
+                for ( float& x : centers[c] ) {
+                    x = 10.0f * gaussian( rng );
+                }
+                scales[c] = std::pow( 10.0f, -3.0f * uniform( rng ) );
+            }
+            Dataset data( dimensions );
+            std::vector<float> point( dimensions );
+            for ( size_t i = 0; i < n; i++ ) {
+                const size_t c = rng() % num_clusters;
+                for ( size_t j = 0; j < dimensions; j++ ) {
+                    point[j] = centers[c][j] + scales[c] * gaussian( rng );
+                }
+                data.push_back( point.begin(), point.end() );
+            }
+            return data;
+        }
+
+        //! `n` points drawn with replacement from `n / 7` gaussian ones, so
+        //! each point has about six exact copies.
+        inline Dataset make_duplicated_dataset( size_t dimensions, size_t n, uint64_t seed ) {
+            std::mt19937_64 rng( seed );
+            std::normal_distribution<float> gaussian( 0.0f, 1.0f );
+            const size_t distinct = std::max<size_t>( 2, n / 7 );
+            std::vector<std::vector<float>> base( distinct, std::vector<float>( dimensions ) );
+            for ( auto& point : base ) {
+                for ( float& x : point ) {
+                    x = gaussian( rng );
+                }
+            }
+            Dataset data( dimensions );
+            for ( size_t i = 0; i < n; i++ ) {
+                const auto& point = base[rng() % distinct];
+                data.push_back( point.begin(), point.end() );
+            }
+            return data;
+        }
+
+        //! Points of the integer grid `{0, ..., 5}^dimensions`, drawn with
+        //! replacement: distances tie all over the place, and in 8 dimensions
+        //! a few points coincide. The ties are what give an edge lost by the
+        //! batch-end pass a weight no other edge can stand in for.
+        inline Dataset make_grid_dataset( size_t dimensions, size_t n, uint64_t seed ) {
+            std::mt19937_64 rng( seed );
+            Dataset data( dimensions );
+            std::vector<float> point( dimensions );
+            for ( size_t i = 0; i < n; i++ ) {
+                for ( float& x : point ) {
+                    x = static_cast<float>( rng() % 6 );
+                }
+                data.push_back( point.begin(), point.end() );
+            }
+            return data;
+        }
+
+        //! Sets the OpenMP thread count for as long as it lives.
+        struct ScopedOmpThreads {
+            int saved;
+            explicit ScopedOmpThreads( int threads ): saved( omp_get_max_threads() ) {
+                omp_set_num_threads( threads );
+            }
+            ~ScopedOmpThreads() {
+                omp_set_num_threads( saved );
+            }
+            ScopedOmpThreads( const ScopedOmpThreads& ) = delete;
+            ScopedOmpThreads& operator=( const ScopedOmpThreads& ) = delete;
+        };
+
+    } // namespace pairemst_test
+
     TEST_CASE( "pair_forest_emst_mutual_reachability loses no edge it needs", "[pairemst][mr]" ) {
         using namespace pairemst_test;
 
         const size_t dimensions = 8;
         const size_t n = 2000;
+        const ScopedOmpThreads threads( 16 );
 
-        for ( size_t num_neighbors : { 5, 15 } ) {
-            for ( size_t repetitions : { 1, 4 } ) {
-                INFO( "num_neighbors=" << num_neighbors << " repetitions=" << repetitions );
-                const Dataset data = make_dataset( dimensions, n, 4242 + repetitions );
+        enum class Shape { gaussian, clustered, duplicated, grid };
+        for ( Shape shape : { Shape::gaussian, Shape::clustered, Shape::duplicated, Shape::grid } ) {
+            for ( size_t num_neighbors : { 5, 15 } ) {
+                /// A single repetition leaves most pairs found only once, so
+                /// the batch-end pass is all that stands between a stored pair
+                /// whose weight dropped and its loss. Whole batches rediscover
+                /// pairs over and over, which hides that, but make the flushes
+                /// of 16 threads interleave.
+                for ( size_t repetitions : { 1, 32, 64 } ) {
+                    const uint64_t seed = 4242 + repetitions + 7 * num_neighbors;
+                    const Dataset data = shape == Shape::gaussian
+                                             ? make_dataset( dimensions, n, seed )
+                                         : shape == Shape::clustered
+                                             ? make_clustered_dataset( dimensions, n, seed )
+                                         : shape == Shape::duplicated
+                                             ? make_duplicated_dataset( dimensions, n, seed )
+                                             : make_grid_dataset( dimensions, n, seed );
+                    INFO( "shape=" << static_cast<int>( shape ) << " num_neighbors="
+                                   << num_neighbors << " repetitions=" << repetitions );
 
-                /// Every edge the search could ever have used: the seed tree,
-                /// the neighborhoods it starts from, and every pair a flush
-                /// was handed. Evicted pairs need no list of their own, since
-                /// each one entered a neighborhood through one of those.
-                std::vector<Edge> seen;
-                std::mutex seen_mutex;
-                size_t batches_checked = 0;
-                size_t batches_wrong = 0;
-                double worst_gap = 0.0;
+                    /// Every edge the search could ever have used: the seed
+                    /// tree, the neighborhoods it starts from, and every pair a
+                    /// flush was handed. Evicted pairs need no list of their
+                    /// own, since each one entered a neighborhood through one
+                    /// of those.
+                    std::vector<Edge> seen;
+                    std::mutex seen_mutex;
+                    size_t batches_checked = 0;
+                    size_t batches_wrong = 0;
+                    size_t invariant_violations = 0;
+                    double worst_gap = 0.0;
 
-                PairMrEmstHooks hooks;
-                hooks.seed_from_index = false;
-                hooks.on_start = [&]( const std::vector<Edge>& seed, const CoreDistances& cores ) {
-                    seen.insert( seen.end(), seed.begin(), seed.end() );
-                    const size_t k = cores.get_num_neighbors();
-                    const auto& all = cores.all();
-                    for ( size_t i = 0; i < all.size(); i++ ) {
-                        if ( all[i].second != std::numeric_limits<uint32_t>::max() ) {
-                            seen.push_back( Edge{ .weight = all[i].first,
-                                                  .a = static_cast<uint32_t>( i / k ),
-                                                  .b = all[i].second } );
+                    /// (N): whenever `d(a, b) < core(a)`, `b` is in `NN(a)`.
+                    /// The slack keeps a pair whose two stored copies differ in
+                    /// the last bits from counting against a tie at the core.
+                    auto count_violations = [&]( const CoreDistances& cores ) {
+                        size_t violations = 0;
+                        auto holds = [&]( uint32_t p, uint32_t q, float d ) {
+                            if ( !( d < cores.core_distance( p ) * ( 1.0f - 1e-6f ) ) ) {
+                                return true;
+                            }
+                            const auto [begin, end] = cores.neighbors_view( p );
+                            return std::any_of(
+                                begin, end, [&]( const auto& slot ) { return slot.second == q; } );
+                        };
+                        for ( const Edge& e : seen ) {
+                            if ( e.a == e.b ) {
+                                continue;
+                            }
+                            violations += !holds( e.a, e.b, e.weight );
+                            violations += !holds( e.b, e.a, e.weight );
+                        }
+                        return violations;
+                    };
+
+                    PairMrEmstHooks hooks;
+                    hooks.seed_from_index = false;
+                    hooks.on_start = [&]( const std::vector<Edge>& seed_tree,
+                                          const CoreDistances& cores ) {
+                        seen.insert( seen.end(), seed_tree.begin(), seed_tree.end() );
+                        const size_t k = cores.get_num_neighbors();
+                        const auto& all = cores.all();
+                        for ( size_t i = 0; i < all.size(); i++ ) {
+                            if ( all[i].second != std::numeric_limits<uint32_t>::max() ) {
+                                seen.push_back( Edge{ .weight = all[i].first,
+                                                      .a = static_cast<uint32_t>( i / k ),
+                                                      .b = all[i].second } );
+                            }
+                        }
+                        invariant_violations += count_violations( cores );
+                    };
+                    hooks.on_flush = [&]( const std::vector<Edge>& buffer ) {
+                        std::lock_guard<std::mutex> lock( seen_mutex );
+                        seen.insert( seen.end(), buffer.begin(), buffer.end() );
+                    };
+                    hooks.on_batch = [&]( const std::vector<MREdge>& tree,
+                                          const CoreDistances& cores ) {
+                        invariant_violations += count_violations( cores );
+
+                        std::vector<Edge> weighted;
+                        weighted.reserve( seen.size() );
+                        for ( const Edge& e : seen ) {
+                            weighted.push_back(
+                                Edge{ .weight = cores.mutual_reachability_distance( e ),
+                                      .a = e.a,
+                                      .b = e.b } );
+                        }
+                        std::sort( weighted.begin(), weighted.end() );
+                        DSU dsu( static_cast<uint32_t>( n ) );
+                        std::vector<Edge> oracle;
+                        kruskal( dsu, weighted, oracle );
+
+                        double oracle_weight = 0.0;
+                        for ( const Edge& e : oracle ) {
+                            oracle_weight += e.weight;
+                        }
+                        double tree_weight = 0.0;
+                        for ( const MREdge& e : tree ) {
+                            tree_weight += e.weight;
+                        }
+                        /// Absolute on duplicated data, whose tree can weigh
+                        /// nothing at all.
+                        const double gap =
+                            ( tree_weight - oracle_weight ) / std::max( oracle_weight, 1e-12 );
+                        worst_gap = std::max( worst_gap, std::abs( gap ) );
+                        batches_checked++;
+                        batches_wrong += ( oracle.size() != n - 1 || std::abs( gap ) > 1e-6 );
+                    };
+
+                    try {
+                        pair_forest_emst_mutual_reachability<Dataset, Hasher, Distance>(
+                            data, num_neighbors, 10.0f, 0.01f, repetitions, 0, hooks );
+                    } catch ( const std::runtime_error& e ) {
+                        /// The sweep may run out of repetitions before the
+                        /// stopping rule fires; the batches ran all the same.
+                        /// Anything else is a real failure.
+                        if ( std::string( e.what() ) != "Minimum spanning tree not found" ) {
+                            throw;
                         }
                     }
-                };
-                hooks.on_flush = [&]( const std::vector<Edge>& buffer ) {
-                    std::lock_guard<std::mutex> lock( seen_mutex );
-                    seen.insert( seen.end(), buffer.begin(), buffer.end() );
-                };
-                hooks.on_batch = [&]( const std::vector<MREdge>& tree,
-                                      const CoreDistances& cores ) {
-                    std::vector<Edge> weighted;
-                    weighted.reserve( seen.size() );
-                    for ( const Edge& e : seen ) {
-                        weighted.push_back( Edge{ .weight = cores.mutual_reachability_distance( e ),
-                                                  .a = e.a,
-                                                  .b = e.b } );
-                    }
-                    std::sort( weighted.begin(), weighted.end() );
-                    DSU dsu( static_cast<uint32_t>( n ) );
-                    std::vector<Edge> oracle;
-                    kruskal( dsu, weighted, oracle );
-
-                    double oracle_weight = 0.0;
-                    for ( const Edge& e : oracle ) {
-                        oracle_weight += e.weight;
-                    }
-                    double tree_weight = 0.0;
-                    for ( const MREdge& e : tree ) {
-                        tree_weight += e.weight;
-                    }
-                    const double gap = ( tree_weight - oracle_weight ) / oracle_weight;
-                    worst_gap = std::max( worst_gap, std::abs( gap ) );
-                    batches_checked++;
-                    batches_wrong += ( oracle.size() != n - 1 || std::abs( gap ) > 1e-6 );
-                };
-
-                try {
-                    pair_forest_emst_mutual_reachability<Dataset, Hasher, Distance>(
-                        data, num_neighbors, 10.0f, 0.01f, repetitions, 0, hooks );
-                } catch ( const std::runtime_error& ) {
-                    /// A handful of repetitions may well not be enough for the
-                    /// stopping rule; the batches ran all the same.
+                    INFO( "worst relative gap=" << worst_gap );
+                    REQUIRE( batches_checked > 0 );
+                    CHECK( invariant_violations == 0 );
+                    CHECK( batches_wrong == 0 );
                 }
-                INFO( "worst relative gap=" << worst_gap );
-                REQUIRE( batches_checked > 0 );
-                CHECK( batches_wrong == 0 );
             }
+        }
+    }
+
+    // The batch-end pass scans only the neighborhoods of the points whose
+    // core dropped, and must still emit every stored pair exactly once --
+    // above all, a pair stored on both sides must not be left to a side that
+    // is not scanned. Random inputs rarely hit that (see above), so it is set
+    // up by hand here.
+    TEST_CASE( "collect_neighborhood_edges emits each stored pair of a lowered point once",
+               "[pairemst][mr]" ) {
+        const float inf = std::numeric_limits<float>::infinity();
+
+        CoreDistances cores( 5, 2 );
+        cores.update( 0, 1, 1.0f ); // NN(0) = {1, 2}, NN(1) = {0, 3}
+        cores.update( 0, 2, 3.0f );
+        cores.update( 1, 3, 4.0f );
+        SharedCoreDistances shared( std::move( cores ) );
+
+        auto count_pair = []( const std::vector<MREdge>& edges, uint32_t p, uint32_t q ) {
+            return std::count_if( edges.begin(), edges.end(), [&]( const MREdge& e ) {
+                return ( e.a == p && e.b == q ) || ( e.a == q && e.b == p );
+            } );
+        };
+
+        // Evicts 3 from NN(1): core(1) drops from 4 to 2, and 1 is lowered.
+        // 0 is not, and it stores 1 too, with the smaller id.
+        std::vector<Edge> evicted;
+        shared.insert( 1, 4, 2.0f, evicted );
+        REQUIRE( shared.is_lowered( 1 ) );
+        REQUIRE( !shared.is_lowered( 0 ) );
+
+        SECTION( "a pair stored on both sides, only the larger id lowered" ) {
+            std::vector<MREdge> out;
+            collect_neighborhood_edges( shared, inf, /*only_lowered=*/true, out );
+            CHECK( count_pair( out, 0, 1 ) == 1 );
+            CHECK( count_pair( out, 1, 4 ) == 1 );
+            // NN(0) is not scanned: its pair with 2 did not get lighter.
+            CHECK( count_pair( out, 0, 2 ) == 0 );
+        }
+
+        SECTION( "a pair stored on both sides, both lowered" ) {
+            shared.insert( 0, 3, 0.5f, evicted ); // evicts 2 from NN(0)
+            REQUIRE( shared.is_lowered( 0 ) );
+            std::vector<MREdge> out;
+            collect_neighborhood_edges( shared, inf, /*only_lowered=*/true, out );
+            CHECK( count_pair( out, 0, 1 ) == 1 );
+            CHECK( count_pair( out, 0, 3 ) == 1 );
+        }
+
+        SECTION( "the full scan emits every stored pair once" ) {
+            std::vector<MREdge> out;
+            collect_neighborhood_edges( shared, inf, /*only_lowered=*/false, out );
+            CHECK( count_pair( out, 0, 1 ) == 1 );
+            CHECK( count_pair( out, 0, 2 ) == 1 );
+            CHECK( count_pair( out, 1, 4 ) == 1 );
+            CHECK( count_pair( out, 1, 3 ) == 1 ); // NN(3) still stores 1
+            CHECK( out.size() == 4 );
         }
     }
 
@@ -722,6 +920,25 @@ namespace panna {
         SECTION( "a budget that does not even cover the shared state is refused" ) {
             REQUIRE_THROWS_AS( mr_buffer_edges_within_budget( n, 5, threads, n ),
                                std::runtime_error );
+        }
+
+        SECTION( "the end of a batch is not charged on top of the buffers" ) {
+            // It runs after the per-thread state is freed. Charging both at
+            // once refused this feasible configuration.
+            REQUIRE( mr_buffer_edges_within_budget( 5000000, 20, 16, size_t( 18 ) << 30 ) >=
+                     PAIR_EMST_MIN_BUFFER_EDGES_PER_POINT * 5000000 );
+        }
+
+        SECTION( "an end of batch that does not fit is refused, and says so" ) {
+            // 1000 neighbors: 0.8 GB of core distances, but up to 3.2 GB of
+            // neighborhood candidates at the end of a batch.
+            std::string message;
+            try {
+                mr_buffer_edges_within_budget( n, 1000, 1, size_t( 2 ) << 30 );
+            } catch ( const std::runtime_error& e ) {
+                message = e.what();
+            }
+            REQUIRE( message.find( "end of a batch" ) != std::string::npos );
         }
     }
 

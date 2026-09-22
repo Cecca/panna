@@ -929,10 +929,12 @@ namespace panna {
     //! entries) but the spanning trees and the edges buffered for the next
     //! flush. The neighborhoods are re-examined once per batch, in
     //! `absorb_neighborhoods`, which is where a stored edge whose weight has
-    //! dropped gets its chance to enter the tree. Only the edges at a point
-    //! whose core dropped since the previous re-examination need it: any other
-    //! stored edge weighs what it weighed then, when it was either kept or
-    //! rejected with a cycle of no heavier edges as its certificate.
+    //! dropped gets its chance to enter the tree. Only the neighborhoods of
+    //! the points whose core dropped since the previous re-examination need
+    //! scanning: any other stored edge weighs what it weighed when a Kruskal
+    //! run last looked at it, and was then either kept or rejected with a
+    //! cycle of no heavier edges as its certificate (see
+    //! `collect_neighborhood_edges` for why).
     //!
     //! **Sharing.** The core distances are one `SharedCoreDistances`, *live*
     //! and shared by every thread rather than frozen per batch: a frozen copy
@@ -1011,17 +1013,38 @@ namespace panna {
     //! drops and cleared by `clear_lowered`: `absorb_neighborhoods` uses it to
     //! re-examine only the stored edges whose weight can have changed.
     //!
+    //! The mirror, the lock and the flag of a point share one 8-byte
+    //! `PointState`. An insertion reads the mirror first, to turn the pair
+    //! away without locking, so by the time it takes the lock the line holding
+    //! it is already in cache: with three separate arrays, a profile at 50
+    //! neighbors spent half of the insertion time on the cache miss of the
+    //! `xchg` taking the lock, and replaying the flush buffers of a real run
+    //! through the insertions got about 20% faster with the shared line.
+    //! (Holding a point's lock across consecutive pairs sharing it, as a tile
+    //! row emits them, was tried too: finding the runs cost more than the
+    //! locks it saved.)
+    //!
     //! With `num_neighbors == 0` there are no core distances: the mirror holds
     //! `-inf`, every insertion is a no-op, and `weight` is the raw distance.
     //! (`pair_forest_emst_mutual_reachability` does not get here with zero
     //! neighbors, it runs the plain search; the class is correct regardless.)
     class SharedCoreDistances {
+        //! Everything but the heap, for one point; see the class comment.
+        struct alignas( 8 ) PointState {
+            std::atomic<float> core;
+            std::atomic_flag lock;
+            //! A byte rather than a bit, so that raising a flag is a plain
+            //! store to an object no other point shares.
+            std::atomic<uint8_t> lowered;
+        };
+
     public:
+        //! Bytes per point, beside the heap: what the memory budget charges.
+        static constexpr size_t STATE_BYTES_PER_POINT = sizeof( PointState );
+
         explicit SharedCoreDistances( CoreDistances&& estimates ):
             estimates( std::move( estimates ) ),
-            locks( this->estimates.size() ),
-            mirror( this->estimates.size() ),
-            lowered( this->estimates.size() ) {
+            state( this->estimates.size() ) {
             sync_mirror();
             clear_lowered();
         }
@@ -1052,22 +1075,22 @@ namespace panna {
         void sync_mirror() {
             const bool cores = has_cores();
             for ( size_t i = 0; i < estimates.size(); i++ ) {
-                mirror[i].store( cores ? estimates.core_distance( static_cast<uint32_t>( i ) )
-                                       : -std::numeric_limits<float>::infinity() );
+                state[i].core.store( cores ? estimates.core_distance( static_cast<uint32_t>( i ) )
+                                           : -std::numeric_limits<float>::infinity() );
             }
         }
 
         //! The current estimate of `core(a)`; see the class comment.
         float core( uint32_t a ) const {
-            return mirror[a].load( std::memory_order_seq_cst );
+            return state[a].core.load( std::memory_order_seq_cst );
         }
 
         //! The largest current core estimate: no pair at least this far apart
         //! can enter any neighborhood. Not thread-safe.
         float max_core() const {
             float out = -std::numeric_limits<float>::infinity();
-            for ( size_t i = 0; i < mirror.size(); i++ ) {
-                out = std::max( out, mirror[i].load( std::memory_order_relaxed ) );
+            for ( size_t i = 0; i < state.size(); i++ ) {
+                out = std::max( out, state[i].core.load( std::memory_order_relaxed ) );
             }
             return out;
         }
@@ -1082,13 +1105,13 @@ namespace panna {
         //! Whether `core(a)` dropped since the last `clear_lowered`. Meant for
         //! when no thread is inserting.
         bool is_lowered( uint32_t a ) const {
-            return lowered[a].load( std::memory_order_relaxed ) != 0;
+            return state[a].lowered.load( std::memory_order_relaxed ) != 0;
         }
 
         //! Whether any core dropped since the last `clear_lowered`. Not
         //! thread-safe.
         bool any_lowered() const {
-            for ( size_t i = 0; i < lowered.size(); i++ ) {
+            for ( size_t i = 0; i < state.size(); i++ ) {
                 if ( is_lowered( static_cast<uint32_t>( i ) ) ) {
                     return true;
                 }
@@ -1098,8 +1121,8 @@ namespace panna {
 
         //! Not thread-safe.
         void clear_lowered() {
-            for ( auto& flag : lowered ) {
-                flag.store( 0, std::memory_order_relaxed );
+            for ( auto& s : state ) {
+                s.lowered.store( 0, std::memory_order_relaxed );
             }
         }
 
@@ -1160,11 +1183,13 @@ namespace panna {
 
     private:
         CoreDistances estimates;
-        std::vector<std::atomic_flag> locks;
-        std::vector<std::atomic<float>> mirror;
-        //! One byte per point rather than a bit, so that raising a flag is a
-        //! plain store to an object no other point shares.
-        std::vector<std::atomic<uint8_t>> lowered;
+        std::vector<PointState> state;
+
+        void lock( uint32_t p ) {
+            while ( state[p].lock.test_and_set( std::memory_order_acquire ) ) {
+                // spin: the critical section is a scan of num_neighbors entries
+            }
+        }
 
         void insert_one_sided( uint32_t src, uint32_t dst, float d, std::vector<Edge>& evicted ) {
             /// `CoreDistances::do_update` accepts only `d < core(src)`, and the
@@ -1175,19 +1200,18 @@ namespace panna {
             if ( !( d < core( src ) ) ) {
                 return;
             }
+            PointState& s = state[src];
             std::optional<std::pair<float, uint32_t>> out;
-            while ( locks[src].test_and_set( std::memory_order_acquire ) ) {
-                // spin: the critical section is a scan of num_neighbors entries
-            }
+            lock( src );
             const float before = estimates.core_distance( src );
             if ( estimates.update_one_sided_evicting( src, dst, d, out ) ) {
                 const float after = estimates.core_distance( src );
                 if ( after < before ) {
-                    mirror[src].store( after, std::memory_order_seq_cst );
-                    lowered[src].store( 1, std::memory_order_relaxed );
+                    s.core.store( after, std::memory_order_seq_cst );
+                    s.lowered.store( 1, std::memory_order_relaxed );
                 }
             }
-            locks[src].clear( std::memory_order_release );
+            s.lock.clear( std::memory_order_release );
             if ( out ) {
                 evicted.push_back( Edge{ .weight = out->first, .a = src, .b = out->second } );
             }
@@ -1196,16 +1220,10 @@ namespace panna {
 
     //! The mutual-reachability counterpart of `buffer_edges_within_budget`.
     //!
-    //! Taken off the top of the budget, because there is one of each for the
-    //! whole search:
-    //!
-    //!  - the core distances: `num_neighbors` `(float, uint32_t)` entries per
-    //!    point, plus the 4-byte mirror and the 1-byte lock of
-    //!    `SharedCoreDistances`;
-    //!  - the end of a batch: `absorb_neighborhoods` gathers up to one
-    //!    candidate per stored neighbor, as `MREdge`s, and radix-sorts them
-    //!    through a scratch copy. That is the worst case, when every core
-    //!    dropped during the batch; it is charged in full all the same.
+    //! Taken off the top of the budget, because it lives through the whole
+    //! search: the core distances, `num_neighbors` `(float, uint32_t)` entries
+    //! per point, plus the `SharedCoreDistances` state of each point (mirror,
+    //! lock and lowered flag), and the tree the batch starts from.
     //!
     //! Per thread, what `run_batch_mr` reserves:
     //!
@@ -1220,29 +1238,59 @@ namespace panna {
     //! Evictions that many are the worst case, not the common one; they are
     //! reserved for all the same, because the buffers are reserved up front and
     //! a buffer that outgrew its reservation would double past the budget.
+    //!
+    //! The end of a batch does not overlap with any of the per-thread state
+    //! above, which is freed when the parallel region ends, so it is checked
+    //! on its own rather than charged to the buffers: next to the core
+    //! distances, the thread trees handed to the reduction (`n` `MREdge`s
+    //! each) and the batch's input tree, `absorb_neighborhoods` gathers up to
+    //! one candidate per stored neighbor, as `MREdge`s, radix-sorts them
+    //! through a scratch copy, and merges into an `n`-edge tree with a `DSU`.
+    //! That is the worst case, when every core dropped during the batch; it is
+    //! charged in full all the same.
+    //!
+    //! Throws `std::runtime_error` when either phase does not fit, or when the
+    //! buffers would get fewer than `PAIR_EMST_MIN_BUFFER_EDGES_PER_POINT * n`
+    //! edges.
     static size_t mr_buffer_edges_within_budget( size_t n,
                                                  size_t num_neighbors,
                                                  size_t threads,
                                                  size_t budget_bytes ) {
-        const size_t core_bytes = n * ( num_neighbors * sizeof( std::pair<float, uint32_t> ) +
-                                        sizeof( std::atomic<float> ) + sizeof( std::atomic_flag ) );
-        const size_t batch_end_bytes = 2 * n * num_neighbors * sizeof( MREdge );
-        const size_t shared_bytes = core_bytes + batch_end_bytes;
-        if ( shared_bytes > budget_bytes ) {
+        const char* who = "pair_forest_emst_mutual_reachability";
+        const size_t core_bytes =
+            n * ( num_neighbors * sizeof( std::pair<float, uint32_t> ) +
+                  SharedCoreDistances::STATE_BYTES_PER_POINT );
+        if ( core_bytes > budget_bytes ) {
             throw std::runtime_error(
-                "pair_forest_emst_mutual_reachability: not enough memory for the shared "
-                "core-distance state: " +
+                std::string( who ) + ": not enough memory for the shared core-distance state: " +
                 std::to_string( num_neighbors ) + " neighbors per point need " +
-                std::to_string( shared_bytes ) +
-                " bytes before any per-thread buffer, but the "
-                "memory budget is only " +
+                std::to_string( core_bytes ) +
+                " bytes before any per-thread buffer, but the memory budget is only " +
                 std::to_string( budget_bytes ) + " bytes" );
         }
-        return buffer_edges_for_costs( "pair_forest_emst_mutual_reachability",
+
+        const size_t batch_end_bytes =
+            core_bytes +
+            ( threads + 2 ) * n * sizeof( MREdge ) +                  // thread trees, input, output
+            2 * n * num_neighbors * sizeof( MREdge ) +                // candidates, sort scratch
+            2 * n * sizeof( uint32_t );                               // DSU
+        if ( batch_end_bytes > budget_bytes ) {
+            throw std::runtime_error(
+                std::string( who ) + ": not enough memory for the end of a batch: with " +
+                std::to_string( threads ) + " threads and " + std::to_string( num_neighbors ) +
+                " neighbors per point, the core distances, the thread trees and the "
+                "neighborhood candidates need up to " +
+                std::to_string( batch_end_bytes ) + " bytes, but the memory budget is only " +
+                std::to_string( budget_bytes ) + " bytes" );
+        }
+
+        /// While the threads run, the batch's input tree lives beside the core
+        /// distances, one copy for all of them.
+        return buffer_edges_for_costs( who,
                                        n,
                                        threads,
                                        budget_bytes,
-                                       shared_bytes,
+                                       core_bytes + n * sizeof( MREdge ),
                                        n * ( 4 * sizeof( MREdge ) + 3 * sizeof( uint32_t ) ),
                                        3 * sizeof( Edge ) + 3 * 2 * sizeof( MREdge ) );
     }
@@ -1260,9 +1308,33 @@ namespace panna {
 
     //! Appends to `out` every pair stored in a neighborhood whose current
     //! mutual-reachability weight is at most `max_weight` -- or, with
-    //! `only_lowered`, just those of them with an endpoint whose core dropped
-    //! since the flags were last cleared. A pair stored in both neighborhoods
-    //! is appended once, from the neighborhood of its smaller endpoint.
+    //! `only_lowered`, just those of them stored in the neighborhood of a point
+    //! whose core dropped since the flags were last cleared. Each pair is
+    //! appended once, however many of the scanned neighborhoods store it.
+    //!
+    //! Why the neighborhoods of the lowered points are enough. A stored pair
+    //! `(a, b)` needs re-examining only if its weight dropped since the last
+    //! Kruskal run that looked at it -- otherwise that run kept it or rejected
+    //! it on a cycle of edges no heavier, and the retention rule covers it --
+    //! and a weight drop means `core(a)` or `core(b)` dropped. Say `core(b)`
+    //! did, and `b` is lowered. If `a` is in `NN(b)`, the scan of `NN(b)`
+    //! finds the pair. If not, then by (N) `core(b) <= d(a, b)` now; and if
+    //! the drop of `core(b)` is what lowered the weight, `a` was in `NN(b)`
+    //! before the drop, when `core(b) > d(a, b)`, so it was evicted since, and
+    //! eviction routed the pair to a flush's Kruskal run. That run read
+    //! `core(b) <= d(a, b)`, so unless `core(a)` dropped since -- which would
+    //! make `a` lowered, and the pair found in `NN(a)` -- it weighed the pair
+    //! at its current weight.
+    //!
+    //! The deduplication. A pair can sit in both neighborhoods, and must come
+    //! out once, and above all never zero times. Which side emits is decided on the ids alone -- the side with the
+    //! smaller id, when both sides are scanned and both store the pair;
+    //! otherwise the scanned side that stores it -- and never on the stored
+    //! distances, which for a pair entered one side at a time (by
+    //! `CoreDistances::random`) may differ in the last bits. The emitting side
+    //! weighs the pair at the smaller of the two stored distances, so that the
+    //! `max_weight` test cannot turn away a copy that the other side would have
+    //! let through.
     //!
     //! Reads the heaps directly, so no thread may be writing them. Two passes
     //! over fixed chunks of points, one counting and one writing, let the scan
@@ -1281,32 +1353,42 @@ namespace panna {
         constexpr size_t chunk = 4096;
         const size_t num_chunks = ( n + chunk - 1 ) / chunk;
 
-        auto stores = [&]( uint32_t p, uint32_t q ) {
+        auto scanned = [&]( uint32_t p ) {
+            return !only_lowered || shared.is_lowered( p );
+        };
+
+        /// The distance `p` stores for `q`, or `std::nullopt` if `q` is not in
+        /// `NN(p)`.
+        auto stored = [&]( uint32_t p, uint32_t q ) -> std::optional<float> {
             for ( size_t j = 0; j < k; j++ ) {
-                if ( neighbors[static_cast<size_t>( p ) * k + j].second == q ) {
-                    return true;
+                const auto& [d, id] = neighbors[static_cast<size_t>( p ) * k + j];
+                if ( id == q ) {
+                    return d;
                 }
             }
-            return false;
+            return std::nullopt;
         };
 
         /// `emit( a, j )` is the candidate for the `j`-th neighbor slot of `a`,
-        /// or `std::nullopt` if the slot is empty, the pair unaffected by the
-        /// lowered cores, too heavy, or left for `b`'s neighborhood to emit.
+        /// a scanned point, or `std::nullopt` if the slot is empty, the pair
+        /// too heavy, or left for `b`'s neighborhood to emit.
         auto emit = [&]( size_t a, size_t j ) -> std::optional<MREdge> {
-            const auto& [d, b] = neighbors[a * k + j];
+            const auto& [d_here, b] = neighbors[a * k + j];
             const uint32_t a32 = static_cast<uint32_t>( a );
             if ( b == empty ) {
                 return std::nullopt;
             }
-            if ( only_lowered && !shared.is_lowered( a32 ) && !shared.is_lowered( b ) ) {
-                return std::nullopt;
+            float d = d_here;
+            if ( scanned( b ) ) {
+                if ( const auto d_there = stored( b, a32 ) ) {
+                    if ( b < a32 ) {
+                        return std::nullopt;
+                    }
+                    d = std::min( d, *d_there );
+                }
             }
             const float w = shared.weight( a32, b, d );
             if ( !( w <= max_weight ) ) {
-                return std::nullopt;
-            }
-            if ( a32 > b && stores( b, a32 ) ) {
                 return std::nullopt;
             }
             return MREdge{ .weight = w, .lower_bound = d, .a = a32, .b = b };
@@ -1317,6 +1399,9 @@ namespace panna {
         for ( size_t c = 0; c < num_chunks; c++ ) {
             size_t count = 0;
             for ( size_t a = c * chunk; a < std::min( n, ( c + 1 ) * chunk ); a++ ) {
+                if ( !scanned( static_cast<uint32_t>( a ) ) ) {
+                    continue;
+                }
                 for ( size_t j = 0; j < k; j++ ) {
                     count += emit( a, j ).has_value();
                 }
@@ -1332,6 +1417,9 @@ namespace panna {
         for ( size_t c = 0; c < num_chunks; c++ ) {
             size_t pos = base + offsets[c];
             for ( size_t a = c * chunk; a < std::min( n, ( c + 1 ) * chunk ); a++ ) {
+                if ( !scanned( static_cast<uint32_t>( a ) ) ) {
+                    continue;
+                }
                 for ( size_t j = 0; j < k; j++ ) {
                     if ( const auto e = emit( a, j ) ) {
                         out[pos++] = *e;
@@ -1352,12 +1440,14 @@ namespace panna {
     //! This pass is what makes the result the minimum spanning tree of *every*
     //! retained edge: the flushes only look at the tree and at freshly found
     //! edges, never at a stored neighbor pair whose weight dropped since it was
-    //! rejected. With `only_lowered` it looks only at the stored pairs with an
-    //! endpoint whose core dropped since the previous pass, and at none at all
-    //! if no core did: every other stored pair weighs what it did at that pass,
-    //! which kept it or rejected it on a cycle of edges no heavier than it --
-    //! edges that since then have only got lighter, or been dropped on a
-    //! certificate of their own. The very first pass must look at everything.
+    //! rejected. With `only_lowered` it looks only at the neighborhoods of the
+    //! points whose core dropped since the previous pass, and at none at all
+    //! if no core did: every other stored pair weighs what it did when a
+    //! Kruskal run last looked at it, which kept it or rejected it on a cycle
+    //! of edges no heavier than it -- edges that since then have only got
+    //! lighter, or been dropped on a certificate of their own (see
+    //! `collect_neighborhood_edges`). The very first pass must look at
+    //! everything.
     //!
     //! Reads the heaps, so the cores must be quiescent.
     static std::vector<MREdge> absorb_neighborhoods( std::vector<MREdge> tree,
@@ -1718,7 +1808,8 @@ namespace panna {
 
     //! Approximate minimum spanning tree over `data` under the
     //! mutual-reachability distance with `num_neighbors` neighbors, to within a
-    //! factor `1 + epsilon` with probability at least `1 - delta`. The
+    //! factor `1 + epsilon` with probability at least about `1 - delta` (see
+    //! *The guarantee* below for the exact bound). The
     //! counterpart, over `PairForestIndex`, of
     //! `EMST::find_tree_mutual_reachability_distance`; see the section comment
     //! above for how it differs.
@@ -1741,6 +1832,19 @@ namespace panna {
     //!     the confirmed-components filter is safe: both endpoints of a
     //!     confirmed edge have exact cores, so a pair skipped inside a
     //!     component could not have improved one.
+    //!
+    //! **The guarantee.** Step 6 relies on more pairs having been seen than
+    //! the plain search does: not only the edges of the minimum spanning tree
+    //! with weight at most `r` -- at most `n - 1` pairs -- but also, for every
+    //! point whose true core is at most `r`, the `num_neighbors` pairs to its
+    //! nearest neighbors, which is what makes its estimate exact. So the
+    //! stopping rule is evaluated at the per-pair failure probability
+    //! `delta / (n*num_neighbors + n - 1)` instead of the plain search's
+    //! `delta / (n - 1)`, and a union bound over those at most
+    //! `num_neighbors * n + n - 1` pairs gives: whenever the stopping rule
+    //! fires, the tree returned weighs at most `1 + epsilon` times the minimum
+    //! mutual-reachability spanning tree, except with probability at most
+    //! `delta`
     //!
     //! `num_neighbors == 0` gives the plain Euclidean tree, and is handed to
     //! `pair_forest_emst` outright: with no cores to track, the bookkeeping
@@ -1771,7 +1875,6 @@ namespace panna {
             throw std::invalid_argument(
                 "pair_forest_emst_mutual_reachability: needs at least two points" );
         }
-        const float delta_per_pair = delta / static_cast<float>( n - 1 );
 
         if ( num_neighbors == 0 ) {
             PairEmstResult plain = pair_forest_emst<Dataset, Hasher, Distance>(
@@ -1784,6 +1887,15 @@ namespace panna {
                                      .repetitions_at_stop = plain.repetitions_at_stop,
                                      .index_bytes = plain.index_bytes };
         }
+
+        /// The per-pair failure probability of the index fit and of the
+        /// stopping rule: a union bound over the tree edges and the
+        /// `num_neighbors` pairs behind each core distance (see *The
+        /// guarantee* above).
+        const float delta_per_event =
+            static_cast<float>( static_cast<double>( delta ) /
+                                ( static_cast<double>( num_neighbors + 1 ) *
+                                  static_cast<double>( n - 1 ) ) );
 
         // --- 1. seed ----------------------------------------------------------
         const std::vector<Edge> seed = seed_tree<Dataset, Distance>( data );
@@ -1807,7 +1919,7 @@ namespace panna {
 
         // --- 2. index, built once ---------------------------------------------
         const ForestIndex index = build_index<Dataset, Hasher, Distance>(
-            data, std::move( builder ), repetitions, seed, delta_per_pair );
+            data, std::move( builder ), repetitions, seed, delta_per_event );
         // clang-format off
         LOG_INFO( "msg", "pair forest index constructed",
                   "L", index.num_repetitions(),
@@ -1902,7 +2014,7 @@ namespace panna {
                 const size_t repetitions_done = begin + width;
                 const std::vector<Edge> weighted = mr_weighted_edges( best );
                 const PairEmstStop stop = check_stopping<Dataset, Hasher, Distance>(
-                    index, weighted, epsilon, delta_per_pair, k, repetitions_done );
+                    index, weighted, epsilon, delta_per_event, k, repetitions_done );
 
                 if ( stop.should_stop ) {
                     // clang-format off
