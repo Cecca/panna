@@ -3,8 +3,6 @@
 This script runs all the experiments regarding the EMST, including the baselines
 """
 
-from pandas.core.frame import infer_dtype_from_object
-
 import panna
 import dataclasses
 import polars as pl
@@ -24,7 +22,6 @@ import argparse
 import multiprocessing
 import resource
 import fast_hdbscan
-import gzip
 
 
 # We do not use an actual database, but store results in a newline-delimited json file,
@@ -55,7 +52,7 @@ def get_version(algorithm: str):
     from importlib.metadata import version
 
     if algorithm in ("k+", "k+scan"):
-        return dict(version=panna.EMST.version, git_version=get_git_version())
+        return dict(version=panna.pair_forest_emst_version, git_version=get_git_version())
     elif algorithm == "tutte":
         return dict(version=version("fast_hdbscan"), git_version="")
     elif algorithm == "mlpack":
@@ -295,25 +292,28 @@ def save_tree(
 
 
 def _run_ours(data, params, cluster: bool = False, cluster_k: int = 5):
-    start = time.time()
-    algo = panna.EMST(data, **params)
-    elapsed_index_s = time.time() - start
+    # start = time.time()
+    # algo = panna.EMST(data, **params)
+    # elapsed_index_s = time.time() - start
     if cluster:
-        tree_array, _core_array, _neighbors_array = algo.find_mst_dbscan(cluster_k)
-        elapsed_discovery_s = time.time() - start - elapsed_index_s
+        tree_array, _core_array, _neighbors_array, stats = (
+            panna.pair_forest_emst_mutual_reachability(
+                data, num_neighbors=cluster_k, **params
+            )
+        )
+        # elapsed_discovery_s = time.time() - start - elapsed_index_s
         detail = dict(
-            index_s=elapsed_index_s,
-            discovery_s=elapsed_discovery_s,
+            # index_s=elapsed_index_s,
+            # discovery_s=elapsed_discovery_s,
             cluster_k=cluster_k,
         )
-        detail |= algo.stats()
+        detail |= stats
         edges = tree_array[:, :2].astype(np.int64)
         tree_weights = tree_array[:, 2]
         return edges, tree_weights, detail
-    _, tree = algo.find_mst()
-    elapsed_discovery_s = time.time() - start - elapsed_index_s
-    detail = dict(index_s=elapsed_index_s, discovery_s=elapsed_discovery_s)
-    detail |= algo.stats()
+    _, tree, detail = panna.pair_forest_emst(data, **params)
+    # elapsed_discovery_s = time.time() - start - elapsed_index_s
+    # detail = dict(index_s=elapsed_index_s, discovery_s=elapsed_discovery_s)
     return tree, None, detail
 
 
