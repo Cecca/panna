@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <cstddef>
@@ -166,12 +167,27 @@ namespace panna {
 #endif
     }
 
+    //! Rounds an exact fixed-point dot product -- the sum of the products of
+    //! two vectors of 16-bit fixed-point coordinates, in units of 2^-30 -- back
+    //! to 16-bit fixed point, saturating at `INT16_MAX`.
+    //!
+    //! Summing the exact products in 32 bits is what keeps this from
+    //! overflowing: every coordinate is truncated toward zero on the way in,
+    //! so the vectors have norm at most 1 and, by Cauchy-Schwarz, the sum lies
+    //! in [-2^30, 2^30]. Rounding each product to 16 bits first and summing in
+    //! 16 bits, as this used to do, could carry the dot product of a unit
+    //! vector with itself past `INT16_MAX` and wrap it around to -1.
+    inline static int16_t round_dot_product( int32_t exact ) {
+        const int32_t rounded = ( exact + ( 1 << 14 ) ) >> 15;
+        return static_cast<int16_t>( std::min<int32_t>( rounded, INT16_MAX ) );
+    }
+
 #ifdef __AVX2__
-    inline static int16_t reduce_sum( __m256i values ) {
-        const static unsigned int VALUES_PER_CHUNK = 16;
-        alignas( 32 ) int16_t stored[VALUES_PER_CHUNK];
+    inline static int32_t reduce_sum( __m256i values ) {
+        const static unsigned int VALUES_PER_CHUNK = 8;
+        alignas( 32 ) int32_t stored[VALUES_PER_CHUNK];
         _mm256_store_si256( (__m256i*)stored, values );
-        int16_t ret = 0;
+        int32_t ret = 0;
         for ( unsigned i = 0; i < VALUES_PER_CHUNK; i++ ) {
             ret += stored[i];
         }
@@ -181,16 +197,14 @@ namespace panna {
     inline static int16_t dot_product_chunks16_avx2( UnitNormPointHandle lhs,
                                                      UnitNormPointHandle rhs ) {
         assert( lhs.num_chunks == rhs.num_chunks );
-        __m256i res =
-            _mm256_mulhrs_epi16( _mm256_load_si256( (__m256i*)lhs.chunks[0].chunk.data() ),
-                                 _mm256_load_si256( (__m256i*)rhs.chunks[0].chunk.data() ) );
-        for ( size_t i = 1; i < lhs.num_chunks; i += 1 ) {
+        __m256i res = _mm256_setzero_si256();
+        for ( size_t i = 0; i < lhs.num_chunks; i += 1 ) {
             __m256i tmp =
-                _mm256_mulhrs_epi16( _mm256_load_si256( (__m256i*)lhs.chunks[i].chunk.data() ),
-                                     _mm256_load_si256( (__m256i*)rhs.chunks[i].chunk.data() ) );
-            res = _mm256_add_epi16( res, tmp );
+                _mm256_madd_epi16( _mm256_load_si256( (__m256i*)lhs.chunks[i].chunk.data() ),
+                                   _mm256_load_si256( (__m256i*)rhs.chunks[i].chunk.data() ) );
+            res = _mm256_add_epi32( res, tmp );
         }
-        return reduce_sum( res );
+        return round_dot_product( reduce_sum( res ) );
     }
 #endif
 
@@ -199,15 +213,14 @@ namespace panna {
         assert( lhs.num_chunks == rhs.num_chunks );
         const static unsigned int VALUES_PER_CHUNK = 16;
 
-        int16_t res = 0;
+        int32_t res = 0;
         for ( size_t chunk_idx = 0; chunk_idx < lhs.num_chunks; chunk_idx++ ) {
             for ( size_t i = 0; i < VALUES_PER_CHUNK; i++ ) {
-                int32_t precise = static_cast<int32_t>( lhs.chunks[chunk_idx].chunk[i] ) *
-                                  static_cast<int32_t>( rhs.chunks[chunk_idx].chunk[i] );
-                res += static_cast<int16_t>( ( ( precise >> 14 ) + 1 ) >> 1 );
+                res += static_cast<int32_t>( lhs.chunks[chunk_idx].chunk[i] ) *
+                       static_cast<int32_t>( rhs.chunks[chunk_idx].chunk[i] );
             }
         }
-        return res;
+        return round_dot_product( res );
     }
 
     static inline int16_t dot_product_chunks16( const UnitNormPointHandle& lhs,
