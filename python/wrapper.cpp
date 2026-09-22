@@ -518,6 +518,114 @@ nb::tuple pair_forest_emst( const nb::ndarray<float, nb::c_contig>& data_in, nb:
     throw std::logic_error( "unreachable" );
 }
 
+/// Runs `panna::pair_forest_emst_mutual_reachability` on `data` with the given
+/// hash family.
+///
+/// The tree weights are already Euclidean mutual-reachability distances; the
+/// core distances are converted from `Distance` units to Euclidean ones, so
+/// that both are on the same scale for every family.
+template <typename Dataset, typename Hasher, typename Distance>
+nb::tuple run_pair_forest_emst_mutual_reachability( const nb::ndarray<float, nb::c_contig>& data_in,
+                                                    size_t num_neighbors,
+                                                    float epsilon,
+                                                    float delta,
+                                                    size_t repetitions,
+                                                    size_t refine_iterations ) {
+    size_t nrows = data_in.shape( 0 );
+    size_t dimensionality = data_in.shape( 1 );
+    Dataset dataset( dimensionality );
+    float* data = data_in.data();
+    for ( size_t row = 0; row < nrows; row++ ) {
+        float* begin = data + row * dimensionality;
+        float* end = data + ( row + 1 ) * dimensionality;
+        dataset.push_back( begin, end );
+    }
+
+    panna::PairMrEmstResult res =
+        panna::pair_forest_emst_mutual_reachability<Dataset, Hasher, Distance>(
+            dataset, num_neighbors, epsilon, delta, repetitions, refine_iterations );
+
+    /// With no neighbors `CoreDistances` stores nothing, and every core
+    /// distance is zero.
+    const size_t num_points = res.core_distances.size();
+    float* cores = new float[num_points];
+    for ( size_t i = 0; i < num_points; i++ ) {
+        cores[i] = res.core_distances.get_num_neighbors() == 0
+                       ? 0.0f
+                       : Distance::to_euclidean( res.core_distances.core_distance( i ) );
+    }
+    nb::capsule cores_owner( cores, []( void* p ) noexcept { delete[] (float*)p; } );
+    const auto cores_numpy =
+        nb::ndarray<nb::numpy, float, nb::ndim<1>>( cores, { num_points }, cores_owner );
+
+    nb::dict stats;
+    stats["distance_count"] = res.distances_computed;
+    stats["index_size_bytes"] = res.index_bytes;
+    stats["prefix_at_stop"] = res.prefix_at_stop;
+    stats["repetitions_at_stop"] = res.repetitions_at_stop;
+
+    nb::tuple tree = tree_to_pytuple( res.tree );
+    return nb::make_tuple( tree[0], tree[1], cores_numpy, stats );
+}
+
+nb::tuple pair_forest_emst_mutual_reachability( const nb::ndarray<float, nb::c_contig>& data_in,
+                                                nb::kwargs kwargs ) {
+    if ( data_in.ndim() != 2 ) {
+        throw nb::value_error(
+            "pair_forest_emst_mutual_reachability: expected a two-dimensional array" );
+    }
+
+    size_t num_neighbors = 5;
+    size_t repetitions = 512;
+    float delta = 0.1;
+    float epsilon = 0.2;
+    size_t refine_iterations = 10;
+    EuclideanHashFamily family = EuclideanHashFamily::Lattice;
+
+    if ( kwargs.contains( "num_neighbors" ) ) {
+        num_neighbors = nb::cast<size_t>( kwargs["num_neighbors"] );
+    }
+    if ( kwargs.contains( "repetitions" ) ) {
+        repetitions = nb::cast<size_t>( kwargs["repetitions"] );
+    }
+    if ( kwargs.contains( "delta" ) ) {
+        delta = nb::cast<float>( kwargs["delta"] );
+    }
+    if ( kwargs.contains( "epsilon" ) ) {
+        epsilon = nb::cast<float>( kwargs["epsilon"] );
+    }
+    if ( kwargs.contains( "refine_iterations" ) ) {
+        refine_iterations = nb::cast<size_t>( kwargs["refine_iterations"] );
+    }
+    if ( kwargs.contains( "family" ) ) {
+        family = string_to_family( nb::cast<std::string>( kwargs["family"] ) );
+    }
+
+    switch ( family ) {
+    case Lattice:
+        return run_pair_forest_emst_mutual_reachability<panna::EuclideanPoints,
+                                                        EMST_exposed::LatticeHasher,
+                                                        panna::EuclideanDistance>(
+            data_in, num_neighbors, epsilon, delta, repetitions, refine_iterations );
+    case E2LSH:
+        return run_pair_forest_emst_mutual_reachability<panna::EuclideanPoints,
+                                                        EMST_exposed::E2LSHHasher,
+                                                        panna::EuclideanDistance>(
+            data_in, num_neighbors, epsilon, delta, repetitions, refine_iterations );
+    case CrossPolytope:
+        return run_pair_forest_emst_mutual_reachability<panna::UnitNormPoints,
+                                                        EMST_exposed::CrossPolytopeHasher,
+                                                        panna::CosineDistance>(
+            data_in, num_neighbors, epsilon, delta, repetitions, refine_iterations );
+    case Simhash:
+        return run_pair_forest_emst_mutual_reachability<panna::UnitNormPoints,
+                                                        EMST_exposed::SimhashHasher,
+                                                        panna::CosineDistance>(
+            data_in, num_neighbors, epsilon, delta, repetitions, refine_iterations );
+    }
+    throw std::logic_error( "unreachable" );
+}
+
 nb::tuple emst_theory_of_computing( nb::ndarray<float, nb::c_contig>& data_in, nb::kwargs kwargs ) {
     float delta = 0.1;
     float gamma = 1.0;
@@ -651,6 +759,22 @@ NB_MODULE( _panna_impl, m ) {
            "  repetitions (int, default 512): repetitions of the LSH index.\n"
            "  delta (float, default 0.1): probability of failure.\n"
            "  epsilon (float, default 0.2): approximation factor.\n"
+           "  family (str, default 'lattice'): hash family to use." ),
+    m.def( "pair_forest_emst_mutual_reachability",
+           &pair_forest_emst_mutual_reachability,
+           "Approximate minimum spanning tree of a NumPy array of data points under\n"
+           "the mutual reachability distance, via the PairForestIndex search.\n\n"
+           "Returns a tuple (weights, edges, core_distances, stats): the Euclidean\n"
+           "mutual-reachability weights of the edges, the (n-1, 2) array of edge\n"
+           "endpoints, the (n,) array of Euclidean core distances, and a dict of\n"
+           "execution statistics.\n\n"
+           "Keyword arguments:\n"
+           "  num_neighbors (int, default 5): neighbors defining the core distances.\n"
+           "  repetitions (int, default 512): repetitions of the LSH index.\n"
+           "  delta (float, default 0.1): probability of failure.\n"
+           "  epsilon (float, default 0.2): approximation factor.\n"
+           "  refine_iterations (int, default 10): rounds of NN-descent used to\n"
+           "    sharpen the core distances, 0 to disable.\n"
            "  family (str, default 'lattice'): hash family to use." ),
     nb::class_<TrieIndex>( m, "TrieIndex" )
         .def( nb::init<size_t, std::string, nb::kwargs>() )
