@@ -314,6 +314,12 @@ def load(
         if test is not None:
             test = pca.fit_transform(test)
 
+    if distance in ("angular", "cosine", "normalized"):
+        # remove 0-rows
+        train = train[~((train == 0).all(axis=1))]
+        if test is not None:
+            test = test[~((test == 0).all(axis=1))]
+
     if normalize:
         train = _safe_l2_normalize_rows(train, "train")
         if test is not None:
