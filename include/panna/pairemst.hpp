@@ -102,6 +102,16 @@ namespace panna {
     //! process.
     static constexpr double PAIR_EMST_MEMORY_FRACTION = 0.8;
 
+    //! Increment this to signal fundamental changes to
+    //! the underlying algorithm/implementation
+    //!
+    //! Changelog:
+    //!
+    //! - 14: completely rewrite the algorithm for simpler parallelism,
+    //!       more efficient computation of the distance kernel, and
+    //!       better memory usage
+    static constexpr std::string PAIR_EMST_VERSION = "14";
+
     //! The outcome of one evaluation of the stopping rule.
     struct PairEmstStop {
         StoppingConditionInfo info; //!< the confirmed / still-to-confirm split

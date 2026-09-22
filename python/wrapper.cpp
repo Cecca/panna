@@ -749,6 +749,7 @@ NB_MODULE( _panna_impl, m ) {
            &distance_histogram ),
     m.def( "approximate_diameter",
            &approximate_diameter ),
+    m.attr( "pair_forest_emst_version" ) = panna::PAIR_EMST_VERSION;
     m.def( "pair_forest_emst",
            &pair_forest_emst,
            "Approximate Euclidean minimum spanning tree of a NumPy array of data\n"
