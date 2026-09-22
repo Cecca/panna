@@ -12,6 +12,13 @@ namespace panna {
         Timer( const char* name ): name( name ), start( std::chrono::steady_clock::now() ) {
         }
 
+        int64_t elapsed_ms() const {
+            const auto end = std::chrono::steady_clock::now();
+            const auto elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>( end - start ).count();
+            return elapsed;
+        }
+
         ~Timer() {
             const auto end = std::chrono::steady_clock::now();
             const auto elapsed =

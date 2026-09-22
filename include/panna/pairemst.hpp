@@ -63,6 +63,17 @@ namespace panna {
 
     //! What `pair_forest_emst` returns.
     struct PairEmstResult {
+        struct ProfileElement {
+            int64_t elapsed_ms = 0;
+            size_t prefix = 0;
+            size_t repetition = 0;
+            float emst_confirmed_weight = 0.0;
+            float emst_weight_lower_bound = 0.0;
+            float emst_max_weight = 0.0;
+            float emst_total_weight = 0.0;
+            size_t emst_num_confirmed = 0;
+        };
+
         std::vector<Edge> tree;     //!< sorted ascending, n-1 edges
         float weight;               //!< sum of Distance::to_euclidean(e.weight)
         size_t distances_computed;  //!< distance evaluations over the whole run
@@ -73,6 +84,7 @@ namespace panna {
         //! is no other way for a caller to measure it without paying to build
         //! a second one.
         size_t index_bytes;
+        std::vector<ProfileElement> profile;
     };
 
     //! Repetitions are processed in batches of this many. The batch is the unit
@@ -742,13 +754,15 @@ namespace panna {
                                      float delta,
                                      size_t repetitions,
                                      typename Hasher::Builder builder ) {
-        Timer _t( "pair-forest-emst" );
+        Timer timer( "pair-forest-emst" );
         using ForestIndex = PairForestIndex<Dataset, Hasher, Distance>;
 
         const size_t n = data.size();
         if ( n < 2 ) {
             throw std::invalid_argument( "pair_forest_emst: needs at least two points" );
         }
+
+        std::vector<PairEmstResult::ProfileElement> profile;
 
         /// Union bound over the `n - 1` edges of a spanning tree: for the tree
         /// as a whole to be right with probability `1 - delta`, each edge must
@@ -843,6 +857,18 @@ namespace panna {
                 const PairEmstStop stop = check_stopping<Dataset, Hasher, Distance>(
                     index, best, epsilon, delta_per_pair, k, repetitions_done );
 
+                /// Log in the profile the progress, so that we can analyze it later
+                profile.push_back(PairEmstResult::ProfileElement {
+                    .elapsed_ms = timer.elapsed_ms(),
+                    .prefix = k,
+                    .repetition = repetitions_done,
+                    .emst_confirmed_weight = stop.info.confirmed_weight,
+                    .emst_weight_lower_bound = stop.weight_lower_bound,
+                    .emst_max_weight = Distance::to_euclidean(best.back().weight),
+                    .emst_total_weight = stop.info.total_weight,
+                    .emst_num_confirmed = stop.info.confirmed_edges
+                });
+
                 if ( stop.should_stop ) {
                     // clang-format off
                     LOG_INFO( "msg", "tree found",
@@ -860,7 +886,8 @@ namespace panna {
                                            .distances_computed = distances_computed,
                                            .prefix_at_stop = static_cast<size_t>( k ),
                                            .repetitions_at_stop = repetitions_done,
-                                           .index_bytes = index.memory_usage() };
+                                           .index_bytes = index.memory_usage(),
+                                           .profile = profile };
                 }
 
                 /// Refresh the confirmed components from the confirmed prefix of

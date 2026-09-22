@@ -462,11 +462,26 @@ nb::tuple run_pair_forest_emst( const nb::ndarray<float, nb::c_contig>& data_in,
         }
     }
 
+    nb::list profile;
+    for (auto el : res.profile) {
+        nb::dict elpy;
+        elpy["elapsed_ms"] = el.elapsed_ms;
+        elpy["prefix"] = el.prefix;
+        elpy["repetition"] = el.repetition;
+        elpy["emst_confirmed_weight"] = el.emst_confirmed_weight;
+        elpy["emst_weight_lower_bound"] = el.emst_weight_lower_bound;
+        elpy["emst_max_weight"] = el.emst_max_weight;
+        elpy["emst_total_weight"] = el.emst_total_weight;
+        elpy["emst_num_confirmed"] = el.emst_num_confirmed;
+        profile.append(elpy);
+    }
+
     nb::dict stats;
     stats["distance_count"] = res.distances_computed;
     stats["index_size_bytes"] = res.index_bytes;
     stats["prefix_at_stop"] = res.prefix_at_stop;
     stats["repetitions_at_stop"] = res.repetitions_at_stop;
+    stats["profile"] = profile;
 
     nb::tuple tree = tree_to_pytuple( res.tree );
     return nb::make_tuple( tree[0], tree[1], stats );
