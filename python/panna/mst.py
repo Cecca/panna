@@ -455,11 +455,13 @@ if __name__ == "__main__":
     if output is None:
         output = datasets.local_path(args.dataset)
 
-    _, data = datasets.load(args.dataset, normalize="angular" in dataset)
-    with h5py.File(output) as hfp:
-        if "/graph" not in hfp:
-            print("computing the knn graph")
-            knn.write_knn(data, output, args.minPts)
+    _, data = datasets.load(args.dataset, normalize="angular" in args.dataset)
+    with h5py.File(output, "a") as hfp:
+        has_graph = "/graph" in hfp
+    if not has_graph:
+        print("computing the knn graph")
+        knn.write_knn(data, output, max(args.minPts, 512))
+    with h5py.File(output, "r") as hfp:
         distances = hfp["/graph/distances"][:]
         neighbors = hfp["/graph/neighbors"][:]
 

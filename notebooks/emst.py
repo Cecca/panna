@@ -695,21 +695,7 @@ def _(mo):
 def _():
     from emst_eval import load_tree, load_base_tree, sweep_clusterings, tree_clustering, compare_cophenetic, noise_floor, compare_branches
 
-    return compare_cophenetic, load_base_tree, load_tree, noise_floor
-
-
-@app.cell
-def _(noise_floor, pl):
-    def cophenetic_calibration(trees):
-        references = trees.filter(pl.col("algorithm") == "k+", pl.col("parameters").struct.field("epsilon") == 0.0)
-        cases = references.select("dataset", "core_k").unique().to_dicts()
-        res = []
-        for case in cases[:3]:
-            calibration = noise_floor(load_data(case["dataset"]), "cophenetic", permutations=5, min_samples=case["core_k"])
-            res.extend(calibration)
-        return pl.DataFrame(res)
-
-    return
+    return compare_cophenetic, load_base_tree, load_tree
 
 
 @app.cell
@@ -821,7 +807,7 @@ def _(GT, cophenetic_scores, cs, datasets, pl, to_latex):
                     + pl.col("epsilon").cast(pl.String).fill_null("")
                 ).alias("pivot"),
 
-                pl.format("{} ({}%)", pl.col("cophenetic_pearson").round(2), (pl.col("cophenetic_mare") * 100).round(1)).alias("score")
+                pl.format("{} \\scriptsize{{({}%)}}", pl.col("cophenetic_pearson").round(2), (pl.col("cophenetic_mare") * 100).round(1)).alias("score")
             )
             .select("pivot", "dataset", "core_k", "score")
             .pivot(
@@ -842,16 +828,16 @@ def _(GT, cophenetic_scores, cs, datasets, pl, to_latex):
             # groupname_col="dataset",
             # rowname_col="core_k",
         )
-        .tab_spanner(label="\\ours", columns=cs.contains("panna"))
+        .tab_spanner(label="Ours", columns=cs.contains("panna"))
         .cols_label_with(
             fn=lambda c: c.split("__")[1], columns=cs.contains("panna")
         )
-        .tab_spanner(label="\\tutte", columns=cs.contains("tutte"))
+        .tab_spanner(label="Tutte", columns=cs.contains("tutte"))
         .cols_label_with(
             fn=lambda c: "approx",
             columns=cs.contains("tutte"),
         )
-        .tab_spanner(label="\\hssl", columns=cs.contains("hssl"))
+        .tab_spanner(label="HSSL", columns=cs.contains("hssl"))
         .cols_label_with(
             fn=lambda c: "approx",
             columns=cs.contains("hssl"),
@@ -862,7 +848,7 @@ def _(GT, cophenetic_scores, cs, datasets, pl, to_latex):
         # .tab_options(row_group_as_column=True)
     )
     with open("/tmp/mr-cophenetic.tex", "w") as _fp:
-        print(to_latex(mr_cophenetic), file=_fp)
+        print(to_latex(mr_cophenetic, rotate_dataset=True), file=_fp)
     mr_cophenetic
     return
 
@@ -1109,7 +1095,7 @@ def _(pl):
 
 @app.cell
 def _(multirow_first_column):
-    def to_latex(table):
+    def to_latex(table, rotate_dataset=False):
         import re
         latex = table.as_latex()
         latex = latex.replace("epsilon", r"\epsilon")
@@ -1122,7 +1108,8 @@ def _(multirow_first_column):
         latex = latex.replace("\\$", "$")
         latex = latex.replace("\\{", "{").replace("\\}", "}")
         latex = latex.replace("\\\\footnotesize", "\\footnotesize")
-        latex = multirow_first_column(latex)
+        latex = latex.replace("\\\\scriptsize", "\\scriptsize")
+        latex = multirow_first_column(latex, rotate_dataset)
         return latex
 
     return (to_latex,)
@@ -1130,7 +1117,7 @@ def _(multirow_first_column):
 
 @app.cell
 def _(datasets):
-    def multirow_first_column(latex):
+    def multirow_first_column(latex, rotate_dataset=False):
         """Collapses runs of body rows sharing the first cell into a `\\multirow`.
 
         Requires `\\usepackage{multirow}` in the preamble of the document including
@@ -1152,6 +1139,8 @@ def _(datasets):
                 return None
             return parts[0].strip(), parts[1]
 
+        if rotate_dataset:
+            latex.replace("dataset", "")
         latex = latex.replace("fashion-mnist", r"\fashion")
         for d in datasets:
             latex = latex.replace(d, f"\\{d}")
@@ -1184,9 +1173,12 @@ def _(datasets):
         body = []
         for i, (key, rows) in enumerate(groups):
             if key is not None and len(rows) > 1:
+                display_key = key
+                if rotate_dataset:
+                    display_key = f"\\rotatebox{{90}}{{{key}}}"
                 body.append(
                     "\\multirow{{{}}}{{*}}{{{}}} &{}".format(
-                        len(rows), key, split_row(rows[0])[1]
+                        len(rows), display_key, split_row(rows[0])[1]
                     )
                 )
                 body.extend(" &" + split_row(r)[1] for r in rows[1:])
