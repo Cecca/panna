@@ -61,3 +61,7 @@ container:
 # that should be a valid rsync destination (e.g. ceccarello@login.dei.unipd.it:panna.sif)
 deploy-container remote: container
     rsync --progress $(readlink result) {{remote}}
+
+sync-results remote:
+    rsync --progress {{remote}}/results/emst.json /tmp/new.json
+    nix run .#python scripts/emst.py merge /tmp/new.json

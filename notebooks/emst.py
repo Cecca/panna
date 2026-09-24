@@ -4,7 +4,8 @@
 #     "fast-hdbscan==0.3.2",
 #     "great-tables==0.21.0",
 #     "h5py==3.16.0",
-#     "marimo",
+#     "marimo==0.24.2",
+#     "matplotlib==3.11.2",
 #     "numpy==2.4.6",
 #     "polars==1.40.1",
 #     "pyarrow==24.0.0",
@@ -20,7 +21,7 @@
 
 import marimo
 
-__generated_with = "0.24.0"
+__generated_with = "0.25.0"
 app = marimo.App(width="medium")
 
 
@@ -67,7 +68,13 @@ def _():
 
 @app.cell
 def _():
-    datasets = ["sift", "mnist", "fashion-mnist", "glove", "nytimes"]
+    datasets = [
+        "fashion-mnist", 
+        "mnist", 
+        "nytimes",
+        "sift",
+        "glove"
+    ]
     return (datasets,)
 
 
@@ -105,7 +112,7 @@ def _(datasets, excluded_shas, ground_truth, node_name, pl):
         .filter(pl.col("dataset_sample_frac").is_null())
         .filter(pl.col("machine").struct.field("node_name") == node_name)
         .filter(pl.col("dataset_sha").is_in(excluded_shas).not_())
-        .filter(pl.col("version").is_in(["0.3.2", "13", "0.1.0", "4.8.0"]))
+        .filter(pl.col("version").is_in(["0.3.2", "14", "0.1.0", "4.8.0"]))
         .with_columns(
             pl.col("dataset").str.replace(
                 "-[0-9]+-(euclidean|angular|normalized)", ""
@@ -279,29 +286,33 @@ def _(choose2, pl, single_linkage_data, sizes):
             .otherwise("algorithm")
             .alias("algorithm"),
             (pl.col("detail").struct.field("distance_count") / choose2("n")).alias("dist_frac")
-        ).select("dataset", "display algorithm", "dist_frac", pl.col("detail").struct.field("distance_count"), choose2("n"))
+        ).select("dataset", "display algorithm", "running_time_s", "dist_frac", pl.col("detail").struct.field("distance_count"), choose2("n"))
     )
     return
 
 
 @app.cell
-def _(GT, choose2, cs, pl, single_linkage_data, sizes, with_percentage):
-    sl_time = (
-        GT(
-            single_linkage_data
+def _(
+    GT,
+    choose2,
+    cs,
+    datasets,
+    pl,
+    single_linkage_data,
+    sizes,
+    to_latex,
+    with_percentage,
+):
+    sl_wide_table = (
+        single_linkage_data
             .join(sizes, on="dataset")
             .with_columns(
                 pl.when(pl.col("parameters").struct.field("exact"))
                 .then(pl.col("algorithm") + "-exact")
                 .otherwise("algorithm")
                 .alias("algorithm"),
-                (pl.col("detail").struct.field("distance_count") / choose2("n")).alias("dist_frac")
-            )
-            .select(
-                "dataset",
-                "algorithm",
-                pl.col("parameters").struct.field("epsilon"),
-                with_percentage("running_time_s", "dist_frac").alias("running_time_s"),
+                (pl.col("detail").struct.field("distance_count") / choose2("n")).alias("dist_frac"),
+                pl.col("parameters").struct.field("epsilon").alias("epsilon"),
             )
             .with_columns(
                 (
@@ -310,13 +321,29 @@ def _(GT, choose2, cs, pl, single_linkage_data, sizes, with_percentage):
                     + pl.col("epsilon").cast(pl.String).fill_null("")
                 ).alias("pivot")
             )
+            .filter(
+                pl.col("running_time_s") == pl.col("running_time_s").min().over("dataset", "pivot")
+            )
+  
+    )
+    sl_time = (
+        GT(
+            sl_wide_table
+            .select(
+                "dataset",
+                "algorithm",
+                "pivot",
+                "epsilon",
+                with_percentage("running_time_s", "dist_frac").alias("running_time_s"),
+            )
             .sort("dataset", "algorithm", "epsilon")
-            .select("dataset", "pivot", "running_time_s")
+            .select("dataset", "pivot", "running_time_s")  
             .pivot(
                 on="pivot",
                 index="dataset",
                 aggregate_function="min",
             )
+            .sort(pl.col("dataset").map_elements(lambda d: datasets.index(d), return_dtype=pl.Int64))
             .select(
                 "dataset",
                 pl.col(
@@ -348,20 +375,18 @@ def _(GT, choose2, cs, pl, single_linkage_data, sizes, with_percentage):
 
 
 @app.cell
-def _(GT, cs, pl, single_linkage_data):
+def _(GT, choose2, cs, datasets, pl, single_linkage_data, sizes, to_latex):
     sl_error = (
         GT(
-            single_linkage_data.with_columns(
+            single_linkage_data
+            .join(sizes, on="dataset")
+            .with_columns(
                 pl.when(pl.col("parameters").struct.field("exact"))
                 .then(pl.col("algorithm") + "-exact")
                 .otherwise("algorithm")
-                .alias("algorithm")
-            )
-            .select(
-                "dataset",
-                "algorithm",
-                pl.col("parameters").struct.field("epsilon"),
-                "relative_error",
+                .alias("algorithm"),
+                (pl.col("detail").struct.field("distance_count") / choose2("n")).alias("dist_frac"),
+                pl.col("parameters").struct.field("epsilon").alias("epsilon"),
             )
             .with_columns(
                 (
@@ -370,6 +395,9 @@ def _(GT, cs, pl, single_linkage_data):
                     + pl.col("epsilon").cast(pl.String).fill_null("")
                 ).alias("pivot")
             )
+            .filter(
+                pl.col("relative_error") == pl.col("relative_error").min().over("dataset", "pivot")
+            )
             .sort("dataset", "algorithm", "epsilon")
             .select("dataset", "pivot", "relative_error")
             .pivot(
@@ -377,18 +405,19 @@ def _(GT, cs, pl, single_linkage_data):
                 index="dataset",
                 aggregate_function="min",
             )
+            .sort(pl.col("dataset").map_elements(lambda d: datasets.index(d), return_dtype=pl.Int64))
             .select(
                 "dataset",
                 pl.col(
-                    ["tutte-exact__", "tutte__", "mlpack__", "hssl__"]
-                    + ["panna__{}".format(e) for e in [0.0, 0.1, 0.2, 0.5, 1.0]]
+                    ["tutte__", "hssl__"]
+                    + ["panna__{}".format(e) for e in [0.1, 0.2, 0.5, 1.0]]
                 ),
             )
         )    
         .tab_spanner(label="HSSL", columns=cs.contains("hssl"))
         .cols_label_with(columns=cs.contains("hssl"), fn=lambda c: "approx")
-        .tab_spanner(label="MLPACK", columns=cs.contains("mlpack"))
-        .cols_label_with(columns=cs.contains("mlpack"), fn=lambda c: "exact")
+        # .tab_spanner(label="MLPACK", columns=cs.contains("mlpack"))
+        # .cols_label_with(columns=cs.contains("mlpack"), fn=lambda c: "exact")
         .tab_spanner(label="Ours", columns=cs.contains("panna"))
         .cols_label_with(
             fn=lambda c: c.split("__")[1], columns=cs.contains("panna")
@@ -400,7 +429,7 @@ def _(GT, cs, pl, single_linkage_data):
         )
         .fmt_percent(columns=cs.numeric(), decimals=2)
     )
-    with open("/tmp/single-linkage-error.tex", "w") as _fp:
+    with open("/tmp/single-linkage-error-compact.tex", "w") as _fp:
         print(to_latex(sl_error), file=_fp)
     sl_error
     return
@@ -450,7 +479,7 @@ def _(mutual_reachability_data, pl):
 
 
 @app.cell
-def _(GT, cs, mr_time_data, pl):
+def _(GT, cs, datasets, mr_time_data, pl, to_latex):
     mr_time = (
         GT(
             mr_time_data
@@ -464,10 +493,10 @@ def _(GT, cs, mr_time_data, pl):
                 "dataset", "cluster_k",
                 pl.col(
                     ["tutte__", "hssl__"]
-                    + ["panna__{}".format(e) for e in [0.5, 1.0]]
+                    + ["panna__{}".format(e) for e in [0.1, 0.5, 1.0]]
                 ),
-            )
-            .sort("dataset", "cluster_k"),
+            ).sort(pl.col("dataset").map_elements(lambda d: datasets.index(d), return_dtype=pl.Int64), "cluster_k")
+            # .sort("dataset", "cluster_k"),
             # groupname_col="dataset", rowname_col="cluster_k"
         )
         .tab_spanner(label="Ours", columns=cs.contains("panna"))
@@ -515,7 +544,7 @@ def _(mutual_reachability_data, pl):
 
 
 @app.cell
-def _(GT, cs, mutual_reachability_data, pl):
+def _(GT, cs, mutual_reachability_data, pl, to_latex):
     mr_error = (
         GT(
             mutual_reachability_data.with_columns(
@@ -546,7 +575,7 @@ def _(GT, cs, mutual_reachability_data, pl):
                 "dataset", "cluster_k",
                 pl.col(
                     ["tutte__", "hssl__"]
-                    + ["panna__{}".format(e) for e in [0.0, 0.5, 1.0]]
+                    + ["panna__{}".format(e) for e in [0.0, 0.1, 0.5, 1.0]]
                 )
             )
             .with_columns((cs.contains("__") - pl.col("panna__0.0")) / pl.col("panna__0.0"))
@@ -625,7 +654,7 @@ def _(experiments, pl):
 
 
 @app.cell
-def _(cs, experiments, pl):
+def _(cs, experiments, pl, to_latex):
     tbl_size = (
         experiments
         .filter(pl.col("parameters").struct.field("epsilon") == 0)
@@ -684,7 +713,7 @@ def _(noise_floor, pl):
 
 
 @app.cell
-def _(mo, mr_time_data, pl):
+def _(download_trees, mo, mr_time_data, pl):
     import os
 
     tree_catalogue = (
@@ -692,7 +721,8 @@ def _(mo, mr_time_data, pl):
         # .filter(pl.col("dataset_sample_frac").is_null())
         # .filter(pl.col("dataset_sha").is_in(excluded_shas).not_())
         # .filter(pl.col("detail").struct.field("tree_path").is_not_null())
-        mr_time_data
+        # the trees are fetched here, so that the existence check below sees them
+        download_trees(mr_time_data)
         .select(
             pl.col("dataset").alias("full_dataset"),
             pl.col("dataset").str.replace(
@@ -737,10 +767,10 @@ def _(mo, mr_time_data, pl):
 
 
 @app.cell
-def _(compare_cophenetic, load_base_tree, load_tree, mo, pl):
-    @mo.cache
+def _(compare_cophenetic, load_base_tree, load_tree, pl):
     def cophenetic_comparison(trees):
         datasets = trees["dataset"].unique().to_list()
+        datasets.remove("nytimes")
         res = []
         for dataset in datasets:
             cluster_ks = (
@@ -753,7 +783,11 @@ def _(compare_cophenetic, load_base_tree, load_tree, mo, pl):
                     pl.col("dataset") == dataset,
                     pl.col("core_k") == ck,
                 )
-                reference_tree = load_base_tree(dataset, ck)
+                try:
+                    reference_tree = load_base_tree(dataset, ck)
+                except ValueError:
+                    # print(f"skipping {dataset} at min-pts {ck}, as the reference tree is missing")
+                    continue
                 for experiment in trees.filter(filter_expr).to_dicts():
                     row = dict(dataset=dataset, core_k=ck, epsilon=experiment["epsilon"])
                     exp_tree = load_tree(experiment["tree_path"])
@@ -775,7 +809,7 @@ def _(cophenetic_comparison, tree_catalogue):
 
 
 @app.cell
-def _(GT, cophenetic_scores, cs, pl):
+def _(GT, cophenetic_scores, cs, datasets, pl, to_latex):
     mr_cophenetic = (
         GT(
             cophenetic_scores
@@ -800,10 +834,11 @@ def _(GT, cophenetic_scores, cs, pl):
                 "core_k",
                 pl.col(
                     ["tutte__", "hssl__"]
-                    + ["panna__{}".format(e) for e in [0.5, 1.0]]
+                    + ["panna__{}".format(e) for e in [0.1, 0.5, 1.0]]
                 ),
             )
-            .sort("dataset", "core_k"),
+            .sort(pl.col("dataset").map_elements(lambda d: datasets.index(d), return_dtype=pl.Int64), "core_k")
+            # .sort("dataset", "core_k"),
             # groupname_col="dataset",
             # rowname_col="core_k",
         )
@@ -889,8 +924,9 @@ def _(
     )
 
     profile = pl.read_parquet(profile_info["profile_path"])
-    print(profile.columns)
-    plt.figure(figsize=(6,3))
+    aspect = 2
+    height = 2.8
+    plt.figure(figsize=(aspect*height, height))
     exact_weight = profile["emst_total_weight"][-1]
     num_edges = profile["emst_num_confirmed"][-1]
     for c in [
@@ -911,6 +947,35 @@ def _(
     #         plt.axvline(pline["elapsed_ms"] / 1000, c="lightgray", zorder=-1)
     #     if pline["repetition"] % 32 == 0:
     #         plt.axvline(pline["elapsed_ms"] / 1000, c="lightgray", zorder=-1, linestyle="dotted")
+
+    bounds = dict()
+    for pline in profile.sort("elapsed_ms").to_dicts():
+        upper = pline["emst_total_weight"]
+        lower = pline["emst_weight_lower_bound"]
+        ci = (upper - lower) / lower
+        for epsilon in [0.5, 0.2, 0.1]:
+            if epsilon not in bounds and ci <= epsilon:
+                bounds[epsilon] = dict(
+                    elapsed_s=pline["elapsed_ms"] / 1000,
+                    upper=upper / exact_weight,
+                    lower=lower / exact_weight,
+                )
+
+    print(bounds)
+    plt.rcParams["text.usetex"] = True
+    for i, (epsilon, info) in enumerate(bounds.items()):
+        x = info["elapsed_s"]
+        upper = info["upper"]
+        lower = info["lower"]
+        plt.axvline(x, linestyle="dotted", c="black", linewidth=1.1, zorder=-2)
+        plt.plot((x, x), (lower, upper), c="black", zorder=0, linewidth=2)
+        plt.annotate(
+            rf"$\varepsilon={epsilon:.1f}$",
+            xy=(x, (upper + lower) / 2),
+            xytext=(x + 30, 0.55 + 0.15 * i),
+            bbox=dict(boxstyle="round", fc="white", ec="black", pad=0.3),
+            arrowprops=dict(arrowstyle="->", connectionstyle="arc3"),
+        )
 
     plt.axhline(1, c="lightgray", zorder=-1)
     # plt.title(
@@ -943,7 +1008,7 @@ def _(mo):
 
 
 @app.cell
-def _(cs, pl):
+def _(cs, pl, to_latex):
     tab_synth = (
         pl.read_ndjson("results/emst.json", infer_schema_length=None)
         .filter(pl.col("dataset") == "densired-hard")
@@ -994,7 +1059,7 @@ def _(mo):
 
 @app.cell
 def _(pl):
-    def download_trees(df, base="ceccarello@login.dei.unipd.it:/nfsd/lovelace/ceccarello/panna-tmp/"):
+    def download_trees(df, base="ceccarello@login.dei.unipd.it:panna/"):
         """Downloads all the trees referenced in the given dataframe"""
         from pathlib import Path
         import subprocess as sp
@@ -1005,19 +1070,19 @@ def _(pl):
             .filter(pl.col("detail").struct.field("tree_path").is_null().not_())
             .select(pl.col("detail").struct.field("tree_path"))["tree_path"].to_list()
         )
-        for tree in trees:
-            if Path(tree).is_file():
-                 continue
-            cmd = ["rsync", "--progress", base + tree, "results/"]
-            sp.check_call(cmd)
+        todownload = "\n".join([tree for tree in trees if not Path(tree).is_file()])
+        if len(todownload) == 0:
+            print("no files to download")
+            return df
+        files_from = "/tmp/todownload.txt"
+        with open(files_from, "w") as fp:
+            print(todownload, file=fp)
+
+        cmd = ["rsync", "--progress", "--files-from", files_from, base, "."]
+        sp.check_call(cmd)
+        return df
 
     return (download_trees,)
-
-
-@app.cell
-def _(download_trees, mutual_reachability_data):
-    download_trees(mutual_reachability_data)
-    return
 
 
 @app.cell
@@ -1042,85 +1107,97 @@ def _(pl):
     return (download_profiles,)
 
 
-@app.function
-def to_latex(table):
-    import re
-    latex = table.as_latex()
-    latex = latex.replace("epsilon", r"\epsilon")
-    latex = re.sub(r"\\fontsize\{[^}]*\}\{[^}]*\}\\selectfont", "", latex)
-    latex = re.sub(r"\\(begin|end)\{table\}", "", latex)
-    latex = re.sub(r"tabular\*", "tabular", latex)
-    latex = re.sub(r"\{\\linewidth\}", "", latex)
-    latex = latex.replace(r"[!t]", "")
-    latex = latex.replace("None", "-")
-    latex = latex.replace("\\$", "$")
-    latex = latex.replace("\\{", "{").replace("\\}", "}")
-    latex = latex.replace("\\\\footnotesize", "\\footnotesize")
-    latex = multirow_first_column(latex)
-    return latex
-
-
-@app.function
-def multirow_first_column(latex):
-    """Collapses runs of body rows sharing the first cell into a `\\multirow`.
-
-    Requires `\\usepackage{multirow}` in the preamble of the document including
-    the resulting table. Tables whose first column is already unique per row are
-    returned unchanged.
-    """
-    import re
-
-    def split_row(line):
-        """The (first cell, rest of the row) of a plain data row, or None."""
-        stripped = line.strip()
-        if not stripped.endswith(r"\\"):
-            return None
-        if re.search(r"\\(multicolumn|multirow|[a-z]*rule|addlinespace)", stripped):
-            return None
-        # great_tables escapes ampersands appearing in the data as `\&`
-        parts = re.split(r"(?<!\\)&", line, maxsplit=1)
-        if len(parts) < 2:
-            return None
-        return parts[0].strip(), parts[1]
-
-    lines = latex.split("\n")
-    body_start = next(
-        (i + 1 for i, l in enumerate(lines) if l.startswith(r"\midrule")), None
-    )
-    body_end = next(
-        (i for i, l in enumerate(lines) if l.startswith(r"\bottomrule")), None
-    )
-    if body_start is None or body_end is None or body_start >= body_end:
+@app.cell
+def _(multirow_first_column):
+    def to_latex(table):
+        import re
+        latex = table.as_latex()
+        latex = latex.replace("epsilon", r"\epsilon")
+        latex = re.sub(r"\\fontsize\{[^}]*\}\{[^}]*\}\\selectfont", "", latex)
+        latex = re.sub(r"\\(begin|end)\{table\}", "", latex)
+        latex = re.sub(r"tabular\*", "tabular", latex)
+        latex = re.sub(r"\{\\linewidth\}", "", latex)
+        latex = latex.replace(r"[!t]", "")
+        latex = latex.replace("None", "-")
+        latex = latex.replace("\\$", "$")
+        latex = latex.replace("\\{", "{").replace("\\}", "}")
+        latex = latex.replace("\\\\footnotesize", "\\footnotesize")
+        latex = multirow_first_column(latex)
         return latex
 
-    # runs of consecutive rows sharing the first cell, keeping anything that is
-    # not a plain data row as a group of its own
-    groups = []
-    for line in lines[body_start:body_end]:
-        row = split_row(line)
-        if row is not None and groups and groups[-1][0] == row[0]:
-            groups[-1][1].append(line)
-        else:
-            groups.append((row[0] if row else None, [line]))
+    return (to_latex,)
 
-    if not any(key is not None and len(rows) > 1 for key, rows in groups):
-        return latex
 
-    body = []
-    for i, (key, rows) in enumerate(groups):
-        if key is not None and len(rows) > 1:
-            body.append(
-                "\\multirow{{{}}}{{*}}{{{}}} &{}".format(
-                    len(rows), key, split_row(rows[0])[1]
+@app.cell
+def _(datasets):
+    def multirow_first_column(latex):
+        """Collapses runs of body rows sharing the first cell into a `\\multirow`.
+
+        Requires `\\usepackage{multirow}` in the preamble of the document including
+        the resulting table. Tables whose first column is already unique per row are
+        returned unchanged.
+        """
+        import re
+
+        def split_row(line):
+            """The (first cell, rest of the row) of a plain data row, or None."""
+            stripped = line.strip()
+            if not stripped.endswith(r"\\"):
+                return None
+            if re.search(r"\\(multicolumn|multirow|[a-z]*rule|addlinespace)", stripped):
+                return None
+            # great_tables escapes ampersands appearing in the data as `\&`
+            parts = re.split(r"(?<!\\)&", line, maxsplit=1)
+            if len(parts) < 2:
+                return None
+            return parts[0].strip(), parts[1]
+
+        latex = latex.replace("fashion-mnist", r"\fashion")
+        for d in datasets:
+            latex = latex.replace(d, f"\\{d}")
+        for a in ["Tutte", "MLPACK", "HSSL", "Ours"]:
+            latex = latex.replace(a, f"\\{a.lower()}")
+
+        lines = latex.split("\n")
+        body_start = next(
+            (i + 1 for i, l in enumerate(lines) if l.startswith(r"\midrule")), None
+        )
+        body_end = next(
+            (i for i, l in enumerate(lines) if l.startswith(r"\bottomrule")), None
+        )
+        if body_start is None or body_end is None or body_start >= body_end:
+            return latex
+
+        # runs of consecutive rows sharing the first cell, keeping anything that is
+        # not a plain data row as a group of its own
+        groups = []
+        for line in lines[body_start:body_end]:
+            row = split_row(line)
+            if row is not None and groups and groups[-1][0] == row[0]:
+                groups[-1][1].append(line)
+            else:
+                groups.append((row[0] if row else None, [line]))
+
+        if not any(key is not None and len(rows) > 1 for key, rows in groups):
+            return latex
+
+        body = []
+        for i, (key, rows) in enumerate(groups):
+            if key is not None and len(rows) > 1:
+                body.append(
+                    "\\multirow{{{}}}{{*}}{{{}}} &{}".format(
+                        len(rows), key, split_row(rows[0])[1]
+                    )
                 )
-            )
-            body.extend(" &" + split_row(r)[1] for r in rows[1:])
-        else:
-            body.extend(rows)
-        if i < len(groups) - 1:
-            body.append(r"\midrule")
+                body.extend(" &" + split_row(r)[1] for r in rows[1:])
+            else:
+                body.extend(rows)
+            if i < len(groups) - 1:
+                body.append(r"\midrule")
 
-    return "\n".join(lines[:body_start] + body + lines[body_end:])
+        return "\n".join(lines[:body_start] + body + lines[body_end:])
+
+    return (multirow_first_column,)
 
 
 @app.cell(hide_code=True)
