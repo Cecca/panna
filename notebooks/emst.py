@@ -654,22 +654,23 @@ def _(experiments, pl):
 
 
 @app.cell
-def _(cs, experiments, pl, to_latex):
+def _(cs, datasets, experiments, pl, to_latex):
     tbl_size = (
         experiments
         .filter(pl.col("parameters").struct.field("epsilon") == 0)
         .select("dataset", "detail").unnest("detail")
-        .select("dataset", "n", "d", "mass-frac@0.0", "contrast@0.0", "mass-frac@1.0", "contrast@1.0")
+        # .select("dataset", "n", "d", "mass-frac@0.0", "contrast@0.0", "mass-frac@1.0", "contrast@1.0")
+        .select("dataset", "n", "d", "mass-frac@0.0", "mass-frac@1.0")
         .filter(pl.col("mass-frac@0.0") == pl.col("mass-frac@0.0").max().over("dataset"))
-        .sort("dataset")
+        .sort(pl.col("dataset").map_elements(datasets.index, return_dtype=pl.Int64))
         .style
         .fmt_number(columns=["n", "d"], decimals=0)
         .fmt_percent(columns=cs.contains("frac"))
         .fmt_number(columns=cs.contains("contrast"), decimals=4)
-        .tab_spanner("$\\epsilon=0.0$", columns=cs.contains("0.0"))
-        .tab_spanner("$\\epsilon=1.0$", columns=cs.contains("1.0"))
+        # .tab_spanner("$\\epsilon=0.0$", columns=cs.contains("0.0"))
+        # .tab_spanner("$\\epsilon=1.0$", columns=cs.contains("1.0"))
         .cols_label_with(
-            fn=lambda c: "$\\mu_\\epsilon$",
+            fn=lambda c: f"$\\mu_{{{c.split("@")[1]}}}$",
             columns=cs.contains("mass"),
         )
         .cols_label_with(
@@ -756,7 +757,7 @@ def _(download_trees, mo, mr_time_data, pl):
 def _(compare_cophenetic, load_base_tree, load_tree, pl):
     def cophenetic_comparison(trees):
         datasets = trees["dataset"].unique().to_list()
-        datasets.remove("nytimes")
+        # datasets.remove("nytimes")
         res = []
         for dataset in datasets:
             cluster_ks = (
@@ -1140,7 +1141,7 @@ def _(datasets):
             return parts[0].strip(), parts[1]
 
         if rotate_dataset:
-            latex.replace("dataset", "")
+            latex = latex.replace("dataset", "")
         latex = latex.replace("fashion-mnist", r"\fashion")
         for d in datasets:
             latex = latex.replace(d, f"\\{d}")
