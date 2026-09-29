@@ -1,4 +1,7 @@
-"""Exact minimum spanning tree under the mutual reachability distance."""
+"""Exact minimum spanning tree under the mutual reachability distance.
+
+Needs the `extras` install (numba, tqdm, h5py for the CLI).
+"""
 
 import numpy as np
 from numba import njit

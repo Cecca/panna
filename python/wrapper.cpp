@@ -2,8 +2,12 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
+#include <atomic>
+#include <chrono>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <variant>
 #include <vector>
 
@@ -161,7 +165,7 @@ struct TrieIndex {
     }
 };
 
-nb::tuple tree_to_pytuple(std::vector<panna::Edge> & tree) {
+nb::tuple tree_to_pytuple(const std::vector<panna::Edge> & tree) {
     size_t tree_size = tree.size();
     float* weights = new float[tree_size];
     uint32_t* ids = new uint32_t[tree_size * 2];
@@ -221,6 +225,31 @@ struct EMST_exposed {
 
     Variants inner;
     EuclideanHashFamily family;
+
+    // Anytime driver state: a background worker runs the collector while
+    // Python polls throttled snapshots. `control`/`sink` are shared with the
+    // C++ side (same pattern as the internal Billboard); `final_*` holds the
+    // joined result. Only one active run per object; the destructor joins a
+    // stray worker so a forgotten run can never outlive the object.
+    std::shared_ptr<panna::AnytimeControl> control;
+    panna::SnapshotSink sink;
+    std::atomic<bool> running{ false };
+    std::atomic<bool> done{ false };
+    std::atomic<bool> accepted{ false };
+    std::thread worker;
+    std::mutex final_mutex;
+    float final_weight = std::numeric_limits<float>::quiet_NaN();
+    std::vector<panna::Edge> final_tree;
+
+    ~EMST_exposed() {
+        if ( worker.joinable() ) {
+            if ( control != nullptr ) {
+                control->pause_requested.store( false, std::memory_order_release );
+                control->stop_requested.store( true, std::memory_order_release );
+            }
+            worker.join();
+        }
+    }
 
     // Constructor to be called from Python. It takes a NumPy array and optional keyword arguments.
     EMST_exposed(const nb::ndarray<float, nb::c_contig>& data_in, nb::kwargs kwargs) {
@@ -330,6 +359,186 @@ struct EMST_exposed {
         auto tree = std::visit( []( auto& index ) { return index.find_tree().second; }, inner );
         reweight_with_euclidean( tree );
         return tree_to_pytuple( tree );
+    }
+
+    /// Start an anytime run in a background thread and return immediately.
+    /// `k = 0` selects the Euclidean path (`find_tree`), `k > 0` the mutual
+    /// reachability path (`find_tree_mutual_reachability_distance(k)`).
+    /// The GIL is released while the C++ workers run; poll `progress()` /
+    /// `snapshot()`, steer with `pause()` / `resume()`, and finish with
+    /// `accept()` (keep current tree) or `wait()` (run to convergence).
+    /// Only one run may be active at a time per object.
+    void start_anytime( size_t k = 0 ) {
+        if ( worker.joinable() ) {
+            throw std::runtime_error( "an anytime run is already active on this object" );
+        }
+        if ( running.load( std::memory_order_acquire ) ) {
+            throw std::runtime_error( "an anytime run is already active on this object" );
+        }
+        control = std::make_shared<panna::AnytimeControl>();
+        sink = panna::make_snapshot_sink();
+        done.store( false, std::memory_order_release );
+        accepted.store( false, std::memory_order_release );
+        running.store( true, std::memory_order_release );
+        final_weight = std::numeric_limits<float>::quiet_NaN();
+        final_tree.clear();
+        if ( k == 0 ) {
+            worker = std::thread( [this]() {
+                auto res = std::visit(
+                    [ctrl = control.get(), sk = sink]( auto& index ) {
+                        return index.find_tree( ctrl, sk );
+                    },
+                    inner );
+                std::lock_guard<std::mutex> lock( final_mutex );
+                final_weight = res.first;
+                final_tree = std::move( res.second );
+                reweight_with_euclidean( final_tree );
+                done.store( true, std::memory_order_release );
+                running.store( false, std::memory_order_release );
+            } );
+        } else {
+            worker = std::thread( [this, k]() {
+                auto res = std::visit(
+                    [ctrl = control.get(), sk = sink, k]( auto& index ) {
+                        auto out = index.find_tree_mutual_reachability_distance( k, ctrl, sk );
+                        return std::make_pair( 0.0f, std::move( out.first ) );
+                    },
+                    inner );
+                std::lock_guard<std::mutex> lock( final_mutex );
+                final_weight = res.first;
+                final_tree = std::move( res.second );
+                reweight_with_euclidean( final_tree );
+                done.store( true, std::memory_order_release );
+                running.store( false, std::memory_order_release );
+            } );
+        }
+    }
+
+    void pause() {
+        auto ctrl = control;
+        if ( !running.load( std::memory_order_acquire ) || ctrl == nullptr ) {
+            throw std::runtime_error( "no active anytime run to pause" );
+        }
+        ctrl->pause_requested.store( true, std::memory_order_release );
+    }
+
+    void resume() {
+        auto ctrl = control;
+        if ( !running.load( std::memory_order_acquire ) || ctrl == nullptr ) {
+            throw std::runtime_error( "no active anytime run to resume" );
+        }
+        ctrl->pause_requested.store( false, std::memory_order_release );
+    }
+
+    bool is_paused() const {
+        auto ctrl = control;
+        return running.load( std::memory_order_acquire ) && ctrl != nullptr &&
+            ctrl->pause_requested.load( std::memory_order_acquire );
+    }
+
+    bool is_running() const {
+        return running.load( std::memory_order_acquire );
+    }
+
+    bool is_done() const {
+        return done.load( std::memory_order_acquire );
+    }
+
+    // Full live view of the currently published snapshot, including the
+    // current tree (src, dst, mutual-reachability weight per row). Callable
+    // while the run is paused or running; the throttled C++ publisher keeps
+    // each call to a cheap shared_ptr swap plus one tree copy here.
+    nb::dict snapshot() {
+        auto sk = sink;
+        if ( sk == nullptr ) {
+            throw std::runtime_error( "no anytime run started yet" );
+        }
+        // Read `done` before the snapshot: the worker force-publishes the
+        // final snapshot before setting `done`, so an observed `done = true`
+        // guarantees the snapshot loaded below is that final one (the
+        // release/acquire pair on `done` publishes the earlier store to us).
+        const bool done_now = done.load( std::memory_order_acquire );
+        auto snap = sk->load( std::memory_order_acquire );
+        nb::dict out;
+        out["tree_complete"] = snap->tree_complete;
+        out["converged"] = snap->converged;
+        out["done"] = done_now;
+        out["total_weight"] = snap->total_weight;
+        out["confirmed_weight"] = snap->confirmed_weight;
+        out["weight_lower_bound"] = snap->weight_lower_bound;
+        out["heaviest_confirmed_edge"] = snap->heaviest_confirmed_edge;
+        out["confirmed_edges"] = snap->confirmed_edges;
+        out["edges_to_confirm"] = snap->edges_to_confirm;
+        out["completed_repetitions"] = snap->completed_repetitions;
+        out["prefix"] = snap->prefix;
+        out["elapsed_ms"] = snap->elapsed_ms;
+        auto tree = tree_to_pytuple( snap->tree );
+        out["edges"] = nb::cast<nb::tuple>( tree )[1];
+        out["weights"] = nb::cast<nb::tuple>( tree )[0];
+        return out;
+    }
+
+    // Lightweight poll for the monitor loop: same numbers, no tree copy.
+    nb::dict progress() {
+        auto sk = sink;
+        if ( sk == nullptr ) {
+            throw std::runtime_error( "no anytime run started yet" );
+        }
+        // `done` first, then the snapshot -- see `snapshot()` for the
+        // ordering rationale (done=true implies the final snapshot is out).
+        const bool done_now = done.load( std::memory_order_acquire );
+        auto snap = sk->load( std::memory_order_acquire );
+        nb::dict out;
+        out["done"] = done_now;
+        out["tree_complete"] = snap->tree_complete;
+        out["converged"] = snap->converged;
+        out["total_weight"] = snap->total_weight;
+        out["confirmed_weight"] = snap->confirmed_weight;
+        out["weight_lower_bound"] = snap->weight_lower_bound;
+        out["confirmed_edges"] = snap->confirmed_edges;
+        out["edges_to_confirm"] = snap->edges_to_confirm;
+        out["completed_repetitions"] = snap->completed_repetitions;
+        out["prefix"] = snap->prefix;
+        out["elapsed_ms"] = snap->elapsed_ms;
+        return out;
+    }
+
+    /// Accept the current tree and stop the run early: unpause if needed,
+    /// signal the collector to finish, join the worker, and return
+    /// `(weights, edges)` in the usual format. If the run already converged,
+    /// this just returns the final tree.
+    nb::tuple accept() {
+        if ( !worker.joinable() ) {
+            throw std::runtime_error( "no active anytime run to accept" );
+        }
+        auto ctrl = control;
+        if ( ctrl != nullptr ) {
+            ctrl->pause_requested.store( false, std::memory_order_release );
+            if ( !done.load( std::memory_order_acquire ) ) {
+                ctrl->stop_requested.store( true, std::memory_order_release );
+            }
+        }
+        {
+            nb::gil_scoped_release release;
+            worker.join();
+        }
+        accepted.store( true, std::memory_order_release );
+        std::lock_guard<std::mutex> lock( final_mutex );
+        return tree_to_pytuple( final_tree );
+    }
+
+    /// Block until the run converges and return `(weights, edges)`.
+    nb::tuple wait() {
+        if ( !worker.joinable() ) {
+            throw std::runtime_error( "no active anytime run to wait on" );
+        }
+        {
+            nb::gil_scoped_release release;
+            worker.join();
+        }
+        accepted.store( true, std::memory_order_release );
+        std::lock_guard<std::mutex> lock( final_mutex );
+        return tree_to_pytuple( final_tree );
     }
 
     nb::tuple find_mst_exact() {
@@ -592,6 +801,26 @@ NB_MODULE( _panna_impl, m ) {
         .def("find_mst", &EMST_exposed::find_mst,
              "Find the minimum spanning tree (MST) for the dataset.")
         .def("stats", &EMST_exposed::stats,
-             "Return a dictionary with execution-related statistics");
+             "Return a dictionary with execution-related statistics")
+        .def("start_anytime", &EMST_exposed::start_anytime, nb::arg("k") = 0,
+             "Start an anytime run in a background thread (k=0 Euclidean, "
+             "k>0 mutual reachability) and return immediately. Steer it with "
+             "pause()/resume(), poll progress()/snapshot(), finish with "
+             "accept() or wait().")
+        .def("pause", &EMST_exposed::pause,
+             "Freeze the run at the next update boundary; workers drain, no work is lost.")
+        .def("resume", &EMST_exposed::resume, "Resume a paused run.")
+        .def("is_paused", &EMST_exposed::is_paused, "True while a pause is in effect.")
+        .def("is_running", &EMST_exposed::is_running, "True while the worker thread is alive.")
+        .def("is_done", &EMST_exposed::is_done, "True once the run converged or was accepted.")
+        .def("progress", &EMST_exposed::progress,
+             "Lightweight poll of the live bounds (no tree copy).")
+        .def("snapshot", &EMST_exposed::snapshot,
+             "Full live view of the current tree and bounds. Call while paused "
+             "(or running) and decide whether to resume or accept().")
+        .def("accept", &EMST_exposed::accept,
+             "Stop early and return the current tree as (weights, edges).")
+        .def("wait", &EMST_exposed::wait,
+             "Block until convergence and return the final tree as (weights, edges).");
 
 }

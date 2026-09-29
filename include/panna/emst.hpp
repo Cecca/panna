@@ -55,6 +55,38 @@ namespace panna {
         const size_t confirmed_edges;
     };
 
+    /// A point-in-time view of an anytime EMST computation, safe to copy
+    /// across threads. The collector loop fills one of these in after every
+    /// processed update; Python polls it while the workers keep running.
+    /// `tree_complete` is true once the collector holds a full n-1 edge tree
+    /// (which may still be improving), `converged` once the epsilon stopping
+    /// condition fired. `weight_lower_bound` is
+    /// `confirmed_weight + edges_to_confirm * heaviest_confirmed_edge`.
+    struct AnytimeSnapshot {
+        bool tree_complete = false;
+        bool converged = false;
+        float total_weight = std::numeric_limits<float>::infinity();
+        float confirmed_weight = 0.0f;
+        float weight_lower_bound = 0.0f;
+        float heaviest_confirmed_edge = 0.0f;
+        size_t confirmed_edges = 0;
+        size_t edges_to_confirm = 0;
+        size_t completed_repetitions = 0;
+        size_t prefix = 0;
+        uint64_t elapsed_ms = 0;
+        std::vector<Edge> tree;
+    };
+
+    /// Cooperative pause/resume control shared between the Python-facing
+    /// driver and the collector loop. `pause_requested` freezes the collector
+    /// at the next update boundary (workers drain into the channel, nobody is
+    /// killed); `stop_requested` asks the driver to return the current tree
+    /// early, as if the stopping condition had fired.
+    struct AnytimeControl {
+        std::atomic<bool> pause_requested{ false };
+        std::atomic<bool> stop_requested{ false };
+    };
+
     template <typename Edge>
     static void kruskal( DSU& dsu, std::vector<Edge>& edge_list, std::vector<Edge>& output ) {
         for ( const auto& edge : edge_list ) {
@@ -243,12 +275,102 @@ namespace panna {
         DSU completion_filter; // mirror of union_find for complete_arbitrarily
         DSU confirmed_filter;  // published filter; refreshed only on decide partials
         std::vector<Edge> merge_scratch;
+        // Last evaluated stopping-condition numbers, refreshed on decide
+        // partials; the anytime snapshot reads these without recomputation.
+        bool has_decide = false;
+        float last_total_weight = std::numeric_limits<float>::infinity();
+        float last_confirmed_weight = 0.0f;
+        float last_heaviest_confirmed = 0.0f;
+        size_t last_confirmed_edges = 0;
+        size_t last_edges_to_confirm = 0;
 
         explicit ReducerState( uint32_t n ):
             tree(), completed(), union_find( n ), completion_filter( n ),
             confirmed_filter( n ), merge_scratch() {
         }
     };
+
+    /// Copy-on-write snapshot sink shared with the Python driver: the
+    /// collector replaces the pointed-to snapshot (throttled), readers take
+    /// the shared_ptr and read it without locking.
+    using SnapshotSink = std::shared_ptr<std::atomic<std::shared_ptr<const AnytimeSnapshot>>>;
+
+    static SnapshotSink make_snapshot_sink() {
+        auto sink = std::make_shared<std::atomic<std::shared_ptr<const AnytimeSnapshot>>>();
+        sink->store( std::make_shared<const AnytimeSnapshot>(), std::memory_order_release );
+        return sink;
+    }
+
+    /// Publish a throttled copy of the collector state into `sink`. Throttling
+    /// (at most one deep copy of the tree every 100ms) keeps the per-partial
+    /// overhead negligible on fast prefixes. `tree_override`, when non-null,
+    /// is published instead of `state.tree` (used to expose the completed
+    /// spanning tree as the retrievable result) and `total_weight` is then
+    /// recomputed from the override itself, so the published total always
+    /// matches the retrievable tree exactly. `force` bypasses the throttle;
+    /// the collector calls the helper once with `force = true` right before
+    /// returning, so pollers that observe `done` see the final state instead
+    /// of the last throttled mid-run snapshot.
+    static void maybe_publish_snapshot( const ReducerState& state,
+                                        size_t prefix,
+                                        size_t completed_repetitions,
+                                        const std::chrono::steady_clock::time_point& start_time,
+                                        bool converged,
+                                        const SnapshotSink& sink,
+                                        const std::vector<Edge>* tree_override = nullptr,
+                                        bool force = false ) {
+        if ( sink == nullptr ) {
+            return;
+        }
+        using clock = std::chrono::steady_clock;
+        static thread_local clock::time_point last_publish = clock::time_point{};
+        const auto now = clock::now();
+        if ( !force && now - last_publish < std::chrono::milliseconds( 100 ) ) {
+            return;
+        }
+        last_publish = now;
+        auto snap = std::make_shared<AnytimeSnapshot>();
+        const std::vector<Edge>& tree = ( tree_override != nullptr ) ? *tree_override : state.tree;
+        snap->tree = tree;
+        snap->tree_complete = ( tree.size() > 0 );
+        snap->converged = converged;
+        snap->completed_repetitions = completed_repetitions;
+        snap->prefix = prefix;
+        snap->elapsed_ms = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>( now - start_time ).count() );
+        if ( state.has_decide ) {
+            snap->confirmed_weight = state.last_confirmed_weight;
+            snap->heaviest_confirmed_edge = state.last_heaviest_confirmed;
+            snap->confirmed_edges = state.last_confirmed_edges;
+            snap->edges_to_confirm = state.last_edges_to_confirm;
+            snap->weight_lower_bound = state.last_confirmed_weight +
+                state.last_edges_to_confirm * state.last_heaviest_confirmed;
+        }
+        // An overridden (final) tree always reports its own weight; otherwise
+        // trust the last decide's number, falling back to a direct sum.
+        if ( tree_override != nullptr || !state.has_decide ) {
+            float total = 0.0f;
+            for ( const auto& e : tree ) {
+                total += e.weight;
+            }
+            snap->total_weight = total;
+        } else {
+            snap->total_weight = state.last_total_weight;
+        }
+        // One bounds line at the same cadence as the publish (<=10/s): the
+        // monitor polls the sink, but a human tailing the log still sees the
+        // anytime bounds without the per-partial flood.
+        LOG_INFO( "logger", "anytime",
+                  "total_weight", snap->total_weight,
+                  "weight_lower_bound", snap->weight_lower_bound,
+                  "confirmed_weight", snap->confirmed_weight,
+                  "confirmed_edges", snap->confirmed_edges,
+                  "reps", snap->completed_repetitions,
+                  "prefix", snap->prefix,
+                  "elapsed_ms", snap->elapsed_ms );
+        sink->store( std::shared_ptr<const AnytimeSnapshot>( std::move( snap ) ),
+                     std::memory_order_release );
+    }
 
     /// Simulate a run of Kruskal's algorithm, assuming both input vectors are sorted.
     /// Report in the output vector the edges from `new_edges` that would be
@@ -742,9 +864,102 @@ namespace panna {
         std::vector<Edge> tree;
         DSU filter;
         CoreDistances core_distances;
+        // Last evaluated stopping-condition numbers, refreshed on decide
+        // partials; mirrors `ReducerState` so the MR path can feed the same
+        // anytime snapshot helper.
+        bool has_decide = false;
+        float last_total_weight = std::numeric_limits<float>::infinity();
+        float last_confirmed_weight = 0.0f;
+        float last_heaviest_confirmed = 0.0f;
+        size_t last_confirmed_edges = 0;
+        size_t last_edges_to_confirm = 0;
 
         explicit MRReducerState( uint32_t n ): tree(), filter( n ), core_distances() {
         }
+    };
+
+    /// `ReducerState`-shaped read-only view over `MRReducerState` so the MR
+    /// collector can reuse `maybe_publish_snapshot` without duplicating it.
+    struct MRReducerStateView {
+        const std::vector<Edge>& tree;
+        bool has_decide;
+        float last_total_weight;
+        float last_confirmed_weight;
+        float last_heaviest_confirmed;
+        size_t last_confirmed_edges;
+        size_t last_edges_to_confirm;
+
+        explicit MRReducerStateView( const MRReducerState& s ):
+            tree( s.tree ), has_decide( s.has_decide ),
+            last_total_weight( s.last_total_weight ),
+            last_confirmed_weight( s.last_confirmed_weight ),
+            last_heaviest_confirmed( s.last_heaviest_confirmed ),
+            last_confirmed_edges( s.last_confirmed_edges ),
+            last_edges_to_confirm( s.last_edges_to_confirm ) {
+        }
+    };
+
+    /// Publish a throttled MR snapshot through the same sink/helper the
+    /// Euclidean path uses. Takes the view (not `ReducerState`) so no
+    /// DSU/tree copies happen on the polling path. `tree_override`/`force`
+    /// mirror `maybe_publish_snapshot`: the collector force-publishes the
+    /// returned (reweighted) tree once, right before returning.
+    static void maybe_publish_mr_snapshot( const MRReducerStateView& view,
+                                           size_t prefix,
+                                           size_t completed_repetitions,
+                                           const std::chrono::steady_clock::time_point& start_time,
+                                           bool converged,
+                                           const SnapshotSink& sink,
+                                           const std::vector<Edge>* tree_override = nullptr,
+                                           bool force = false ) {
+        if ( sink == nullptr ) {
+            return;
+        }
+        using clock = std::chrono::steady_clock;
+        static thread_local clock::time_point last_publish = clock::time_point{};
+        const auto now = clock::now();
+        if ( !force && now - last_publish < std::chrono::milliseconds( 100 ) ) {
+            return;
+        }
+        last_publish = now;
+        auto snap = std::make_shared<AnytimeSnapshot>();
+        const std::vector<Edge>& tree =
+            ( tree_override != nullptr ) ? *tree_override : view.tree;
+        snap->tree = tree;
+        snap->tree_complete = ( tree.size() > 0 );
+        snap->converged = converged;
+        snap->completed_repetitions = completed_repetitions;
+        snap->prefix = prefix;
+        snap->elapsed_ms = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>( now - start_time ).count() );
+        if ( view.has_decide ) {
+            snap->confirmed_weight = view.last_confirmed_weight;
+            snap->heaviest_confirmed_edge = view.last_heaviest_confirmed;
+            snap->confirmed_edges = view.last_confirmed_edges;
+            snap->edges_to_confirm = view.last_edges_to_confirm;
+            snap->weight_lower_bound = view.last_confirmed_weight +
+                view.last_edges_to_confirm * view.last_heaviest_confirmed;
+        }
+        if ( tree_override != nullptr || !view.has_decide ) {
+            float total = 0.0f;
+            for ( const auto& e : tree ) {
+                total += e.weight;
+            }
+            snap->total_weight = total;
+        } else {
+            snap->total_weight = view.last_total_weight;
+        }
+        // Same throttled bounds line as the Euclidean path (see above).
+        LOG_INFO( "logger", "anytime",
+                  "total_weight", snap->total_weight,
+                  "weight_lower_bound", snap->weight_lower_bound,
+                  "confirmed_weight", snap->confirmed_weight,
+                  "confirmed_edges", snap->confirmed_edges,
+                  "reps", snap->completed_repetitions,
+                  "prefix", snap->prefix,
+                  "elapsed_ms", snap->elapsed_ms );
+        sink->store( std::shared_ptr<const AnytimeSnapshot>( std::move( snap ) ),
+                     std::memory_order_release );
     };
 
     template <typename Dataset, typename Hasher, typename Distance>
@@ -1093,12 +1308,11 @@ namespace panna {
                   oitem = work.receive() ) {
                 const size_t prefix = oitem->prefix;
                 const size_t repetition = oitem->repetition;
-                LOG_INFO( "tid", tid, "repetition", repetition, "prefix", prefix, "logger", "worker" );
-                Timer _timer("worker-repetition");
+                LOG_DEBUG( "tid", tid, "repetition", repetition, "prefix", prefix, "logger", "worker" );
                 if ( found ) {
                     // Tree already found: skip the work but still send a (empty) partial
                     // so the driver's per-prefix drain count stays balanced.
-                    LOG_INFO( "tid", tid, "logger", "worker", "msg", "tree found, skipping work item" );
+                    LOG_DEBUG( "tid", tid, "logger", "worker", "msg", "tree found, skipping work item" );
                     partials.send( std::vector<Edge>() );
                     continue;
                 }
@@ -1140,7 +1354,7 @@ namespace panna {
                     } );
                 float avg_distance = sum_distances / avg_denom;
                 // clang-format off
-                LOG_INFO("logger", "worker", "tid", tid, "repetition", repetition, "prefix", prefix,
+                LOG_DEBUG("logger", "worker", "tid", tid, "repetition", repetition, "prefix", prefix,
                           "cnt_distances", cnt_dist, "cnt_collisions", cnt_collisions,
                           "average_distance", avg_distance,
                           "min_distance", min_distance,
@@ -1170,11 +1384,10 @@ namespace panna {
                   oitem = work.receive() ) {
                 const size_t prefix = oitem->prefix;
                 const size_t repetition = oitem->repetition;
-                Timer _timer("worker-repetition");
                 if ( found ) {
                     // Tree already found: skip the work but still send a (empty) partial
                     // so the driver's per-prefix drain count stays balanced.
-                    LOG_INFO(
+                    LOG_DEBUG(
                         "tid", tid, "logger", "worker", "msg", "tree found, skipping work item" );
                     MRPartial partial;
                     partials.send( std::move( partial ) );
@@ -1189,7 +1402,7 @@ namespace panna {
                 // memory usage we have to update them.
                 std::vector<Edge> local_tree( rr->tree );
                 CoreDistances neighborhoods(rr->neighborhoods);
-                LOG_INFO(
+                LOG_DEBUG(
                     "tid", tid, "repetition", repetition, "prefix", prefix, "logger", "worker" );
                 // The edges we have to keep even if they are not part of the tree,
                 // because they might be updated to a smaller weight in the future
@@ -1218,8 +1431,8 @@ namespace panna {
                             neighborhoods.update(e);
                         }
                         avg_denom += updates.size();
-                        LOG_INFO("logger", "worker", "tid", tid, "repetition", repetition,
-                                 "prefix", "prefix", "updates-size", updates.size());
+                        LOG_DEBUG("logger", "worker", "tid", tid, "repetition", repetition,
+                                  "prefix", prefix, "updates-size", updates.size());
                         update_tree( local_tree, updates, neighborhoods );
                         // updates.clear();
                         expect( local_tree.size() > 0 );
@@ -1228,7 +1441,7 @@ namespace panna {
                     } );
                 float avg_distance = sum_distances / avg_denom;
                 // clang-format off
-                LOG_INFO("logger", "worker", "tid", tid, "repetition", repetition, "prefix", prefix,
+                LOG_DEBUG("logger", "worker", "tid", tid, "repetition", repetition, "prefix", prefix,
                           "cnt_distances", cnt_dist, "cnt_collisions", cnt_collisions,
                           "average_distance", avg_distance,
                           "min_distance", min_distance,
@@ -1240,8 +1453,8 @@ namespace panna {
                 // std::vector<Edge> possibly_useful_edges;
                 neighborhoods.diff(rr->neighborhoods, partial.core_distance_edges);
                 // clang-format off
-                LOG_INFO("logger", "worker", "tid", tid, "repetition", repetition,
-                         "prefix", "prefix", "core-distances-diff", partial.core_distance_edges.size());
+                LOG_DEBUG("logger", "worker", "tid", tid, "repetition", repetition,
+                          "prefix", prefix, "core-distances-diff", partial.core_distance_edges.size());
                 // clang-format on
                 partial.tree_edges = std::move( local_tree );
                 // TODO: send core distance edges and tree edges separately
@@ -1250,9 +1463,17 @@ namespace panna {
         }
 
         /// find the minimum spanning tree, using channels to handle parallelism
-        std::pair<float, std::vector<Edge>> find_tree() {
+        ///
+        /// When `control`/`snapshot_sink` are provided the run becomes
+        /// interruptible: the collector honors pause/stop requests and
+        /// publishes throttled `AnytimeSnapshot`s. Passing nullptrs keeps the
+        /// original blocking behavior bit-for-bit.
+        std::pair<float, std::vector<Edge>> find_tree( AnytimeControl* control = nullptr,
+                                                       SnapshotSink snapshot_sink = nullptr ) {
             clear();
             const auto find_start_t = std::chrono::steady_clock::now();
+            // `maybe_publish_snapshot` expects the run start time; it is the same.
+            const auto& start_time = find_start_t;
 
             std::vector<float> breaks;
             if constexpr ( Hasher::Builder::fits_to_distance ) {
@@ -1318,6 +1539,13 @@ namespace panna {
                                       std::ref( partials ) );
             }
 
+            // Bookkeeping for the forced final publish below: the last drained
+            // prefix/repetition, and whether the epsilon stopping condition
+            // (rather than an early accept) is what fired `found`.
+            size_t last_prefix = 0;
+            size_t last_completed_repetitions = 0;
+            bool converged_fired = false;
+
             bool first_build = true;
             for ( const float distance_break : breaks ) {
                 if (distance_break == 0.0) {
@@ -1363,10 +1591,31 @@ namespace panna {
                             continue;
                         }
                         std::vector<Edge> update = std::move( *local_tree );
+                        // Honor a cooperative pause: freeze the collector here,
+                        // at an update boundary, keeping the owned state intact.
+                        // Workers have already produced their partials into the
+                        // channel; spinning (not blocking the channel) lets the
+                        // accept path interrupt us via `stop_requested`.
+                        if ( control != nullptr ) {
+                            while ( control->pause_requested.load( std::memory_order_acquire ) &&
+                                    !control->stop_requested.load( std::memory_order_acquire ) &&
+                                    !found.load( std::memory_order_acquire ) ) {
+                                std::this_thread::sleep_for( std::chrono::milliseconds( 5 ) );
+                                maybe_publish_snapshot( state,
+                                                        prefix,
+                                                        completed_repetitions,
+                                                        start_time,
+                                                        found.load(),
+                                                        snapshot_sink );
+                            }
+                            if ( control->stop_requested.load( std::memory_order_acquire ) ) {
+                                found = true;
+                            }
+                        }
                         // clang-format off
-                        LOG_INFO( "logger", "collector",
-                                  "msg", "received update",
-                                  "update-size", update.size() );
+                        LOG_DEBUG( "logger", "collector",
+                                   "msg", "received update",
+                                   "update-size", update.size() );
                         // clang-format on
 
                         // Merge the incoming partial into the owned tree using the
@@ -1377,10 +1626,10 @@ namespace panna {
                         std::swap( state.tree, state.merge_scratch );
                         update.clear();
                         // clang-format off
-                        LOG_INFO( "logger", "collector",
-                                  "tree-size", state.tree.size(),
-                                  "prefix", prefix,
-                                  "completed-repetitions", completed_repetitions );
+                        LOG_DEBUG( "logger", "collector",
+                                   "tree-size", state.tree.size(),
+                                   "prefix", prefix,
+                                   "completed-repetitions", completed_repetitions );
                         // clang-format on
 
                         // state.tree is the clean found forest; a forest with k edges
@@ -1414,9 +1663,9 @@ namespace panna {
                                         .count();
                                 if ( added_edges > 0 ) {
                                     // clang-format off
-                                    LOG_INFO( "msg", "completed tree with arbitrary edges",
-                                              "elapsed_ms", elapsed_ms,
-                                              "added_edges", added_edges );
+                                    LOG_DEBUG( "msg", "completed tree with arbitrary edges",
+                                               "elapsed_ms", elapsed_ms,
+                                               "added_edges", added_edges );
                                     // clang-format on
                                 }
                                 eval = &state.completed;
@@ -1429,18 +1678,17 @@ namespace panna {
                                 float weight_lower_bound =
                                     stop.confirmed_weight +
                                     stop.edges_to_confirm * stop.heaviest_confirmed_edge;
-                                LOG_INFO( "weight-lower-bound", weight_lower_bound );
                                 bool should_stop =
                                     stop.total_weight <= ( 1 + epsilon ) * weight_lower_bound;
                                 // clang-format off
-                                LOG_INFO( "logger", "collector",
-                                          "stop.total_weight", stop.total_weight,
-                                          "stop.confirmed_weight", stop.confirmed_weight,
-                                          "stop.heaviest_confirmed_edge", stop.heaviest_confirmed_edge,
-                                          "stop.edges_to_confirm", stop.edges_to_confirm,
-                                          "heaviest_edge", eval->at(num_data-2).weight,
-                                          "weight_lower_bound", weight_lower_bound,
-                                          "should_stop", should_stop );
+                                LOG_DEBUG( "logger", "collector",
+                                           "stop.total_weight", stop.total_weight,
+                                           "stop.confirmed_weight", stop.confirmed_weight,
+                                           "stop.heaviest_confirmed_edge", stop.heaviest_confirmed_edge,
+                                           "stop.edges_to_confirm", stop.edges_to_confirm,
+                                           "heaviest_edge", eval->at(num_data-2).weight,
+                                           "weight_lower_bound", weight_lower_bound,
+                                           "should_stop", should_stop );
                                 // clang-format on
                                 max_weight = eval->back().weight;
                                 float mean_weight = 0.0;
@@ -1448,12 +1696,12 @@ namespace panna {
                                     mean_weight += e.weight;
                                 }
                                 mean_weight /= eval->size();
-                                LOG_INFO( "logger",
-                                          "collector",
-                                          "max-weight",
-                                          max_weight.load(),
-                                          "mean-weight",
-                                          mean_weight );
+                                LOG_DEBUG( "logger",
+                                           "collector",
+                                           "max-weight",
+                                           max_weight.load(),
+                                           "mean-weight",
+                                           mean_weight );
                                 profile.push_back( ExecutionProfileElement{
                                     .elapsed_ms =
                                         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1472,11 +1720,20 @@ namespace panna {
                                 if ( should_stop ) {
                                     LOG_INFO( "msg", "tree found, signalling stop" );
                                     found = true;
+                                    converged_fired = true;
                                     tree_weight = stop.total_weight;
                                     // if completion was needed, the spanning result lives
                                     // in state.completed; publish that as the final tree.
                                     publish_completed = ( num_components > 1 );
                                 }
+                                // Remember the stopping-condition numbers for the
+                                // anytime snapshot (no recomputation on poll).
+                                state.has_decide = true;
+                                state.last_total_weight = stop.total_weight;
+                                state.last_confirmed_weight = stop.confirmed_weight;
+                                state.last_heaviest_confirmed = stop.heaviest_confirmed_edge;
+                                state.last_confirmed_edges = stop.confirmed_edges;
+                                state.last_edges_to_confirm = stop.edges_to_confirm;
                                 // Refresh the confirmed-edge filter from the evaluated tree.
                                 state.confirmed_filter.reset();
                                 for ( size_t idx = 0; idx < stop.confirmed_edges; idx++ ) {
@@ -1494,7 +1751,15 @@ namespace panna {
                             publish_completed ? state.completed : state.tree;
                         running_result.update( RunningResult( std::vector<Edge>( pub ),
                                                               DSU( state.confirmed_filter ) ) );
+                        maybe_publish_snapshot( state,
+                                                prefix,
+                                                completed_repetitions,
+                                                start_time,
+                                                found.load(),
+                                                snapshot_sink );
                     }
+                    last_prefix = prefix;
+                    last_completed_repetitions = completed_repetitions;
                     LOG_INFO( "msg", "completed prefix", "prefix", prefix );
                 }
             }
@@ -1530,11 +1795,27 @@ namespace panna {
                       num_collisions,
                       "num_total_pairs",
                       ( (size_t)num_data - 1 ) * (size_t)num_data / 2 );
+
+            // Force-publish the final state, bypassing the 100 ms throttle.
+            // The wrapper sets `done` only after `find_tree` returns, so any
+            // poller that observes `done = true` is guaranteed to see this
+            // snapshot rather than a stale mid-run one (the release/acquire
+            // pair on `done` orders this store before the flag flip).
+            maybe_publish_snapshot( state,
+                                    last_prefix,
+                                    last_completed_repetitions,
+                                    start_time,
+                                    converged_fired,
+                                    snapshot_sink,
+                                    &tree,
+                                    /*force=*/true );
             return { tree_weight, tree };
         }
 
         std::pair<std::vector<Edge>, CoreDistances>
-        find_tree_mutual_reachability_distance( size_t num_neighbors ) {
+        find_tree_mutual_reachability_distance( size_t num_neighbors,
+                                                AnytimeControl* control = nullptr,
+                                                SnapshotSink snapshot_sink = nullptr ) {
             clear();
             const auto find_start_t = std::chrono::steady_clock::now();
 
@@ -1605,6 +1886,13 @@ namespace panna {
                                       std::ref( work ),
                                       std::ref( partials ) );
             }
+
+            // Bookkeeping for the forced final publish below, mirroring the
+            // Euclidean path: last drained prefix/repetition, and whether the
+            // epsilon stopping condition (rather than an early accept) fired.
+            size_t last_prefix = 0;
+            size_t last_completed_repetitions = 0;
+            bool converged_fired = false;
 
             bool first_build = true;
             bool seeded = false;
@@ -1678,6 +1966,24 @@ namespace panna {
                             continue;
                         }
                         MRPartial update = std::move( *partial );
+                        // Cooperative pause, same contract as the Euclidean path:
+                        // freeze at this update boundary, keep draining on resume,
+                        // and treat an accept (`stop_requested`) as `found`.
+                        if ( control != nullptr ) {
+                            while ( control->pause_requested.load( std::memory_order_acquire ) &&
+                                    !control->stop_requested.load( std::memory_order_acquire ) &&
+                                    !found.load( std::memory_order_acquire ) ) {
+                                std::this_thread::sleep_for( std::chrono::milliseconds( 5 ) );
+                            }
+                            if ( control->stop_requested.load( std::memory_order_acquire ) ) {
+                                found = true;
+                            }
+                        }
+                        if ( found ) {
+                            // discard late partials (or the one we paused on after an
+                            // accept); keep draining to balance the channel
+                            continue;
+                        }
                         // clang-format off
                         LOG_DEBUG( "logger", "collector", "msg", "received update",
                                    "update-size-core-distances", update.core_distance_edges.size());
@@ -1690,10 +1996,10 @@ namespace panna {
                         }
                         update_tree(state.tree, update.tree_edges, state.core_distances);
                         // clang-format off
-                        LOG_INFO( "logger", "collector",
-                                  "tree-size", state.tree.size(),
-                                  "prefix", prefix,
-                                  "completed-repetitions", completed_repetitions );
+                        LOG_DEBUG( "logger", "collector",
+                                   "tree-size", state.tree.size(),
+                                   "prefix", prefix,
+                                   "completed-repetitions", completed_repetitions );
                         // clang-format on
 
                         if ( state.tree.size() == num_data - 1 ) {
@@ -1702,22 +2008,21 @@ namespace panna {
                             float weight_lower_bound =
                                 stop.confirmed_weight +
                                 stop.edges_to_confirm * stop.heaviest_confirmed_edge;
-                            LOG_INFO( "weight-lower-bound", weight_lower_bound );
                             bool should_stop =
                                 stop.total_weight <= ( 1 + epsilon ) * weight_lower_bound;
                             // clang-format off
-                            LOG_INFO( "logger", "collector",
-                                      "stop.total_weight", stop.total_weight,
-                                      "stop.confirmed_weight", stop.confirmed_weight,
-                                      "stop.heaviest_confirmed_edge", stop.heaviest_confirmed_edge,
-                                      "stop.edges_to_confirm", stop.edges_to_confirm,
-                                      "heaviest_edge", state.tree.at(num_data-2).weight,
-                                      "weight_lower_bound", weight_lower_bound,
-                                      "should_stop", should_stop );
+                            LOG_DEBUG( "logger", "collector",
+                                       "stop.total_weight", stop.total_weight,
+                                       "stop.confirmed_weight", stop.confirmed_weight,
+                                       "stop.heaviest_confirmed_edge", stop.heaviest_confirmed_edge,
+                                       "stop.edges_to_confirm", stop.edges_to_confirm,
+                                       "heaviest_edge", state.tree.at(num_data-2).weight,
+                                       "weight_lower_bound", weight_lower_bound,
+                                       "should_stop", should_stop );
                             // clang-format on
                             max_weight =
                                 state.core_distances.mutual_reachability_distance( state.tree.back() );
-                            LOG_INFO( "logger", "collector", "max-weight", max_weight.load() );
+                            LOG_DEBUG( "logger", "collector", "max-weight", max_weight.load() );
                             profile.push_back( ExecutionProfileElement{
                                 .elapsed_ms =
                                     std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1736,7 +2041,16 @@ namespace panna {
                             if ( should_stop ) {
                                 LOG_INFO( "msg", "tree found, signalling stop" );
                                 found = true;
+                                converged_fired = true;
                             }
+                            // Remember the stopping-condition numbers for the
+                            // anytime snapshot (no recomputation on poll).
+                            state.has_decide = true;
+                            state.last_total_weight = stop.total_weight;
+                            state.last_confirmed_weight = stop.confirmed_weight;
+                            state.last_heaviest_confirmed = stop.heaviest_confirmed_edge;
+                            state.last_confirmed_edges = stop.confirmed_edges;
+                            state.last_edges_to_confirm = stop.edges_to_confirm;
                             // Fill the DSU filter with just the confirmed edges
                             state.filter.reset();
                             for ( size_t idx = 0; idx < stop.confirmed_edges; idx++ ) {
@@ -1752,7 +2066,15 @@ namespace panna {
                         running_result.update( MRRunningResult( std::vector<Edge>( state.tree ),
                                                                 DSU( state.filter ),
                                                                 CoreDistances( state.core_distances ) ) );
+                        maybe_publish_mr_snapshot( MRReducerStateView( state ),
+                                                   prefix,
+                                                   completed_repetitions,
+                                                   find_start_t,
+                                                   found.load(),
+                                                   snapshot_sink );
                     }
+                    last_prefix = prefix;
+                    last_completed_repetitions = completed_repetitions;
                     LOG_INFO( "msg", "completed prefix", "prefix", prefix );
                 }
             }
@@ -1800,6 +2122,18 @@ namespace panna {
                 tree[i].weight = std::max( { w, ca, cb } );
             }
 
+            // Force-publish the final state (same contract as the Euclidean
+            // path): bypass the throttle and expose the reweighted tree that
+            // `wait()` / `accept()` return, so a poller observing `done = true`
+            // sees exactly the retrievable result.
+            maybe_publish_mr_snapshot( MRReducerStateView( state ),
+                                       last_prefix,
+                                       last_completed_repetitions,
+                                       find_start_t,
+                                       converged_fired,
+                                       snapshot_sink,
+                                       &tree,
+                                       /*force=*/true );
             return { tree, core_distances };
         }
 

@@ -1,4 +1,4 @@
-"""Exact k-nearest-neighbor graph construction."""
+"""Exact k-nearest-neighbor graph construction (needs the `extras` install)."""
 
 import numpy as np
 from numba import njit, prange, get_num_threads
@@ -127,12 +127,7 @@ def write_knn(data: np.ndarray, path: Path, k: int, block_size: int = 64):
 if __name__ == "__main__":
     import argparse
 
-    try:
-        from . import datasets
-    except ImportError:
-        # Allow running this file directly, without the compiled extension
-        # that `panna/__init__.py` pulls in.
-        import datasets
+    from panna import datasets
 
     parser = argparse.ArgumentParser(
         description="Compute the exact knn graph of a dataset and store it in a hdf5 file."

@@ -1,23 +1,66 @@
-# PANNA: Playground for Approximate Nearest Neighbor Algorithms
+# wok-stir
 
-This library aims at providing useful building blocks to implement algorithms for approximate nearest neighbor search.
+Anytime Euclidean MST and mutual-reachability MST (HDBSCAN) with
+provable bounds, built on LSH forests. The computation runs in a background
+thread and publishes live **weight lower bound / total weight / confirmed
+weight** curves; you can **pause** the run, inspect the current tree, then
+**resume** or **accept-and-stop**.
 
-## Building
+## Install
 
-This is, first and foremost, a header only library requiring `C++17` and depending on [`cereal`](https://uscilab.github.io/cereal/index.html) and [`ffht`](https://github.com/FALCONN-LIB/FFHT) (both libraries are vendored in `external`).
-To integrate with other codebases simply place `include/panna` in your include path, while making sure that the headers of the dependencies (i.e. the contents of `external`) are included as well.
-
-That said, the repository includes tests and [examples](https://github.com/Cecca/panna/tree/main/examples), which are built using `cmake` with the usual steps
-
-```
-mkdir build
-cd build
-cmake -DCMAKE_BUILD_TYPE=Release ..
-make
+```bash
+pip install wok-stir            # one-shot APIs
+pip install wok-stir[monitor]   # + anytime monitoring in notebooks
 ```
 
-This produces the following executables:
+From source (needs a C++20 compiler, CMake, Python 3.12):
 
-- `build/test` to run the tests
-- `build/glove` to run the example on [`glove`](http://ann-benchmarks.com/glove-100-angular.hdf5)
-- `build/fashion` to run the example on [`fashion-mnist`](http://ann-benchmarks.com/fashion-mnist-784-euclidean.hdf5)
+```bash
+pip install .
+```
+
+Binaries target x86-64 with AVX2+FMA.
+
+## Quick start
+
+```python
+import numpy as np
+from panna.anytime import AnytimeEMST
+
+data = np.random.default_rng(0).normal(size=(20000, 64)).astype(np.float32)
+
+# k=0: Euclidean MST. k>0: mutual reachability MST with k-th neighbor cores
+# (the tree HDBSCAN clusters from).
+driver = AnytimeEMST(data, k=5, repetitions=512).start()
+
+snap = driver.pause()   # freeze at an update boundary, no work lost
+print(snap)             # total / confirmed / lower bound / gap / reps / prefix
+driver.resume()         # ...or driver.accept() to keep the current tree
+
+weights, edges = driver.wait()  # block until convergence
+```
+
+## Notebook monitor
+
+```python
+from panna.monitor import live_monitor
+
+driver = AnytimeEMST(data, k=5).start()
+fig, ax, stop = live_monitor(driver, interval=0.5)
+# live plot of lower bound / total / confirmed + Pause/Resume/Accept buttons
+weights, edges = driver.wait()
+fig.savefig("bounds.png")
+```
+
+## One-shot API
+
+```python
+from panna import EMST
+idx = EMST(data, repetitions=512)
+weights, edges = idx.find_mst()          # Euclidean
+tree, core, neigh = idx.find_mst_dbscan(5)  # mutual reachability + kNN
+```
+
+## License
+
+AGPL-3.0. See the repository for details.
