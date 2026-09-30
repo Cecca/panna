@@ -84,8 +84,18 @@ namespace panna {
         //! is no other way for a caller to measure it without paying to build
         //! a second one.
         size_t index_bytes;
+        int64_t seed_ms;      //!< wall time of the seed tree
+        int64_t index_ms;     //!< wall time of the index build
+        int64_t discovery_ms; //!< wall time from the built index to the stop
         std::vector<ProfileElement> profile;
     };
+
+    //! Milliseconds elapsed since `start`, for the timings the results report.
+    inline int64_t pair_emst_ms_since( std::chrono::steady_clock::time_point start ) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - start )
+            .count();
+    }
 
     //! Repetitions are processed in batches of this many. The batch is the unit
     //! over which the input tree and the confirmed components stay frozen, so
@@ -771,11 +781,15 @@ namespace panna {
         const float delta_per_pair = delta / static_cast<float>( n - 1 );
 
         // --- 1. seed --------------------------------------------------------
+        const auto seed_start = std::chrono::steady_clock::now();
         std::vector<Edge> best = seed_tree<Dataset, Distance>( data );
+        const int64_t seed_elapsed_ms = pair_emst_ms_since( seed_start );
 
         // --- 2. index, built once -------------------------------------------
+        const auto index_start = std::chrono::steady_clock::now();
         const ForestIndex index = build_index<Dataset, Hasher, Distance>(
             data, std::move( builder ), repetitions, best, delta_per_pair );
+        const int64_t index_elapsed_ms = pair_emst_ms_since( index_start );
         // clang-format off
         LOG_INFO( "msg", "pair forest index constructed",
                   "L", index.num_repetitions(),
@@ -784,13 +798,15 @@ namespace panna {
                   "delta", delta,
                   "epsilon", epsilon,
                   "family", index.describe_family(),
-                  "index_size_Gbytes", static_cast<double>( index.memory_usage() ) / ( 1 << 30 ) );
+                  "index_size_Gbytes", static_cast<double>( index.memory_usage() ) / ( 1 << 30 ),
+                  "index_ms", index_elapsed_ms );
         // clang-format on
 
         // --- 3. running state ------------------------------------------------
         /// Sized after the index is built, so that the memory the index took
         /// is no longer counted as available. The thread count is the one a
         /// full batch runs with, the largest any batch uses.
+        const auto discovery_start = std::chrono::steady_clock::now();
         const size_t max_threads = pair_emst_worker_count( PAIR_EMST_BATCH_REPETITIONS );
         const size_t memory_budget = static_cast<size_t>(
             PAIR_EMST_MEMORY_FRACTION * static_cast<double>( available_memory_bytes() ) );
@@ -881,12 +897,16 @@ namespace panna {
                     /// promised the full `Edge::operator<` order, so it is
                     /// established once, here, over `n - 1` edges.
                     std::sort( best.begin(), best.end() );
+                    const int64_t discovery_elapsed_ms = pair_emst_ms_since( discovery_start );
                     return PairEmstResult{ .tree = std::move( best ),
                                            .weight = stop.info.total_weight,
                                            .distances_computed = distances_computed,
                                            .prefix_at_stop = static_cast<size_t>( k ),
                                            .repetitions_at_stop = repetitions_done,
                                            .index_bytes = index.memory_usage(),
+                                           .seed_ms = seed_elapsed_ms,
+                                           .index_ms = index_elapsed_ms,
+                                           .discovery_ms = discovery_elapsed_ms,
                                            .profile = profile };
                 }
 
@@ -1008,6 +1028,9 @@ namespace panna {
         size_t prefix_at_stop;      //!< the prefix length the stopping rule fired at
         size_t repetitions_at_stop; //!< repetitions probed at that prefix
         size_t index_bytes;         //!< as in `PairEmstResult`
+        int64_t seed_ms;            //!< as in `PairEmstResult`
+        int64_t index_ms;           //!< as in `PairEmstResult`
+        int64_t discovery_ms;       //!< as in `PairEmstResult`
     };
 
     //! Observation points and switches of `pair_forest_emst_mutual_
@@ -1922,7 +1945,10 @@ namespace panna {
                                      .distances_computed = plain.distances_computed,
                                      .prefix_at_stop = plain.prefix_at_stop,
                                      .repetitions_at_stop = plain.repetitions_at_stop,
-                                     .index_bytes = plain.index_bytes };
+                                     .index_bytes = plain.index_bytes,
+                                     .seed_ms = plain.seed_ms,
+                                     .index_ms = plain.index_ms,
+                                     .discovery_ms = plain.discovery_ms };
         }
 
         /// The per-pair failure probability of the index fit and of the
@@ -1935,7 +1961,9 @@ namespace panna {
                                   static_cast<double>( n - 1 ) ) );
 
         // --- 1. seed ----------------------------------------------------------
+        const auto seed_start = std::chrono::steady_clock::now();
         const std::vector<Edge> seed = seed_tree<Dataset, Distance>( data );
+        const int64_t seed_elapsed_ms = pair_emst_ms_since( seed_start );
 
         if ( num_neighbors >= n ) {
             CoreDistances cores( n, num_neighbors );
@@ -1951,12 +1979,17 @@ namespace panna {
                                      .distances_computed = 0,
                                      .prefix_at_stop = 0,
                                      .repetitions_at_stop = 0,
-                                     .index_bytes = 0 };
+                                     .index_bytes = 0,
+                                     .seed_ms = seed_elapsed_ms,
+                                     .index_ms = 0,
+                                     .discovery_ms = 0 };
         }
 
         // --- 2. index, built once ---------------------------------------------
+        const auto index_start = std::chrono::steady_clock::now();
         const ForestIndex index = build_index<Dataset, Hasher, Distance>(
             data, std::move( builder ), repetitions, seed, delta_per_event );
+        const int64_t index_elapsed_ms = pair_emst_ms_since( index_start );
         // clang-format off
         LOG_INFO( "msg", "pair forest index constructed",
                   "L", index.num_repetitions(),
@@ -1966,9 +1999,11 @@ namespace panna {
                   "delta", delta,
                   "epsilon", epsilon,
                   "family", index.describe_family(),
-                  "index_size_Gbytes", static_cast<double>( index.memory_usage() ) / ( 1 << 30 ) );
+                  "index_size_Gbytes", static_cast<double>( index.memory_usage() ) / ( 1 << 30 ),
+                  "index_ms", index_elapsed_ms );
         // clang-format on
 
+        const auto discovery_start = std::chrono::steady_clock::now();
         /// Sized after the index is built, as in `pair_forest_emst`, but
         /// *before* the core distances are allocated: the budget charges them,
         /// and would otherwise count them twice.
@@ -2081,7 +2116,11 @@ namespace panna {
                                              .distances_computed = distances_computed,
                                              .prefix_at_stop = static_cast<size_t>( k ),
                                              .repetitions_at_stop = repetitions_done,
-                                             .index_bytes = index.memory_usage() };
+                                             .index_bytes = index.memory_usage(),
+                                             .seed_ms = seed_elapsed_ms,
+                                             .index_ms = index_elapsed_ms,
+                                             .discovery_ms =
+                                                 pair_emst_ms_since( discovery_start ) };
                 }
 
                 confirmed.reset();

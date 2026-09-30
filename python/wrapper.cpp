@@ -481,6 +481,9 @@ nb::tuple run_pair_forest_emst( const nb::ndarray<float, nb::c_contig>& data_in,
     stats["index_size_bytes"] = res.index_bytes;
     stats["prefix_at_stop"] = res.prefix_at_stop;
     stats["repetitions_at_stop"] = res.repetitions_at_stop;
+    stats["seed_ms"] = res.seed_ms;
+    stats["index_ms"] = res.index_ms;
+    stats["discovery_ms"] = res.discovery_ms;
     stats["profile"] = profile;
 
     nb::tuple tree = tree_to_pytuple( res.tree );
@@ -578,6 +581,9 @@ nb::tuple run_pair_forest_emst_mutual_reachability( const nb::ndarray<float, nb:
     stats["index_size_bytes"] = res.index_bytes;
     stats["prefix_at_stop"] = res.prefix_at_stop;
     stats["repetitions_at_stop"] = res.repetitions_at_stop;
+    stats["seed_ms"] = res.seed_ms;
+    stats["index_ms"] = res.index_ms;
+    stats["discovery_ms"] = res.discovery_ms;
 
     nb::tuple tree = tree_to_pytuple( res.tree );
     return nb::make_tuple( tree[0], tree[1], cores_numpy, stats );
