@@ -154,6 +154,12 @@ def _(datasets, excluded_shas, ground_truth, node_name, pl):
         )
         .select(pl.exclude("ground_weight"))
         .filter(pl.col("dataset").is_in(datasets))
+        # the tables pivot on algorithm and epsilon only: keeping a single LSH
+        # family prevents each cell from picking a different one
+        .filter(
+            (pl.col("algorithm") != "panna")
+            | (pl.col("parameters").struct.field("family") == "lattice")
+        )
     )
     return (experiments,)
 
@@ -165,7 +171,7 @@ def _(excluded_shas, pl):
     # the baselines.
     ground_truth = (
         pl.read_ndjson("results/emst.json", infer_schema_length=None)
-        .filter(pl.col("algorithm").str.contains("k+"))
+        .filter(pl.col("algorithm").str.contains("k+").or_(pl.col("algorithm").str.contains("panna")))
         .filter(pl.col("parameters").struct.field("epsilon") == 0.0)
         .filter(pl.col("dataset_sample_frac").is_null())
         .filter(pl.col("dataset_sha").is_in(excluded_shas).not_())
@@ -194,6 +200,12 @@ def _(excluded_shas, pl):
         .agg(ground_weight=pl.col("emst_weight").min())
     )
     return (ground_truth,)
+
+
+@app.cell
+def _(datasets, ground_truth, pl):
+    ground_truth.filter(pl.col("dataset").is_in(datasets))
+    return
 
 
 @app.cell
@@ -375,7 +387,7 @@ def _(
 
 
 @app.cell
-def _(GT, choose2, cs, datasets, pl, single_linkage_data, sizes, to_latex):
+def _(GT, cs, datasets, pl, single_linkage_data, sizes, to_latex):
     sl_error = (
         GT(
             single_linkage_data
@@ -385,7 +397,6 @@ def _(GT, choose2, cs, datasets, pl, single_linkage_data, sizes, to_latex):
                 .then(pl.col("algorithm") + "-exact")
                 .otherwise("algorithm")
                 .alias("algorithm"),
-                (pl.col("detail").struct.field("distance_count") / choose2("n")).alias("dist_frac"),
                 pl.col("parameters").struct.field("epsilon").alias("epsilon"),
             )
             .with_columns(
@@ -394,9 +405,6 @@ def _(GT, choose2, cs, datasets, pl, single_linkage_data, sizes, to_latex):
                     + "__"
                     + pl.col("epsilon").cast(pl.String).fill_null("")
                 ).alias("pivot")
-            )
-            .filter(
-                pl.col("relative_error") == pl.col("relative_error").min().over("dataset", "pivot")
             )
             .sort("dataset", "algorithm", "epsilon")
             .select("dataset", "pivot", "relative_error")
@@ -1033,6 +1041,28 @@ def _(cs, pl, to_latex):
     with open("/tmp/synth.tex", "w") as _fp:
         print(to_latex(tab_synth), file=_fp)
     tab_synth
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    # Breakdown
+    """)
+    return
+
+
+@app.cell
+def _(experiments, pl):
+    (
+        experiments
+        .filter(pl.col("algorithm") == "panna")
+        # .select(
+        #     "dataset",
+        #     pl.col("parameters").struct.field("epsilon"),
+        #     pl.col("detail").struct.field("index_s", "discovery_s")
+        # )
+    )
     return
 
 
