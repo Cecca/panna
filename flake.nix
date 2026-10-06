@@ -37,7 +37,7 @@
             # non-euclidean / high-dimensional metrics). The patch exposes
             # `pynndescent.distance_count()` and `pynndescent.reset_distance_count()`.
             pynndescent = pyprev.pynndescent.overridePythonAttrs (old: {
-              patches = (old.patches or []) ++ [./pynndescent-count-distances.patch];
+              patches = (old.patches or []) ++ [./patches/pynndescent-count-distances.patch];
               doCheck = false;
             });
           };
@@ -45,7 +45,7 @@
 
         fast-hdbscan = import ./nix/fast-hdbscan.nix {
           inherit python;
-          patch = ./fast-hdbscan-exact-mst.patch;
+          patch = ./patches/fast-hdbscan-exact-mst.patch;
         };
 
         densired = import ./nix/densired.nix {inherit python;};
