@@ -778,11 +778,6 @@ namespace panna {
             rebuild();
         }
 
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar( indices, hashes );
-        }
-
         size_t memory_usage() const {
             size_t total_size = sizeof( *this );
             total_size += indices.size() * sizeof( uint32_t );

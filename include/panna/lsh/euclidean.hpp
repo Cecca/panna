@@ -54,11 +54,6 @@ namespace panna {
             }
         }
 
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar( quantization_width, repetitions, random_vectors, offsets );
-        }
-
         static constexpr size_t get_concatenations() {
             return K;
         }
@@ -158,11 +153,6 @@ namespace panna {
 
         E2LSHBuilder( float quantization_width, size_t dimensions ):
             quantization_width( quantization_width ), dimensions( dimensions ) {
-        }
-
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar( quantization_width, dimensions );
         }
 
         void reset() {

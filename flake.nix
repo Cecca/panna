@@ -97,7 +97,6 @@
           buildInputs = with pkgs; [
             python.pkgs.build
             catch2_3
-            cereal
             hdf5
             highfive
             eigen
@@ -193,7 +192,6 @@
             highfive
             samply
             boost
-            cereal
             catch2_3
             fast-hdbscan
             densired

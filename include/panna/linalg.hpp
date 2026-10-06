@@ -490,11 +490,6 @@ namespace panna {
             }
         }
 
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar( num_products, log_num_products, random_signs );
-        }
-
         friend bool operator==( const RandomDotProducts& a,
                                 const RandomDotProducts& b ) {
             return a.num_products == b.num_products && a.log_num_products == b.log_num_products &&

@@ -30,8 +30,6 @@ int main( int , char** ) {
     using HasherBuilder = panna::E2LSHBuilder<8, Dataset>;
     using Hasher = HasherBuilder::Output;
 
-    std::string index_path( "fashion-mnist-784-e2lsh8-256.bin" );
-
     H5Easy::File file( "fashion-mnist-784-euclidean.hdf5", H5Easy::File::ReadOnly );
 
     std::vector<std::vector<float>> data =
@@ -46,12 +44,11 @@ int main( int , char** ) {
     size_t dimensions = data[0].size();
     HasherBuilder hbuilder( dimensions );
 
-    auto index = panna::Index<Dataset, Hasher, Distance>::build_or_load_from(
-        dimensions, hbuilder, 32, data, index_path );
-    // if ( !std::filesystem::exists( index_path ) ) {
-    //     std::cerr << "9666saving index" << std::endl;
-    //     index.save_to( index_path );
-    // }
+    panna::Index<Dataset, Hasher, Distance> index( dimensions, hbuilder, 32 );
+    for ( auto& p : data ) {
+        index.insert( p.begin(), p.end() );
+    }
+    index.rebuild();
     std::cerr << "index ready" << std::endl;
 
     size_t k = 10;

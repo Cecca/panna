@@ -320,16 +320,6 @@ namespace panna {
             }
         }
 
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar( data_offset,
-                scaling_factor,
-                repetitions,
-                offsets,
-                corrections,
-                projection_bias );
-        }
-
         static constexpr size_t get_concatenations() {
             return K;
         }
@@ -469,11 +459,6 @@ namespace panna {
 
         LatticeLSHBuilder( float offset, float scaling_factor, size_t dimensions ):
             offset( offset ), scaling_factor( scaling_factor ), dimensions( dimensions ) {
-        }
-
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar( offset, scaling_factor, dimensions );
         }
 
         void reset() {

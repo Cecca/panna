@@ -30,8 +30,6 @@ int main( int , char** ) {
     using HasherBuilder = panna::CrossPolytopeBuilder<3, Dataset, Distance>;
     using Hasher = HasherBuilder::Output;
 
-    std::string index_path( "glove-100-angular-cp3-256.bin" );
-
     H5Easy::File file( "glove-100-angular.hdf5", H5Easy::File::ReadOnly );
 
     std::vector<std::vector<float>> data =
@@ -45,12 +43,11 @@ int main( int , char** ) {
     size_t dimensions = data[0].size();
     HasherBuilder hbuilder( dimensions );
 
-    auto index = panna::Index<Dataset, Hasher, Distance>::build_or_load_from(
-        dimensions, hbuilder, 256, data, index_path );
-    // if ( !std::filesystem::exists( index_path ) ) {
-    //     std::cerr << "saving index" << std::endl;
-    //     index.save_to( index_path );
-    // }
+    panna::Index<Dataset, Hasher, Distance> index( dimensions, hbuilder, 256 );
+    for ( auto& p : data ) {
+        index.insert( p.begin(), p.end() );
+    }
+    index.rebuild();
     std::cerr << "index ready" << std::endl;
 
     size_t k = 10;

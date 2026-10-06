@@ -25,11 +25,6 @@ namespace panna {
         // int16_t chunk[CHUNK_SIZE];
         std::array<int16_t, CHUNK_SIZE> chunk;
 
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar( chunk );
-        }
-
         friend bool operator==( const Int16Chunk& a, const Int16Chunk& b ) {
             return a.chunk == b.chunk;
         }
@@ -103,11 +98,6 @@ namespace panna {
             padding( ( Int16Chunk::CHUNK_SIZE - ( dimensions % Int16Chunk::CHUNK_SIZE ) ) %
                      Int16Chunk::CHUNK_SIZE ),
             chunks_per_point( std::ceil( ( (float)dimensions ) / Int16Chunk::CHUNK_SIZE ) ) {
-        }
-
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar( dimensions, padding, chunks_per_point, chunks );
         }
 
         friend bool operator==( const UnitNormPoints& a, const UnitNormPoints& b ) {
@@ -230,11 +220,6 @@ namespace panna {
             dimensions( dimensions ), normalized_points( dimensions ) {
         }
 
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar( dimensions, normalized_points, squared_norms );
-        }
-
         friend bool operator==( const NormedPoints& a, const NormedPoints& b ) {
             return a.dimensions == b.dimensions && a.normalized_points == b.normalized_points &&
                    a.squared_norms == b.squared_norms;
@@ -331,11 +316,6 @@ namespace panna {
 
         EuclideanPoints( size_t dimensions ):
             dimensions( dimensions ), data( ) {
-        }
-
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar( dimensions, data );
         }
 
         friend bool operator==( const EuclideanPoints& a, const EuclideanPoints& b ) {
@@ -445,11 +425,6 @@ namespace panna {
 
         SparseSets( size_t dimensions ): dimensions( dimensions ) {
             starts.push_back( set_data.size() );
-        }
-
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar( dimensions, set_data, starts );
         }
 
         void clear() {

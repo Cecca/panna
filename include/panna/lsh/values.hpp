@@ -86,11 +86,6 @@ namespace panna {
             return K;
         };
 
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar( bits );
-        }
-
         // we use a factory function rather than a constructor to keep this
         // struct Plain Old Data.
         constexpr static BitwiseLshValue<K> make( uint32_t bits ) {
@@ -181,11 +176,6 @@ namespace panna {
         using DoubleWidth = SymbolLshValue<Symbol, 2 * K>;
 
         friend struct std::hash<SymbolLshValue<Symbol, K>>;
-
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar( hashes );
-        }
 
         //! How many concatenated hash values are stored in this value?
         constexpr static uint8_t get_concatenations() {
@@ -309,11 +299,6 @@ namespace panna {
         using DoubleWidth = ArrayLshValue<T, SIZE, 2 * K>;
 
         friend struct std::hash<ArrayLshValue<T, SIZE, K>>;
-
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar( hashes );
-        }
 
         //! How many concatenated hash values are stored in this value?
         constexpr static uint8_t get_concatenations() {

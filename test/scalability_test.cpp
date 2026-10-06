@@ -1,4 +1,5 @@
 #include <iostream>
+#include <fstream>
 #include <highfive/H5Easy.hpp>
 #include "panna/emst.hpp"
 #include "panna/lsh/euclidean.hpp"

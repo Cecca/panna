@@ -33,11 +33,6 @@ namespace panna {
             }
         }
 
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar( repetitions, random_vectors );
-        }
-
         friend bool operator==( const Simhash<K, Dataset, Distance>& a,
                                 const Simhash<K, Dataset, Distance>& b ) {
             return a.repetitions == b.repetitions && a.random_vectors == b.random_vectors;
@@ -94,11 +89,6 @@ namespace panna {
         }
 
         void fit( const Dataset&, float, size_t, float ) {
-        }
-
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar(dimensions);
         }
 
         Output build( size_t repetitions ) const {

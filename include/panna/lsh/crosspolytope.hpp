@@ -17,11 +17,6 @@ namespace panna {
         CrossPolytopeCollisionEstimates() {
         }
 
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar( probabilities, eps );
-        }
-
         friend bool operator==( const CrossPolytopeCollisionEstimates& a,
                                 const CrossPolytopeCollisionEstimates& b ) {
             return a.probabilities == b.probabilities && a.eps == b.eps;
@@ -182,11 +177,6 @@ namespace panna {
             }
         }
 
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar( repetitions, dimensions, random_dots, tl_rotated_vectors, estimates );
-        }
-
         friend bool operator==( const CrossPolytope<K, Dataset, Distance>& a,
                                 const CrossPolytope<K, Dataset, Distance>& b ) {
             return a.repetitions == b.repetitions && a.dimensions == b.dimensions &&
@@ -240,11 +230,6 @@ namespace panna {
             dimensions( dimensions ),
             estimation_repetitions( estimation_repetitions ),
             estimation_eps( estimation_eps ) {
-        }
-
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar(dimensions, estimation_repetitions, estimation_eps);
         }
 
         void reset() {

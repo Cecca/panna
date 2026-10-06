@@ -95,11 +95,6 @@ namespace panna {
 
         MinhashBuilder() {}
 
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar();
-        }
-
         void fit( Dataset& ) {
         }
 
@@ -125,11 +120,6 @@ namespace panna {
         using Builder = Minhash1BitBuilder<K, Dataset>;
 
         Minhash1Bit( size_t repetitions ): repetitions(repetitions), minhash( repetitions ) {
-        }
-
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar();
         }
 
         void hash( typename Dataset::PointHandle point,

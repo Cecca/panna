@@ -5,15 +5,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
 #include <limits>
 #include <optional>
 #include <queue>
 #include <stdexcept>
 #include <type_traits>
 
-#include "cereal/archives/binary.hpp"
 #include "panna/expect.hpp"
 #include "panna/logging.hpp"
 #include "panna/lsh/predicates.hpp"
@@ -63,17 +60,6 @@ namespace panna {
             lsh_maps.resize( repetitions );
         }
 
-        template <typename Archive>
-        void serialize( Archive& ar ) {
-            ar( repetitions,
-                dataset,
-                current_query,
-                lsh_maps,
-                builder,
-                hasher,
-                hashed_points );
-        }
-
         size_t num_repetitions() const {
             return repetitions;
         }
@@ -111,44 +97,6 @@ namespace panna {
                  a.lsh_maps == b.lsh_maps &&
                  a.hasher == b.hasher &&
                    a.hashed_points == b.hashed_points;
-        }
-
-        void save_to( std::string path ) const {
-            if ( std::filesystem::exists( path ) ) {
-                throw std::invalid_argument( "path already exists" );
-            }
-
-            std::ofstream os( path, std::ios::binary );
-            cereal::BinaryOutputArchive ar( os );
-            ar( *this );
-        }
-
-        static Index<Dataset, Hasher, Distance> load_from( std::string path ) {
-            std::ifstream is( path, std::ios::binary );
-            cereal::BinaryInputArchive ar( is );
-
-            Index<Dataset, Hasher, Distance> index;
-            ar( index );
-            return index;
-        }
-
-        template <typename HasherBuilder, typename InputPoint>
-        static Index<Dataset, Hasher, Distance> build_or_load_from( size_t dimensions,
-                                                                    HasherBuilder builder,
-                                                                    size_t repetitions,
-                                                                    std::vector<InputPoint>& points,
-                                                                    std::string path ) {
-            if ( std::filesystem::exists( path ) ) {
-                std::cerr << "loading from file" << std::endl;
-                return load_from( path );
-            } else {
-                Index<Dataset, Hasher, Distance> index( dimensions, builder, repetitions );
-                for ( auto p : points ) {
-                    index.insert( p.begin(), p.end() );
-                }
-                index.rebuild();
-                return index;
-            }
         }
 
         template <typename Iter>

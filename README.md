@@ -4,8 +4,8 @@ This library aims at providing useful building blocks to implement algorithms fo
 
 ## Building
 
-This is, first and foremost, a header only library requiring `C++17` and depending on [`cereal`](https://uscilab.github.io/cereal/index.html) and [`ffht`](https://github.com/FALCONN-LIB/FFHT) (both libraries are vendored in `external`).
-To integrate with other codebases simply place `include/panna` in your include path, while making sure that the headers of the dependencies (i.e. the contents of `external`) are included as well.
+This is, first and foremost, a header only library requiring `C++17` and depending on [`ffht`](https://github.com/FALCONN-LIB/FFHT) (vendored in `external`).
+To integrate with other codebases simply place `include/panna` in your include path, while making sure that the headers of the dependency (i.e. the contents of `external`) are included as well.
 
 That said, the repository includes tests and [examples](https://github.com/Cecca/panna/tree/main/examples), which are built using `cmake` with the usual steps
 
