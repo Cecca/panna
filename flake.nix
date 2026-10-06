@@ -164,7 +164,6 @@
               (ps:
                 with ps; [
                   build
-                  marimo
                   numpy
                   pandas
                   polars
@@ -177,7 +176,6 @@
                   nanobind
                   icecream
                   great-tables
-                  scikit-build-core
                   certifi
                   sigmod-hdbscan.packages.${system}.default
                 ])
