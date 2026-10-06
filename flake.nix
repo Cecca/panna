@@ -60,8 +60,8 @@
         tree-similarity = import ./nix/tree-similarity.nix {inherit pkgs;};
 
         panna-python = python.pkgs.buildPythonPackage {
-          pname = "panna";
-          version = "0.0.1";
+          pname = "pypanna";
+          version = "0.1.0";
           pyproject = true;
           # Only the files the wheel build actually reads: everything else in
           # CMakeLists.txt sits behind `if (NOT SKBUILD)`. Keeping `results/`

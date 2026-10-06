@@ -126,7 +126,7 @@ execute_process(
   OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE nanobind_ROOT)
 find_package(nanobind CONFIG REQUIRED)
 
-nanobind_add_module(_panna_impl NOMINSIZE NB_STATIC python/wrapper.cpp)
+nanobind_add_module(_panna_impl NOMINSIZE NB_STATIC STABLE_ABI python/wrapper.cpp)
 target_link_libraries(_panna_impl PRIVATE Eigen3::Eigen)
 target_compile_definitions(_panna_impl PRIVATE EIGEN_DONT_PARALLELIZE)
 
