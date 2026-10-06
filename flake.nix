@@ -1,4 +1,3 @@
-# TODO: reintroduce the dbg macro somehow
 {
   description = "PANNA: Playground for Approximate Nearest Neighbor Algorithms";
 
@@ -174,7 +173,6 @@
                   h5py
                   nanobind
                   icecream
-                  great-tables
                   certifi
                   sigmod-hdbscan.packages.${system}.default
                 ])
