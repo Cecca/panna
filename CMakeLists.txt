@@ -31,16 +31,21 @@ include_directories("external")
 # FetchContent_Declare(dbg_macro GIT_REPOSITORY https://github.com/sharkdp/dbg-macro FIND_PACKAGE_ARGS)
 # FetchContent_MakeAvailable(dbg_macro)
 
-# Get the current git commit hash
-if(NOT DEFINED ENV{GIT_COMMIT_HASH})
+# Get the current git commit hash. When building from an unpacked sdist there
+# is no git checkout, so we fall back to the package version.
+if(DEFINED ENV{GIT_COMMIT_HASH})
+  set(GIT_COMMIT_HASH "$ENV{GIT_COMMIT_HASH}")
+elseif(EXISTS "${CMAKE_SOURCE_DIR}/.git")
   execute_process(
     COMMAND git rev-parse --short HEAD
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     OUTPUT_VARIABLE GIT_COMMIT_HASH
     OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
   )
-else()
-  set(GIT_COMMIT_HASH "$ENV{GIT_COMMIT_HASH}")
+endif()
+if("${GIT_COMMIT_HASH}" STREQUAL "" AND DEFINED SKBUILD_PROJECT_VERSION)
+  set(GIT_COMMIT_HASH "${SKBUILD_PROJECT_VERSION}")
 endif()
 
 # Configure a header file to pass the git hash to the source code
