@@ -13,7 +13,6 @@ authors = [
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT",
     "Programming Language :: C++",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
@@ -22,6 +21,8 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Operating System :: POSIX :: Linux",
 ]
+license-expression = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "numpy>=1.26",
     "fast-hdbscan>=0.3.2",
@@ -45,5 +46,5 @@ build-backend = "scikit_build_core.build"
 minimum-version = "0.4"
 build-dir = "build/{wheel_tag}"
 wheel.py-api = "cp312"
-wheel.packages = ["python/panna"]
+wheel.packages = ["python/pypanna"]
 sdist.exclude = ["notebooks", "scripts", "results", "nix", ".envrc", ".codegraph"]

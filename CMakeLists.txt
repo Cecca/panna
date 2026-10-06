@@ -130,4 +130,4 @@ nanobind_add_module(_panna_impl NOMINSIZE NB_STATIC STABLE_ABI python/wrapper.cp
 target_link_libraries(_panna_impl PRIVATE Eigen3::Eigen)
 target_compile_definitions(_panna_impl PRIVATE EIGEN_DONT_PARALLELIZE)
 
-install(TARGETS _panna_impl LIBRARY DESTINATION panna)
+install(TARGETS _panna_impl LIBRARY DESTINATION pypanna)
