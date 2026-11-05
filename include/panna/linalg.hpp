@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "ffht/fht_header_only.h"
@@ -546,6 +549,96 @@ namespace panna {
                 in_out.at( i ) *= norm_factor;
             }
 #endif
+        }
+    };
+
+    //! The lower triangular Cholesky factor `L` of a symmetric positive
+    //! definite matrix `G`, such that `G = L L^T`.
+    //!
+    //! The factor is stored packed by rows, using `n (n+1) / 2` entries.
+    class CholeskyFactor {
+        size_t n = 0;
+        std::vector<float> lower;
+
+        //! Index of element (i, j), with `j <= i`, in the packed storage.
+        static constexpr size_t packed_index( size_t i, size_t j ) {
+            return i * ( i + 1 ) / 2 + j;
+        }
+
+    public:
+        CholeskyFactor() {}
+
+        //! Decompose the `n x n` matrix `matrix`, given in row-major order.
+        //! Only the lower triangle of `matrix` is read, the matrix being
+        //! assumed symmetric.
+        CholeskyFactor( const std::vector<float>& matrix, size_t n ):
+            n( n ), lower( n * ( n + 1 ) / 2, 0.0f ) {
+            expect( matrix.size() == n * n );
+            // Cholesky-Banachiewicz, one row at a time. The matrices we deal
+            // with are tiny, so we accumulate in double precision: the cost is
+            // negligible and the factor is better conditioned.
+            for ( size_t i = 0; i < n; i++ ) {
+                for ( size_t j = 0; j <= i; j++ ) {
+                    double sum = static_cast<double>( matrix.at( i * n + j ) );
+                    for ( size_t k = 0; k < j; k++ ) {
+                        sum -= static_cast<double>( lower.at( packed_index( i, k ) ) ) *
+                               static_cast<double>( lower.at( packed_index( j, k ) ) );
+                    }
+                    if ( i == j ) {
+                        if ( !( sum > 0.0 ) ) {
+                            throw std::invalid_argument(
+                                "the matrix is not positive definite: non-positive pivot at index " +
+                                std::to_string( i ) );
+                        }
+                        lower.at( packed_index( i, i ) ) = static_cast<float>( std::sqrt( sum ) );
+                    } else {
+                        lower.at( packed_index( i, j ) ) = static_cast<float>(
+                            sum / static_cast<double>( lower.at( packed_index( j, j ) ) ) );
+                    }
+                }
+            }
+        }
+
+        template <typename Archive>
+        void serialize( Archive& ar ) {
+            ar( n, lower );
+        }
+
+        friend bool operator==( const CholeskyFactor& a, const CholeskyFactor& b ) {
+            return a.n == b.n && a.lower == b.lower;
+        }
+
+        size_t get_dimensions() const {
+            return n;
+        }
+
+        //! The element (i, j) of `L`, which is zero above the diagonal.
+        float operator()( size_t i, size_t j ) const {
+            expect( i < n && j < n );
+            if ( j > i ) {
+                return 0.0f;
+            }
+            return lower.at( packed_index( i, j ) );
+        }
+
+        //! Compute `out = L in`. Both buffers hold `n` floats, and must not
+        //! overlap.
+        void multiply( const float* in, float* out ) const {
+            for ( size_t i = 0; i < n; i++ ) {
+                const float* row = lower.data() + packed_index( i, 0 );
+                float acc = 0.0f;
+                for ( size_t j = 0; j <= i; j++ ) {
+                    acc += row[j] * in[j];
+                }
+                out[i] = acc;
+            }
+        }
+
+        //! Compute `out = L in`, resizing `out` as needed.
+        void multiply( const std::vector<float>& in, std::vector<float>& out ) const {
+            expect( in.size() == n );
+            out.resize( n );
+            multiply( in.data(), out.data() );
         }
     };
 
