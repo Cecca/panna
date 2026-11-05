@@ -32,8 +32,8 @@ without going through `TrieIndex` or `EMST`.
 | Tests/docs | pytest unit tests and `.pyi` type stubs |
 
 Out of scope: `Tensoring`, the `predicates.hpp` functions (`failure_probability`,
-`distance_at_failure_probability`), pickling, README/CHANGELOG updates, and CI
-test steps.
+`distance_at_failure_probability`), `E2LSHBallSampler` (added by the
+entropy-LSH merge), pickling, README/CHANGELOG updates, and CI test steps.
 
 ## Family overview
 
@@ -99,14 +99,16 @@ raises `ValueError` (translated from the C++ `std::invalid_argument`).
 1. `Minhash1Bit::hash`: initialize `cur` to `0`. It is currently read
    uninitialized on the first repetition.
 2. Add `static constexpr size_t get_concatenations()` and `get_repetitions()`
-   to `Minhash1Bit`, and `get_repetitions()` to `Minhash`.
-3. Make `hash` and `hash_single` `const` in both classes, so they can be called
-   from parallel loops.
+   to `Minhash1Bit`, and `get_repetitions()` to `Minhash`. (`Minhash` already
+   has `get_concatenations()`.)
+3. Make `hash` `const` in both classes, so it can be called from parallel
+   loops. (`Minhash::hash_single` is already `const`.)
 4. `hash_single`: bind the `TabulationHash` by `const&` instead of copying the
    8 KB table on every call.
 5. Fix `MinhashBuilder::describe()`, which returns `"MinHash1Bit"`, so that it
    returns `"MinHash"`.
-6. Add Catch2 tests in `test/include/lsh/hash_test.hpp`:
+6. Add Catch2 tests in `test/include/lsh/hash_test.hpp`, next to the existing
+   E2LSH ball-sampler tests:
    - deterministic output under a fixed seed;
    - every `Minhash1Bit` bit is set correctly, including the first repetition;
    - the empirical collision rate on random set pairs is close to
@@ -124,6 +126,10 @@ The value types keep their contents private. Add read-only accessors to
 
 Add a Catch2 check that `get_bits` and `get` agree with `prefix_eq` on random
 values.
+
+Also add `float get_quantization_width() const` to `E2LSH` in
+`euclidean.hpp`. The field is private, and only `E2LSHBallSampler` can reach
+it today, through `friend`.
 
 ### Phase 2: binding infrastructure in `python/wrapper.cpp`
 
@@ -204,9 +210,10 @@ Notes per family:
   estimated.
 - **E2LSH.**
   - Constructor: `E2LSH(quantization_width, dimensions, repetitions)`.
-  - `fit`: `E2LSHBuilder<K>(dimensions).fit(points, repetitions, delta)`,
+  - `fit`: `E2LSHBuilder<K, EuclideanPoints, EuclideanDistance>(dimensions).fit(points, repetitions, delta)`,
     then `build(repetitions)`. The fit runs with the GIL released.
-  - Expose the fitted `quantization_width`.
+  - Expose the fitted `quantization_width` through the new
+    `E2LSH::get_quantization_width()` (Phase 1).
   - Document that codes are `int8` and can wrap around when the quantization
     width is very small relative to the data range.
 - **LatticeLSH.**
@@ -272,6 +279,7 @@ For every family, using small random data:
 
 - `include/panna/lsh/minhash.hpp`: Phase 0 fixes
 - `include/panna/lsh/values.hpp`: accessors
+- `include/panna/lsh/euclidean.hpp`: `E2LSH::get_quantization_width()`
 - `include/panna/lsh/lattice.hpp`: `LatticeLSHBuilder` getters
 - `test/include/lsh/hash_test.hpp`: C++ tests
 - `python/wrapper.cpp`: helpers and six family classes
