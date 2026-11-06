@@ -1,0 +1,53 @@
+# nanobind stubgen pattern file (see `nanobind_add_stub` in CMakeLists.txt and
+# https://nanobind.readthedocs.io/en/latest/typing.html#pattern-files).
+#
+# Each entry is a regular expression matched against the qualified names of
+# the module members (e.g. `_panna_impl.MinHash.hash`), followed by the
+# indented lines that replace the stub of the matching member.
+#
+# `hash_sets` is attached to `MinHash` and `MinHash1Bit` in Python, by
+# `pypanna/__init__.py`, so stubgen does not see it when it imports the
+# extension. The entries below add it to the classes. stubgen has no hook to
+# append members to a class, so they replace the stub of `__module__`, a
+# member of every class that stubgen otherwise skips: they add `hash_sets`
+# without removing anything. Keep them in sync with `_hash_sets`.
+
+\.MinHash\.__module__$:
+    \from typing import Iterable, Literal, overload
+    \from scipy.sparse import sparray, spmatrix
+    \from numpy.typing import NDArray
+    \from numpy import int32, void
+    @overload
+    def hash_sets(self, sets: sparray | spmatrix | Iterable[Iterable[int]], packed: Literal[False] = False) -> NDArray[int32]: ...
+    @overload
+    def hash_sets(self, sets: sparray | spmatrix | Iterable[Iterable[int]], packed: Literal[True]) -> NDArray[void]: ...
+    @overload
+    def hash_sets(self, sets: sparray | spmatrix | Iterable[Iterable[int]], packed: bool = False) -> NDArray[int32] | NDArray[void]:
+        """
+        Hashes a collection of sets of integer tokens (defined in Python).
+
+        A convenience over `hash(indptr, indices, packed)`: `sets` is either a
+        scipy.sparse matrix or array, whose row `i` is set `i`, or an iterable
+        of sets, each an iterable of integer tokens in [0, 2**32). Returns the
+        same as `hash`. See `pypanna.MinHash.hash_sets.__doc__` for details.
+        """
+
+\.MinHash1Bit\.__module__$:
+    \from typing import Iterable, Literal, overload
+    \from scipy.sparse import sparray, spmatrix
+    \from numpy.typing import NDArray
+    \from numpy import uint8, uint32
+    @overload
+    def hash_sets(self, sets: sparray | spmatrix | Iterable[Iterable[int]], packed: Literal[False] = False) -> NDArray[uint8]: ...
+    @overload
+    def hash_sets(self, sets: sparray | spmatrix | Iterable[Iterable[int]], packed: Literal[True]) -> NDArray[uint32]: ...
+    @overload
+    def hash_sets(self, sets: sparray | spmatrix | Iterable[Iterable[int]], packed: bool = False) -> NDArray[uint8] | NDArray[uint32]:
+        """
+        Hashes a collection of sets of integer tokens (defined in Python).
+
+        A convenience over `hash(indptr, indices, packed)`: `sets` is either a
+        scipy.sparse matrix or array, whose row `i` is set `i`, or an iterable
+        of sets, each an iterable of integer tokens in [0, 2**32). Returns the
+        same as `hash`. See `pypanna.MinHash1Bit.hash_sets.__doc__` for details.
+        """

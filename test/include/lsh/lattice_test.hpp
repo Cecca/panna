@@ -73,6 +73,55 @@ namespace panna {
         HashFamily lsh = builder.build(4);
     }
 
+    TEST_CASE( "LatticeLSH and its builder expose offset and scaling factor", "[lsh]" ) {
+        using HashFamily = LatticeLSH<2, EuclideanPoints, EuclideanDistance>;
+
+        panna::seed_global_rng( 1234 );
+
+        const size_t dimensions = 8;
+        EuclideanPoints pts( dimensions );
+        for ( size_t i = 0; i < 1000; i++ ) {
+            pts.push_back_random();
+        }
+
+        HashFamily::Builder builder( dimensions );
+        REQUIRE( builder.get_scaling_factor() == 0.0f );
+        builder.fit( pts, 4, 0.1f );
+        REQUIRE( builder.get_scaling_factor() > 0.0f );
+
+        // the fitted offset is the mean point of the data
+        const std::vector<float>& offset = builder.get_offset();
+        REQUIRE( offset.size() == dimensions );
+        for ( size_t d = 0; d < dimensions; d++ ) {
+            float mean = 0.0f;
+            for ( size_t i = 0; i < pts.size(); i++ ) {
+                std::vector<float> v( dimensions );
+                pts[i].into_vec( v );
+                mean += v.at( d );
+            }
+            mean /= pts.size();
+            REQUIRE( std::abs( offset.at( d ) - mean ) < 1e-4f );
+        }
+
+        // the built hasher uses the very same parameters
+        HashFamily lsh = builder.build( 4 );
+        REQUIRE( lsh.get_scaling_factor() == builder.get_scaling_factor() );
+        REQUIRE( lsh.get_offset() == builder.get_offset() );
+
+        // explicit parameters round-trip
+        std::vector<float> explicit_offset( dimensions, 0.5f );
+        HashFamily explicit_lsh( explicit_offset, 2.5f, dimensions, 4 );
+        REQUIRE( explicit_lsh.get_scaling_factor() == 2.5f );
+        REQUIRE( explicit_lsh.get_offset() == explicit_offset );
+    }
+
+    TEST_CASE( "E2LSH quantization width getter", "[lsh]" ) {
+        for ( float width : { 0.25f, 1.0f, 4.0f } ) {
+            E2LSH<4, EuclideanPoints, EuclideanDistance> lsh( width, 16, 8 );
+            REQUIRE( lsh.get_quantization_width() == width );
+        }
+    }
+
     TEST_CASE( "LatticeLSH empirical collision probabilities" ) {
         using HashFamily = LatticeLSH<1, EuclideanPoints, EuclideanDistance>;
         const float scaling_factor = 1.0;

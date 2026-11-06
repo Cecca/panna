@@ -94,6 +94,15 @@ namespace panna {
             return val;
         }
 
+        //! The raw bits of this value. The `K` concatenations are stored
+        //! right-aligned in the word: concatenation `i` sits at bit `K - 1 - i`
+        //! (so concatenation 0 is the most significant of the `K` used bits),
+        //! consistently with `prefix_eq` and `overwrite`. The hashers leave
+        //! the `32 - K` higher order bits at zero.
+        constexpr uint32_t get_bits() const {
+            return bits;
+        }
+
         //! Check if the given hash value and `this` have the same prefix of
         //! bits, with the understanding that the higher order 32-BITS bits are
         //! not used, hence the prefix starts from that position.
@@ -192,6 +201,17 @@ namespace panna {
 
         void set( size_t idx, Symbol value ) {
             hashes[idx] = value;
+        }
+
+        //! The symbol at concatenation index `idx`.
+        constexpr Symbol get( size_t idx ) const {
+            assert( idx < K );
+            return hashes[idx];
+        }
+
+        //! Pointer to the `K` symbols, in concatenation order.
+        constexpr const Symbol* data() const {
+            return hashes.data();
         }
 
         inline bool prefix_eq( SymbolLshValue<Symbol, K> other, uint8_t prefix ) const {

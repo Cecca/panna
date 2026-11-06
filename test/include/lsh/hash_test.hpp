@@ -3,7 +3,9 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <random>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -405,6 +407,186 @@ namespace panna {
         // for ( float d : { 0.1, 0.2, 0.3 } ) {
         //     float fp = failure_probability( tensored, d, 4, 1, tensored.get_repetitions() );
         // }
+    }
+
+    //! Builds a dataset of `count` random sets over the universe `[0, universe)`.
+    static SparseSets make_random_sets( size_t universe, size_t count ) {
+        SparseSets sets( universe );
+        for ( size_t i = 0; i < count; i++ ) {
+            sets.push_back_random();
+        }
+        return sets;
+    }
+
+    TEST_CASE( "MinHash is deterministic under a fixed seed", "[lsh][minhash]" ) {
+        constexpr uint8_t K = 4;
+        const size_t repetitions = 16;
+        seed_global_rng( 7 );
+        SparseSets sets = make_random_sets( 500, 8 );
+
+        seed_global_rng( 42 );
+        Minhash<K, SparseSets> mh_a( repetitions );
+        Minhash1Bit<K, SparseSets> mh1_a( repetitions );
+        seed_global_rng( 42 );
+        Minhash<K, SparseSets> mh_b( repetitions );
+        Minhash1Bit<K, SparseSets> mh1_b( repetitions );
+        seed_global_rng( 43 );
+        Minhash<K, SparseSets> mh_c( repetitions );
+
+        REQUIRE( mh_a.get_concatenations() == K );
+        REQUIRE( mh_a.get_repetitions() == repetitions );
+        REQUIRE( Minhash1Bit<K, SparseSets>::get_concatenations() == K );
+        REQUIRE( mh1_a.get_repetitions() == repetitions );
+        REQUIRE( MinhashBuilder<K, SparseSets>().describe() == "MinHash" );
+        REQUIRE( Minhash1BitBuilder<K, SparseSets>().describe() == "MinHash1Bit" );
+
+        std::vector<IntLshValue<K>> out_a, out_b, out_c;
+        std::vector<BitwiseLshValue<K>> out1_a, out1_b;
+        bool any_difference = false;
+        for ( size_t i = 0; i < sets.size(); i++ ) {
+            mh_a.hash( sets[i], out_a );
+            mh_b.hash( sets[i], out_b );
+            mh_c.hash( sets[i], out_c );
+            REQUIRE( out_a.size() == repetitions );
+            REQUIRE( out_a == out_b );
+            any_difference |= ( out_a != out_c );
+
+            mh1_a.hash( sets[i], out1_a );
+            mh1_b.hash( sets[i], out1_b );
+            REQUIRE( out1_a.size() == repetitions );
+            REQUIRE( out1_a == out1_b );
+        }
+        // A different seed must yield different hash functions.
+        REQUIRE( any_difference );
+    }
+
+    //! Checks every symbol of `Minhash` and every bit of `Minhash1Bit`, in all
+    //! repetitions, against a reference computed by brute force from the same
+    //! tabulation hash functions (re-created by replaying the seed).
+    template <uint8_t K>
+    static void test_minhash_reference( size_t repetitions ) {
+        seed_global_rng( 99 );
+        SparseSets sets = make_random_sets( 300, 10 );
+
+        const uint64_t seed = 1234;
+        seed_global_rng( seed );
+        // `Minhash` draws its tabulation hashes in order `rep * K + concat`.
+        std::vector<TabulationHash> tabulation;
+        for ( size_t i = 0; i < repetitions * K; i++ ) {
+            tabulation.emplace_back();
+        }
+        seed_global_rng( seed );
+        const Minhash<K, SparseSets> minhash( repetitions );
+        seed_global_rng( seed );
+        const Minhash1Bit<K, SparseSets> minhash1( repetitions );
+
+        std::vector<IntLshValue<K>> out;
+        std::vector<BitwiseLshValue<K>> out1;
+        size_t ones = 0;
+        size_t total_bits = 0;
+        for ( size_t i = 0; i < sets.size(); i++ ) {
+            auto set = sets[i];
+            REQUIRE( set.size() > 0 );
+            minhash.hash( set, out );
+            minhash1.hash( set, out1 );
+            REQUIRE( out.size() == repetitions );
+            REQUIRE( out1.size() == repetitions );
+            for ( size_t rep = 0; rep < repetitions; rep++ ) {
+                std::array<int32_t, K> expected_symbols;
+                uint32_t expected_bits = 0;
+                for ( size_t concat = 0; concat < K; concat++ ) {
+                    const TabulationHash& h = tabulation.at( rep * K + concat );
+                    const uint32_t* best = std::min_element(
+                        set.begin(), set.end(),
+                        [&]( uint32_t a, uint32_t b ) { return h( a ) < h( b ); } );
+                    expected_symbols[concat] = static_cast<int32_t>( *best );
+                    REQUIRE( minhash.hash_single( set, concat, rep ) == *best );
+                    // Concatenation `concat` sits at bit `K - 1 - concat`.
+                    const uint32_t bit = *best % 2;
+                    expected_bits |= bit << ( K - 1 - concat );
+                    ones += bit;
+                    total_bits++;
+                }
+                INFO( "set " << i << ", repetition " << rep );
+                REQUIRE( out.at( rep ) == IntLshValue<K>::make( expected_symbols ) );
+                REQUIRE( out1.at( rep ) == BitwiseLshValue<K>::make( expected_bits ) );
+            }
+        }
+        // Make sure the check is not vacuous.
+        REQUIRE( ones > 0 );
+        REQUIRE( ones < total_bits );
+    }
+
+    TEST_CASE( "MinHash and MinHash1Bit match a brute-force reference", "[lsh][minhash]" ) {
+        test_minhash_reference<1>( 16 );
+        test_minhash_reference<5>( 8 );
+        test_minhash_reference<16>( 8 );
+        test_minhash_reference<32>( 4 );
+    }
+
+    //! Empirical collision rate on random set pairs with a spread of Jaccard
+    //! similarities, compared with `collision_probability` raised to `K` (the
+    //! concatenations are independent). The tolerance is 5 standard
+    //! deviations of the total number of collisions.
+    template <typename Hasher>
+    static void test_minhash_collision_rate( size_t num_pairs, size_t repetitions ) {
+        constexpr size_t K = Hasher::get_concatenations();
+        seed_global_rng( 4321 );
+        const Hasher hasher( repetitions );
+
+        const size_t universe = 1 << 20;
+        std::vector<uint32_t> tokens;
+        std::vector<typename Hasher::Value> out_a, out_b;
+        double collisions = 0;
+        double expected = 0;
+        double variance = 0;
+        auto& rng = get_global_rng();
+        std::uniform_int_distribution<uint32_t> token_dist( 0, universe - 1 );
+        std::uniform_int_distribution<size_t> size_dist( 0, 60 );
+        for ( size_t pair = 0; pair < num_pairs; pair++ ) {
+            // Draw distinct tokens and split them in shared and private parts.
+            const size_t shared = 1 + size_dist( rng );
+            const size_t only_a = size_dist( rng );
+            const size_t only_b = size_dist( rng );
+            std::unordered_set<uint32_t> distinct;
+            while ( distinct.size() < shared + only_a + only_b ) {
+                distinct.insert( token_dist( rng ) );
+            }
+            tokens.assign( distinct.begin(), distinct.end() );
+            std::vector<uint32_t> set_a( tokens.begin(), tokens.begin() + shared + only_a );
+            std::vector<uint32_t> set_b( tokens.begin(), tokens.begin() + shared );
+            set_b.insert( set_b.end(), tokens.begin() + shared + only_a, tokens.end() );
+
+            SparseSets sets( universe );
+            sets.push_back( set_a );
+            sets.push_back( set_b );
+            const float dist = JaccardDistance::compute( sets[0], sets[1] );
+            REQUIRE( std::abs( ( 1 - dist ) -
+                               float( shared ) / ( shared + only_a + only_b ) ) < 1e-5 );
+
+            hasher.hash( sets[0], out_a );
+            hasher.hash( sets[1], out_b );
+            const double p = std::pow( hasher.collision_probability( dist ), K );
+            for ( size_t rep = 0; rep < repetitions; rep++ ) {
+                collisions += ( out_a.at( rep ) == out_b.at( rep ) ) ? 1 : 0;
+            }
+            expected += p * repetitions;
+            variance += p * ( 1 - p ) * repetitions;
+        }
+        const double sigma = std::sqrt( variance );
+        INFO( "K=" << K << " collisions=" << collisions << " expected=" << expected
+                   << " sigma=" << sigma );
+        REQUIRE( std::abs( collisions - expected ) <= 5 * sigma );
+    }
+
+    TEST_CASE( "MinHash empirical collision rate", "[lsh][minhash]" ) {
+        test_minhash_collision_rate<Minhash<1, SparseSets>>( 400, 256 );
+        test_minhash_collision_rate<Minhash<3, SparseSets>>( 400, 256 );
+    }
+
+    TEST_CASE( "MinHash1Bit empirical collision rate", "[lsh][minhash]" ) {
+        test_minhash_collision_rate<Minhash1Bit<1, SparseSets>>( 400, 256 );
+        test_minhash_collision_rate<Minhash1Bit<4, SparseSets>>( 400, 256 );
     }
 
 } // namespace panna

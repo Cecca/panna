@@ -69,6 +69,10 @@ namespace panna {
             return repetitions;
         }
 
+        float get_quantization_width() const {
+            return quantization_width;
+        }
+
         void hash( typename Dataset::PointHandle point, std::vector<Value>& output ) const {
             output.resize( repetitions );
             const float inv_quantization_width = 1.0f / quantization_width;

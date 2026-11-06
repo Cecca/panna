@@ -11,9 +11,19 @@ namespace panna {
         return rng;
     }
 
+    //! The normal distribution used with the global RNG. It is shared so that
+    //! `seed_global_rng` can reset it: `std::normal_distribution` may cache a
+    //! second sample from the previous draw, which would otherwise make the
+    //! draws after seeding depend on the draws before it.
+    static std::normal_distribution<float>& get_global_normal_distribution() {
+        static std::normal_distribution<float> normal( 0, 1 );
+        return normal;
+    }
+
     static void seed_global_rng( const uint64_t seed ) {
         auto& rng = get_global_rng();
         rng.seed( seed );
+        get_global_normal_distribution().reset();
     }
 
     static float sample_random_01() {
@@ -27,13 +37,14 @@ namespace panna {
     }
 
     static size_t sample_int(size_t min, size_t max) {
-        static std::uniform_int_distribution<size_t> unif(min, max);
+        // Not `static`: a static distribution would keep the bounds of the
+        // first call, and sample out of range on later calls with other bounds.
+        std::uniform_int_distribution<size_t> unif(min, max);
         return unif(get_global_rng());
     }
 
     static float sample_random_normal() {
-        static std::normal_distribution<float> normal(0, 1);
-        return normal(get_global_rng());
+        return get_global_normal_distribution()( get_global_rng() );
     }
 
     static float sample_random_normal(std::mt19937_64 &rng) {

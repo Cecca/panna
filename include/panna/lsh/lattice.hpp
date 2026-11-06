@@ -328,6 +328,15 @@ namespace panna {
             return repetitions;
         }
 
+        //! The data offset (translation) given at construction.
+        const std::vector<float>& get_offset() const {
+            return data_offset;
+        }
+
+        float get_scaling_factor() const {
+            return scaling_factor;
+        }
+
         void hash( typename Dataset::PointHandle point, std::vector<Value>& output ) {
             auto& scratch = tl_scratch.at(omp_get_thread_num());
             point.into_vec(scratch);
@@ -463,6 +472,17 @@ namespace panna {
 
         void reset() {
             scaling_factor = 0.0;
+        }
+
+        //! The offset used by `build`: after `fit`, the mean point of the data.
+        const std::vector<float>& get_offset() const {
+            return offset;
+        }
+
+        //! The scaling factor used by `build`: after `fit`, the fitted value
+        //! (or the `PANNA_LATTICE_SCALING_FACTOR` override); 0 if not fitted.
+        float get_scaling_factor() const {
+            return scaling_factor;
         }
 
         void fit( const Dataset& points,

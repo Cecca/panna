@@ -34,6 +34,11 @@ dependencies = [
     "tqdm>=4.70.1",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
 [project.urls]
 Homepage = "https://github.com/Cecca/panna"
 Repository = "https://github.com/Cecca/panna"
@@ -48,6 +53,11 @@ build-dir = "build/{wheel_tag}"
 wheel.py-api = "cp312"
 wheel.packages = ["python/pypanna"]
 sdist.exclude = ["notebooks", "scripts", "results", "nix", ".envrc", ".codegraph", ".github", "paper"]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+python_files = ["test_*.py"]
+addopts = "--import-mode=importlib"
 
 [tool.cibuildwheel]
 # The extension uses the stable ABI (cp312-abi3), so one build per platform suffices.

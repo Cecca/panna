@@ -136,3 +136,16 @@ target_link_libraries(_panna_impl PRIVATE Eigen3::Eigen)
 target_compile_definitions(_panna_impl PRIVATE EIGEN_DONT_PARALLELIZE)
 
 install(TARGETS _panna_impl LIBRARY DESTINATION pypanna)
+
+# Type stubs: `stubgen` imports the freshly built extension (as the top-level
+# module `_panna_impl`, from the directory holding it) and writes
+# `_panna_impl.pyi`, which is installed next to the extension. The import does
+# not need NumPy, which the module loads lazily. `stubgen_patterns.txt` adds
+# the members defined in Python (`MinHash.hash_sets`, ...) to the stub.
+nanobind_add_stub(_panna_impl_stub
+  MODULE _panna_impl
+  OUTPUT _panna_impl.pyi
+  PYTHON_PATH $<TARGET_FILE_DIR:_panna_impl>
+  PATTERN_FILE ${CMAKE_CURRENT_SOURCE_DIR}/python/stubgen_patterns.txt
+  DEPENDS _panna_impl)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/_panna_impl.pyi DESTINATION pypanna)

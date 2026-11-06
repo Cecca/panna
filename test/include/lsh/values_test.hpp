@@ -1,6 +1,7 @@
 #pragma once
 #include <catch2/catch_test_macros.hpp>
 
+#include <random>
 #include <unordered_set>
 
 #include "panna/lsh/values.hpp"
@@ -86,5 +87,96 @@ namespace panna {
         set.insert( BitwiseLshValue<16>::make( 0xaaaa ) );
         REQUIRE( set.size() == 2 );
         REQUIRE( set.count( a ) == 1 );
+    }
+
+    //! Check that `get_bits` agrees with `prefix_eq`: concatenation `i` is bit `K - 1 - i`.
+    template <uint8_t K>
+    static void check_bitwise_accessors( std::mt19937_64& rng ) {
+        const uint32_t low_mask = K == 32 ? 0xFFFFFFFFu : ( ( uint32_t( 1 ) << K ) - 1 );
+        auto bit = []( BitwiseLshValue<K> v, uint8_t i ) { return ( v.get_bits() >> ( K - 1 - i ) ) & 1; };
+        for ( size_t trial = 0; trial < 1000; trial++ ) {
+            const uint32_t abits = static_cast<uint32_t>( rng() ) & low_mask;
+            // flip a random subset of the bits after a random position, so
+            // that the two values share prefixes of any length
+            const uint8_t from = std::uniform_int_distribution<int>( 0, K )( rng );
+            const uint32_t suffix_mask = from == 0 ? low_mask : ( ( uint32_t( 1 ) << ( K - from ) ) - 1 );
+            const uint32_t bbits = abits ^ ( static_cast<uint32_t>( rng() ) & suffix_mask );
+            auto a = BitwiseLshValue<K>::make( abits );
+            auto b = BitwiseLshValue<K>::make( bbits );
+            REQUIRE( a.get_bits() == abits );
+            REQUIRE( b.get_bits() == bbits );
+            for ( uint8_t p = 0; p <= K; p++ ) {
+                bool eq = true;
+                for ( uint8_t i = 0; i < p; i++ ) {
+                    eq = eq && bit( a, i ) == bit( b, i );
+                }
+                REQUIRE( a.prefix_eq( b, p ) == eq );
+            }
+            // `overwrite` writes concatenation `pos_to`, as read by `get_bits`
+            const uint8_t pos_from = std::uniform_int_distribution<int>( 0, K - 1 )( rng );
+            const uint8_t pos_to = std::uniform_int_distribution<int>( 0, K - 1 )( rng );
+            auto c = a;
+            c.overwrite( b, pos_from, pos_to );
+            for ( uint8_t i = 0; i < K; i++ ) {
+                REQUIRE( bit( c, i ) == ( i == pos_to ? bit( b, pos_from ) : bit( a, i ) ) );
+            }
+        }
+    }
+
+    //! Check that `get` and `data` agree with `make` and with `prefix_eq`.
+    template <typename Symbol, uint8_t K>
+    static void check_symbol_accessors( std::mt19937_64& rng ) {
+        using Value = SymbolLshValue<Symbol, K>;
+        // a tiny alphabet, so that random suffixes collide often
+        std::uniform_int_distribution<int> symbol( -1, 1 );
+        for ( size_t trial = 0; trial < 1000; trial++ ) {
+            std::array<Symbol, K> asym, bsym;
+            for ( size_t i = 0; i < K; i++ ) {
+                asym[i] = static_cast<Symbol>( symbol( rng ) );
+            }
+            const uint8_t from = std::uniform_int_distribution<int>( 0, K )( rng );
+            for ( size_t i = 0; i < K; i++ ) {
+                bsym[i] = i < from ? asym[i] : static_cast<Symbol>( symbol( rng ) );
+            }
+            Value a = Value::make( asym );
+            Value b = Value::make( bsym );
+            for ( size_t i = 0; i < K; i++ ) {
+                REQUIRE( a.get( i ) == asym[i] );
+                REQUIRE( b.get( i ) == bsym[i] );
+                REQUIRE( a.data()[i] == asym[i] );
+                REQUIRE( b.data()[i] == bsym[i] );
+            }
+            for ( uint8_t p = 0; p <= K; p++ ) {
+                bool eq = true;
+                for ( uint8_t i = 0; i < p; i++ ) {
+                    eq = eq && a.get( i ) == b.get( i );
+                }
+                REQUIRE( a.prefix_eq( b, p ) == eq );
+            }
+        }
+    }
+
+    TEST_CASE( "BitwiseLshValue::get_bits agrees with prefix_eq", "[lsh][values]" ) {
+        std::mt19937_64 rng( 1234 );
+        check_bitwise_accessors<1>( rng );
+        check_bitwise_accessors<2>( rng );
+        check_bitwise_accessors<5>( rng );
+        check_bitwise_accessors<8>( rng );
+        check_bitwise_accessors<16>( rng );
+        check_bitwise_accessors<31>( rng );
+        check_bitwise_accessors<32>( rng );
+    }
+
+    TEST_CASE( "SymbolLshValue::get agrees with prefix_eq", "[lsh][values]" ) {
+        std::mt19937_64 rng( 1234 );
+        check_symbol_accessors<int8_t, 1>( rng );
+        check_symbol_accessors<int8_t, 8>( rng );
+        check_symbol_accessors<int16_t, 1>( rng );
+        check_symbol_accessors<int16_t, 4>( rng );
+        check_symbol_accessors<int32_t, 2>( rng );
+        check_symbol_accessors<int32_t, 16>( rng );
+        check_symbol_accessors<int64_t, 1>( rng );
+        check_symbol_accessors<int64_t, 3>( rng );
+        check_symbol_accessors<int64_t, 16>( rng );
     }
 } // namespace panna

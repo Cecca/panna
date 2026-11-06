@@ -51,10 +51,12 @@ namespace panna {
 
         static constexpr size_t get_concatenations() { return K; }
 
+        size_t get_repetitions() const { return repetitions; }
+
         uint32_t hash_single( typename Dataset::PointHandle set,
                               size_t concatenation,
                               size_t repetition ) const {
-            TabulationHash hash = hashes.at(repetition * K + concatenation);
+            const TabulationHash& hash = hashes.at(repetition * K + concatenation);
             uint64_t min_hash = std::numeric_limits<uint64_t>::max();
             uint32_t min_token = 0;
             for ( const uint32_t* it = set.begin(); it != set.end(); it++ ) {
@@ -68,7 +70,7 @@ namespace panna {
         }
 
         void hash( typename Dataset::PointHandle point,
-                   std::vector<Value>& output ) {
+                   std::vector<Value>& output ) const {
             // OPTIMIZE: TabulationHasher gives 64 bit hashes, hence we could use
             // its output to hash two repetitions/concatenations
             output.clear();
@@ -103,7 +105,7 @@ namespace panna {
         }
 
         std::string describe() const {
-            return "MinHash1Bit";
+            return "MinHash";
         }
     };
 
@@ -122,12 +124,16 @@ namespace panna {
         Minhash1Bit( size_t repetitions ): repetitions(repetitions), minhash( repetitions ) {
         }
 
+        static constexpr size_t get_concatenations() { return K; }
+
+        size_t get_repetitions() const { return repetitions; }
+
         void hash( typename Dataset::PointHandle point,
-                   std::vector<Value>& output ) {
+                   std::vector<Value>& output ) const {
             // OPTIMIZE: TabulationHasher gives 64 bit hashes, hence we could use
             // its output to hash two repetitions/concatenations
             output.clear();
-            uint32_t cur;
+            uint32_t cur = 0;
             for ( size_t rep = 0; rep < repetitions; rep++ ) {
                 for ( size_t concat = 0; concat < K; concat++ ) {
                     int32_t code = minhash.hash_single( point, concat, rep ) % 2;

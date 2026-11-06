@@ -1,7 +1,8 @@
 ---
 title: Python bindings for the LSH families
-status: pending
+status: done
 created: 2026-11-05
+completed: 2026-11-05
 ---
 
 # Python bindings for the LSH families
@@ -218,9 +219,10 @@ Notes per family:
     width is very small relative to the data range.
 - **LatticeLSH.**
   - Constructor: `LatticeLSH(offset_vec, scaling_factor, dimensions, repetitions)`.
-  - `fit`: `LatticeLSHBuilder<K>(dimensions).fit(points, 0.0f, repetitions, delta)`.
-    The distance upper bound argument is unused by the current
-    implementation. Read back the fitted `offset` and `scaling_factor`; this
+  - `fit`: `LatticeLSHBuilder<K>(dimensions).fit(points, repetitions, delta)`.
+    (Corrected during implementation: the 4-argument overload does use the
+    distance upper bound, and passing 0 yields a tiny scaling factor; the
+    3-argument overload is the data-driven one.) Read back the fitted `offset` and `scaling_factor`; this
     needs getters on `LatticeLSHBuilder` (small C++ addition).
   - Document that the `PANNA_LATTICE_SCALING_FACTOR` environment variable
     still overrides fitting.
@@ -263,7 +265,8 @@ For every family, using small random data:
 - **Collision probability:** for pairs at controlled distances, the empirical
   per-repetition collision rate with `k=1` is within a binomial tolerance of
   `collision_probability(d)`.
-  - Simhash: angle.
+  - Simhash: pairs at a chosen angle, converted to cosine distance
+    (`collision_probability` takes cosine distance, like CrossPolytope).
   - CrossPolytope: cosine distance.
   - E2LSH and LatticeLSH: Euclidean distance with an explicit
     width or scaling factor.
@@ -301,3 +304,106 @@ For every family, using small random data:
 - **Per-thread scratch.** The scratch-buffer assumption in `CrossPolytope`
   and `LatticeLSH` (`omp_get_thread_num()` < the thread count at construction)
   is fragile. Phase 2 guards it explicitly and Phase 5 tests it.
+
+## Implementation summary (2026-11-05)
+
+All phases are implemented. Nothing is committed yet.
+
+### Verification
+
+- `pytest` (from the repo root, inside `nix develop`, after
+  `pip install --no-build-isolation .`): 127 passed in about 12 s. It also
+  passes three times in a row and with `OMP_NUM_THREADS=1`. The collision
+  tests were run with 20 seeds, and the worst deviation used 48% of the
+  5σ tolerance.
+- C++ `build/cpp/tests "[lsh]"`: all pass (8 test cases).
+- The full C++ suite: 84/86 pass. The 2 failures (`pseudorandom rotations`,
+  and the order-dependent `EMST mutual reachability distance`) fail the same
+  way without these changes.
+- mypy and pyright on an example script that uses the stubs: they report
+  exactly the 3 errors planted in it.
+- Extension size: 2,374,896 bytes, up from 1,850,576 (+28%). A full build
+  takes about 60–80 s.
+
+### Changes by file
+
+- `include/panna/lsh/minhash.hpp`: the Phase 0 fixes as planned.
+- `include/panna/lsh/values.hpp`: `BitwiseLshValue::get_bits()`, and
+  `SymbolLshValue::get(i)` and `data()`.
+- `include/panna/lsh/euclidean.hpp`: `E2LSH::get_quantization_width()`.
+- `include/panna/lsh/lattice.hpp`: `get_offset()` and `get_scaling_factor()`
+  on both `LatticeLSH` and `LatticeLSHBuilder`.
+- `include/panna/data.hpp` (not planned): `SparseSets::operator[]` no longer
+  throws for an empty set stored last.
+- `include/panna/rand.hpp` (not planned):
+  - `seed_global_rng` now resets the shared normal distribution. Before, a
+    cached spare sample meant the same seed could give different hashers.
+  - `sample_int` no longer uses a `static` distribution, which kept the
+    bounds of its first call. This broke `LatticeLSH.fit` on a large dataset
+    followed by a smaller one.
+- `python/wrapper.cpp`:
+  - The helpers from Phase 2 and the six family classes.
+  - A module-level `global_rng_mutex`. Hasher construction, `fit` and
+    `set_seed` release the GIL and seed/sample under this mutex.
+  - The five old copy loops now use `to_dataset`.
+- `python/pypanna/__init__.py`: the `hash_sets` shim.
+- `python/pypanna/py.typed` and `python/stubgen_patterns.txt` (new). The
+  pattern file adds `hash_sets` to the generated stub.
+- `CMakeLists.txt`: `nanobind_add_stub` and installation of the `.pyi`.
+- `pyproject.toml`: a `dev` dependency group with pytest, and
+  `[tool.pytest.ini_options]` (`testpaths`, `--import-mode=importlib`).
+  `uv.lock` was updated offline.
+- Tests:
+  - `test/include/lsh/hash_test.hpp`: MinHash tests.
+  - `test/include/lsh/values_test.hpp`: accessor tests against
+    `prefix_eq`.
+  - `test/include/lsh/lattice_test.hpp`: getter tests.
+  - `python/tests/test_lsh.py` (new).
+
+### Deviations from the plan
+
+- **Signature order.** Constructors take `dimensions, repetitions`, then the
+  required family parameter, then `k` and the other defaults. All arguments
+  work as keywords.
+- **`collision_probability`.**
+  - It returns the probability for a single concatenation, not `**k`.
+  - The cosine families take a cosine distance.
+  - NumPy scalars return a Python `float`. Any ndarray, including size 1 or
+    0-d, returns a `float32` array of the same shape.
+- **Thread safety.** `hash` on `CrossPolytope` and `LatticeLSH`, whose
+  `hash` is not `const`, is serialized per object with a mutex. Without it,
+  concurrent Python threads would share scratch slots. The OpenMP team is
+  capped at `min(threads at construction, current max threads)`.
+- **`fit`.**
+  - It takes 2-D data only.
+  - `LatticeLSH.fit` needs at least 2 points; the EMST code is undefined on
+    1 point.
+  - `E2LSH.fit` raises if the fitted width is not positive (e.g. all-zero
+    data).
+  - `E2LSH.fit` accepts `delta` and validates it, but the C++ heuristic
+    ignores it.
+- **`from_csr`.** It also requires `indptr[0] == 0`. Tokens come in as
+  int64, so negative values are rejected instead of wrapping.
+- **CrossPolytope `dimensions`.** It is limited to 16384, so codes fit in
+  `int16`.
+- **Stubs.**
+  - `hash` uses `@overload` on `packed: Literal[False|True]`.
+  - Dense inputs are typed `NDArray[Any]`, not `ArrayLike`, because Python
+    lists are rejected at runtime.
+- **Not tested.** Stub generation in an isolated build (cibuildwheel). It
+  is expected to work, because stubgen does not need NumPy.
+
+### Follow-ups noticed (not done)
+
+- `LatticeLSHBuilder(float offset, float scaling_factor, size_t dims)`
+  initializes `std::vector<float> offset(offset)` with the float as a
+  *size*. This is a bug, and the bindings avoid this constructor.
+- `SparseSets::push_back` rejects `token > dimensions`; it should probably
+  be `>=`.
+- The existing `MinHash1Bit` collision test in `hash_test.hpp` uses
+  `accepted_deviation = 10`, so it can never fail.
+- `sample_random_normal(std::mt19937_64&)` still keeps a static distribution
+  with a cached spare sample. It is only used by `E2LSHBallSampler`.
+- `EMST`/`TrieIndex` use the global RNG without `global_rng_mutex`.
+- With the default `estimation_eps=5e-3`, `CrossPolytope` construction takes
+  several seconds per instance, because it estimates the probability table.

@@ -435,7 +435,9 @@ namespace panna {
 
         PointHandle operator[]( size_t i ) const {
             PointHandle handle;
-            handle.tokens = &set_data.at(starts.at(i));
+            // `set_data.data() + start` rather than `&set_data.at( start )`:
+            // an empty set stored last has `start == set_data.size()`.
+            handle.tokens = set_data.data() + starts.at( i );
             handle.set_size = starts.at(i + 1) - starts.at(i);
             return handle;
         }
